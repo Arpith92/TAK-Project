@@ -14,7 +14,7 @@ client_name = st.text_input("Enter the client name")
 
 
 # File paths
-input_folder = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/test.xlsx"
+input_folder = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/{date}.xlsx"
 code_file_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
 bhasmarathi_type_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 
