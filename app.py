@@ -5,12 +5,12 @@ import locale
 import numpy as np
 
 # File paths
-input_folder = r"C:\Users\Arpith Shetty\Desktop\TAK Project\Ver_1\Input"
-code_file_path = r"C:\Users\Arpith Shetty\Desktop\TAK Project\Ver_1\code.xlsx"
-bhasmarathi_type_path = r"C:\Users\Arpith Shetty\Desktop\TAK Project\Ver_1\Bhasmarathi_Type.xlsx"
+input_folder = r"https://github.com/Arpith92/TAK-Project/blob/main/test.xlsx"
+code_file_path = r"https://github.com/Arpith92/TAK-Project/blob/main/Code.xlsx"
+bhasmarathi_type_path = r"https://github.com/Arpith92/TAK-Project/blob/main/Bhasmarathi_Type.xlsx"
 
 # Load Stay_City data
-stay_city_data = r"C:\Users\Arpith Shetty\Desktop\TAK Project\Ver_1\Stay_City.xlsx"
+stay_city_data = r"https://github.com/Arpith92/TAK-Project/blob/main/Code.xlsx/Stay_City.xlsx"
 try:
     stay_city_data = pd.read_excel(stay_city_data, sheet_name="Stay_City")
 except Exception as e:
