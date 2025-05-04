@@ -9,6 +9,10 @@ import streamlit as st
 date = st.text_input("Enter the date (dd-mmm-yyyy)")
 client_name = st.text_input("Enter the client name")
 
+#date = 01-April-2025
+#client_name = Saurav Saini
+
+
 # File paths
 input_folder = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/test.xlsx"
 code_file_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
