@@ -140,9 +140,6 @@ for date, events in grouped_itinerary.items():
         itinerary_message += f"- {event}  \n"
     day_number += 1
 
-# Display in Streamlit
-st.markdown(itinerary_message)
-
 # Add the total package cost at the end
 itinerary_message += f"\n*Package cost: {formatted_cost1}/-*\n{details_line}"
 
@@ -337,21 +334,20 @@ TravelAajKal® is a registered trademark of Achala Holidays Pvt Ltd.
 """
 
 # Print the final output
-print(final_message)
+st.markdown(final_message)
 
 # Print or add the exclusions section to your final output
-print(exclusions_section)
+st.markdown(exclusions_section)
 
 # Print or add the important notes section to your final output
-print(important_notes_section)
+st.markdown(important_notes_section)
 
-print(Cancellation_Policy)
+st.markdown(Cancellation_Policy)
 
-print(Payment_terms)
+st.markdown(Payment_terms)
 
 # Print or append this section to your f4inal output
-print(booking_confirmation)
-
+st.markdown(booking_confirmation)
 
 st.markdown("---")
 st.subheader("Itinerary Summary")
