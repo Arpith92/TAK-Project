@@ -42,42 +42,54 @@ if date and client_name:
     except Exception as e:
         st.error(f"Error loading code file: {e}")
 
-#try:
- #   stay_city_data = pd.read_excel(stay_city_data, sheet_name="Stay_City")
-#except Exception as e:
- #   print(f"Error loading Stay_City file: {e}")
-  #  exit()
+# Match codes and generate itinerary
+                itinerary = []
+                for _, row in client_data.iterrows():
+                    code = row.get('Code', None)
+                    if code is None:
+                        itinerary.append({
+                            'Date': row.get('Date', 'N/A'),
+                            'Time': row.get('Time', 'N/A'),
+                            'Description': "No code provided in row"
+                        })
+                        continue
 
-# Input date and client name
-#date = input("Enter the date (dd-mmm-yyyy): ").strip()
-#client_name = input("Enter the client name: ").strip()
+                    particulars = code_data.loc[code_data['Code'] == code, 'Particulars'].values
+                    if particulars.size > 0:
+                        description = particulars[0]
+                        itinerary.append({
+                            'Date': row.get('Date', 'N/A'),
+                            'Time': row.get('Time', 'N/A'),
+                            'Description': description
+                        })
+                    else:
+                        itinerary.append({
+                            'Date': row.get('Date', 'N/A'),
+                            'Time': row.get('Time', 'N/A'),
+                            'Description': f"No description found for code {code}"
+                        })
 
-#date = st.text_input("Enter the date (dd-mmm-yyyy)")
-#client_name = st.text_input("Enter the client name")
+                st.subheader("Generated Itinerary")
+                st.dataframe(pd.DataFrame(itinerary))
 
-#df['Time'] = df['Time'].fillna("")
+            except Exception as e:
+                st.error(f"Error loading Code.xlsx: {e}")
 
-# Input date and client name
-#date = "10-Dec-2024"
-#client_name = "Himangani"
+    except Exception as e:
+        st.error(f"Error loading input Excel file: {e}")
+else:
+    st.info("Please enter both the date and client name above to load data.")
 
-# File selection
-#input_file = os.path.join(input_folder, f"{date}.xlsx")
-#if not os.path.exists(input_file):
- #   print(f"Error: File {input_file} does not exist.")
-  #  exit()
 
-# Load input file and search for client sheet
-#try:
- #   input_data = pd.ExcelFile(input_file)
-#except Exception as e:
- #   print(f"Error loading file {input_file}: {e}")
-  #  exit()
 
-#if client_name not in input_data.sheet_names:
- #   print(f"Error: Sheet named '{client_name}' not found in file {input_file}.")
-  #  print("Available sheets:", input_data.sheet_names)
-   # exit()
+
+
+
+
+
+
+
+
 
 # Load the client sheet
 client_data = input_data.parse(sheet_name=client_name)
