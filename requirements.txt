@@ -1,8 +1,5 @@
-streamlit
-pandas==1.5.3
-numpy>=1.25.0
-openpyxl==3.0.10
-matplotlib==3.6.3
-setuptools>=65.0.0
-wheel
-cython
+pandas==2.2.2
+numpy==1.26.4
+openpyxl==3.1.2
+matplotlib==3.8.4
+streamlit==1.35.0
