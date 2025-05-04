@@ -3,23 +3,58 @@ import pandas as pd
 import math
 import locale
 import numpy as np
+import streamlit as st
+
+# Input fields
+date = st.text_input("Enter the date (dd-mmm-yyyy)")
+client_name = st.text_input("Enter the client name")
 
 # File paths
-input_folder = r"https://github.com/Arpith92/TAK-Project/blob/main/test.xlsx"
-code_file_path = r"https://github.com/Arpith92/TAK-Project/blob/main/Code.xlsx"
-bhasmarathi_type_path = r"https://github.com/Arpith92/TAK-Project/blob/main/Bhasmarathi_Type.xlsx"
+input_folder = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/test.xlsx"
+code_file_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
+bhasmarathi_type_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 
 # Load Stay_City data
-stay_city_data = r"https://github.com/Arpith92/TAK-Project/blob/main/Code.xlsx/Stay_City.xlsx"
-try:
-    stay_city_data = pd.read_excel(stay_city_data, sheet_name="Stay_City")
-except Exception as e:
-    print(f"Error loading Stay_City file: {e}")
-    exit()
+stay_city_data = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx/Stay_City.xlsx"
+
+if date and client_name:
+    try:
+        # Load input Excel and check for client sheet
+        input_data = pd.ExcelFile(input_folder)
+        if client_name not in input_data.sheet_names:
+            st.error(f"Sheet '{client_name}' not found in {date}.xlsx")
+            st.write("Available sheets:", input_data.sheet_names)
+        else:
+            client_data = input_data.parse(sheet_name=client_name)
+            st.success("Client data loaded successfully!")
+            st.write(client_data)
+    except Exception as e:
+        st.error(f"Error loading input Excel: {e}")
+
+    try:
+        code_data = pd.read_excel(code_file_url, sheet_name="Code")
+        st.success("Code file loaded successfully!")
+        st.write(code_data)
+    except Exception as e:
+        st.error(f"Error loading code file: {e}")
+
+
+
+
+
+
+#try:
+ #   stay_city_data = pd.read_excel(stay_city_data, sheet_name="Stay_City")
+#except Exception as e:
+ #   print(f"Error loading Stay_City file: {e}")
+  #  exit()
 
 # Input date and client name
-date = input("Enter the date (dd-mmm-yyyy): ").strip()
-client_name = input("Enter the client name: ").strip()
+#date = input("Enter the date (dd-mmm-yyyy): ").strip()
+#client_name = input("Enter the client name: ").strip()
+
+#date = st.text_input("Enter the date (dd-mmm-yyyy)")
+#client_name = st.text_input("Enter the client name")
 
 #df['Time'] = df['Time'].fillna("")
 
@@ -28,22 +63,22 @@ client_name = input("Enter the client name: ").strip()
 #client_name = "Himangani"
 
 # File selection
-input_file = os.path.join(input_folder, f"{date}.xlsx")
-if not os.path.exists(input_file):
-    print(f"Error: File {input_file} does not exist.")
-    exit()
+#input_file = os.path.join(input_folder, f"{date}.xlsx")
+#if not os.path.exists(input_file):
+ #   print(f"Error: File {input_file} does not exist.")
+  #  exit()
 
 # Load input file and search for client sheet
-try:
-    input_data = pd.ExcelFile(input_file)
-except Exception as e:
-    print(f"Error loading file {input_file}: {e}")
-    exit()
+#try:
+ #   input_data = pd.ExcelFile(input_file)
+#except Exception as e:
+ #   print(f"Error loading file {input_file}: {e}")
+  #  exit()
 
-if client_name not in input_data.sheet_names:
-    print(f"Error: Sheet named '{client_name}' not found in file {input_file}.")
-    print("Available sheets:", input_data.sheet_names)
-    exit()
+#if client_name not in input_data.sheet_names:
+ #   print(f"Error: Sheet named '{client_name}' not found in file {input_file}.")
+  #  print("Available sheets:", input_data.sheet_names)
+   # exit()
 
 # Load the client sheet
 client_data = input_data.parse(sheet_name=client_name)
