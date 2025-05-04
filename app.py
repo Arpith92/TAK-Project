@@ -2,15 +2,7 @@ import os
 import pandas as pd
 import math
 import locale
-import numpy as np
 import streamlit as st
-
-# Input fields
-#date = st.text_input("Enter the date (dd-mmm-yyyy)")
-#client_name = st.text_input("Enter the client name")
-
-#date = 01-April-2025
-#client_name = Saurav Saini
 
 # Input fields
 date = st.text_input("Enter the date (dd-mmm-yyyy)")
@@ -18,12 +10,11 @@ client_name = st.text_input("Enter the client name")
 
 # Define raw GitHub URLs
 code_file_url = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
-input_file_url = f"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/{date}.xlsx"
 bhasmarathi_type_url = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 
 if date and client_name:
+    input_file_url = f"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/{date}.xlsx"
     try:
-        # Load input Excel and check for client sheet
         input_data = pd.ExcelFile(input_file_url)
         if client_name not in input_data.sheet_names:
             st.error(f"Sheet '{client_name}' not found in {date}.xlsx")
@@ -31,169 +22,126 @@ if date and client_name:
         else:
             client_data = input_data.parse(sheet_name=client_name)
             st.success("Client data loaded successfully!")
-            st.write(client_data)
-    except Exception as e:
-        st.error(f"Error loading input Excel: {e}")
+            st.dataframe(client_data)
 
-    try:
-        code_data = pd.read_excel(code_file_url, sheet_name="Code")
-        st.success("Code file loaded successfully!")
-        st.write(code_data)
-    except Exception as e:
-        st.error(f"Error loading code file: {e}")
+            # Load Code.xlsx
+            try:
+                code_data = pd.read_excel(code_file_url, sheet_name="Code")
+                st.success("Code file loaded successfully!")
 
-# Match codes and generate itinerary
+                # Generate Itinerary
                 itinerary = []
                 for _, row in client_data.iterrows():
                     code = row.get('Code', None)
-                    if code is None:
+                    if pd.isna(code):
                         itinerary.append({
                             'Date': row.get('Date', 'N/A'),
                             'Time': row.get('Time', 'N/A'),
-                            'Description': "No code provided in row"
+                            'Description': "No code provided"
                         })
                         continue
-
                     particulars = code_data.loc[code_data['Code'] == code, 'Particulars'].values
-                    if particulars.size > 0:
-                        description = particulars[0]
-                        itinerary.append({
-                            'Date': row.get('Date', 'N/A'),
-                            'Time': row.get('Time', 'N/A'),
-                            'Description': description
-                        })
-                    else:
-                        itinerary.append({
-                            'Date': row.get('Date', 'N/A'),
-                            'Time': row.get('Time', 'N/A'),
-                            'Description': f"No description found for code {code}"
-                        })
+                    description = particulars[0] if len(particulars) > 0 else f"No description for code {code}"
+                    itinerary.append({
+                        'Date': row.get('Date', 'N/A'),
+                        'Time': row.get('Time', 'N/A'),
+                        'Description': description
+                    })
 
+                itinerary_df = pd.DataFrame(itinerary)
                 st.subheader("Generated Itinerary")
-                st.dataframe(pd.DataFrame(itinerary))
+                st.dataframe(itinerary_df)
+
+                # Calculate days/nights
+                start_date = pd.to_datetime(client_data['Date'].min())
+                end_date = pd.to_datetime(client_data['Date'].max())
+                total_days = (end_date - start_date).days + 1
+                total_nights = total_days - 1
+                total_pax = int(client_data['Total Pax'].iloc[0])
+                night_text = "Night" if total_nights == 1 else "Nights"
+                person_text = "Person" if total_pax == 1 else "Persons"
+
+                # Generate route
+                route_parts = []
+                for code in client_data['Code']:
+                    matched = code_data.loc[code_data['Code'] == code, 'Route']
+                    if not matched.empty:
+                        route_parts.append(matched.iloc[0])
+                route = '-'.join(route_parts).replace(' -', '-').replace('- ', '-')
+                route_list = route.split('-')
+                final_route = '-'.join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i - 1]])
+
+                # Cost calculation
+                def calculate_package_cost(df):
+                    cost = df['Car Cost'].sum() + df['Hotel Cost'].sum() + df['Bhasmarathi Cost'].sum()
+                    return math.ceil(cost / 1000) * 1000 - 1
+
+                locale.setlocale(locale.LC_ALL, 'en_IN')
+                total_package_cost = calculate_package_cost(client_data)
+                formatted_cost = locale.format_string("%d", total_package_cost, grouping=True)
+
+                # Vehicle/Hotel/Bhasmarathi details
+                car_types = '-'.join(client_data['Car Type'].dropna().unique())
+                hotel_types = '-'.join(client_data['Hotel Type'].dropna().unique())
+
+                try:
+                    bhas_data = pd.read_excel(bhasmarathi_type_url)
+                    bhasmarathi_types = client_data['Bhasmarathi Type'].dropna().unique()
+                    bhasmarathi_descriptions = [
+                        bhas_data.loc[bhas_data['Bhasmarathi Type'] == btype, 'Description'].values[0]
+                        for btype in bhasmarathi_types if not bhas_data.loc[bhas_data['Bhasmarathi Type'] == btype].empty
+                    ]
+                    bhasmarathi_desc_str = '-'.join(bhasmarathi_descriptions)
+                except Exception as e:
+                    st.error(f"Error loading Bhasmarathi_Type: {e}")
+                    bhasmarathi_desc_str = ""
+
+                details_line = f"({car_types},{hotel_types},{bhasmarathi_desc_str})"
+
+                # Summary
+                st.markdown("---")
+                st.subheader("Itinerary Summary")
+                st.markdown(f"**Client:** {client_name}")
+                st.markdown(f"**Dates:** {start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}")
+                st.markdown(f"**Days:** {total_days}, **{total_nights} {night_text}**, **{total_pax} {person_text}")
+                st.markdown(f"**Route:** {final_route}")
+                st.markdown(f"**Package Cost:** ₹ {formatted_cost}")
+                st.markdown(f"**Details:** {details_line}")
 
             except Exception as e:
                 st.error(f"Error loading Code.xlsx: {e}")
 
     except Exception as e:
-        st.error(f"Error loading input Excel file: {e}")
+        st.error(f"Error loading input Excel: {e}")
 else:
-    st.info("Please enter both the date and client name above to load data.")
-
-
-# Calculate total days and nights
-start_date = pd.to_datetime(client_data['Date'].min())
-end_date = pd.to_datetime(client_data['Date'].max())
-total_days = (end_date - start_date).days + 1
-total_nights = total_days - 1
-
-# Get total pax
-total_pax = int(client_data['Total Pax'].iloc[0])
-
-# Determine the correct singular or plural for nights
-night_text = "Night" if total_nights == 1 else "Nights"
-
-# Determine the correct singular or plural for nights
-person_text = "Person" if {total_pax} == 1 else "Persons"
-
-# Generate route by matching codes
-route_parts = []
-for code in client_data['Code']:
-    matched_routes = code_data.loc[code_data['Code'] == code, 'Route']
-    if not matched_routes.empty:
-        route_parts.append(matched_routes.iloc[0])
-
-# Join the routes with a separator and ensure no unnecessary spaces
-route = '-'.join(route_parts).replace(' -', '-').replace('- ', '-')
-
-# Remove consecutive duplicate city names
-route_list = route.split('-')
-final_route = '-'.join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i - 1]])
-
-# Join cleaned route list with "-"
-route = "-".join(route_list)
-
-# Calculate total package cost (from single sheet with all relevant columns)
-def calculate_package_cost(input_data):
-    # Sum the relevant costs from the columns in the same sheet
-    car_cost = input_data['Car Cost'].sum()
-    hotel_cost = input_data['Hotel Cost'].sum()
-    bhasmarathi_cost = input_data['Bhasmarathi Cost'].sum()
-    
-    total_cost = car_cost + hotel_cost + bhasmarathi_cost
-    # Apply ceiling to the sum, subtract 1 as per your formula
-    total_package_cost = math.ceil(total_cost / 1000) * 1000 - 1
-    return total_package_cost
-
-locale.setlocale(locale.LC_ALL, 'en_IN')
-total_package_cost = calculate_package_cost(client_data)
-formatted_cost = int(locale.format_string("%d", total_package_cost, grouping=True).replace(",", ""))
-formatted_cost1 =(f"{formatted_cost:,}".replace(",", "X").replace("X", ",", 1))
-
-# Retrieve package cost
-#total_package_cost = calculate_package_cost(client_data)
-
-# Extract car types, hotel types, and Bhasmarathi descriptions
-car_types = client_data['Car Type'].dropna().unique()
-car_types_str = '-'.join(car_types)
-
-hotel_types = client_data['Hotel Type'].dropna().unique()
-hotel_types_str = '-'.join(hotel_types)
-
-# Load Bhasmarathi type mapping
-if not os.path.exists(bhasmarathi_type_path):
-    print(f"Error: File {bhasmarathi_type_path} does not exist.")
-    exit()
-
-try:
-    bhasmarathi_data = pd.read_excel(bhasmarathi_type_path)
-except Exception as e:
-    print(f"Error loading Bhasmarathi_Type file: {e}")
-    exit()
-
-bhasmarathi_types = client_data['Bhasmarathi Type'].dropna().unique()
-bhasmarathi_descriptions = []
-
-for bhas_type in bhasmarathi_types:
-    match = bhasmarathi_data.loc[bhasmarathi_data['Bhasmarathi Type'] == bhas_type, 'Description']
-    if not match.empty:
-        bhasmarathi_descriptions.append(match.iloc[0])
-
-bhasmarathi_desc_str = '-'.join(bhasmarathi_descriptions)
-
-# Combine into final line
-details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})"
+    st.info("Please enter both the date and client name to continue.")
 
 # Generate the itinerary message
-greeting = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
-plan = f"*Plan:- {total_days}Days and {total_nights}{night_text} {final_route} for {total_pax} {person_text}*"
+greeting = f"**Greetings from TravelAajkal**  \n\n**Client Name:** {client_name}  \n"
+plan = f"**Plan:** {total_days} Days and {total_nights} {night_text} | Route: {final_route} | {total_pax} {person_text}  \n\n"
+itinerary_message = greeting + plan + "**Itinerary:**  \n"
 
-# Start building the itinerary
-itinerary_message = greeting + plan + "\n\n*Itinerary:*\n"
-
-# Group by date and add events to the itinerary
+# Group itinerary entries by date
 grouped_itinerary = {}
-
 for entry in itinerary:
-    if entry['Date'] != 'N/A' and pd.notna(entry['Date']):
-        date = pd.to_datetime(entry['Date']).strftime('%d-%b-%Y')  # Format the date
-        if date not in grouped_itinerary:
-            grouped_itinerary[date] = []
-        grouped_itinerary[date].append(f"{entry['Time']}: {entry['Description']}")
+    entry_date = entry['Date']
+    if entry_date != 'N/A' and pd.notna(entry_date):
+        formatted_date = pd.to_datetime(entry_date).strftime('%d-%b-%Y')
+        if formatted_date not in grouped_itinerary:
+            grouped_itinerary[formatted_date] = []
+        time = entry['Time'] if pd.notna(entry['Time']) else ""
+        grouped_itinerary[formatted_date].append(f"{time} - {entry['Description']}".strip())
 
-# Iterate over the grouped itinerary to format it
-day_number = 1  # Initialize the day number for the first day
-first_day = True  # Flag to track the first day for adding time
+# Build formatted itinerary
+day_number = 1
 for date, events in grouped_itinerary.items():
-    itinerary_message += f"\n*Day{day_number}:{date}*\n"  # Add day number
+    itinerary_message += f"\n**Day {day_number}: {date}**  \n"
     for event in events:
-        if first_day:
-            itinerary_message += f"{event}\n"
-            first_day = False
-        else:
-            itinerary_message += f"{event[5:]}\n"  # Remove time for other days
-    
-    day_number += 1  # Increment the day number for the next iteration
+        itinerary_message += f"- {event}  \n"
+    day_number += 1
+
+# Display in Streamlit
+st.markdown(itinerary_message)
 
 # Add the total package cost at the end
 itinerary_message += f"\n*Package cost: {formatted_cost1}/-*\n{details_line}"
@@ -403,3 +351,64 @@ print(Payment_terms)
 
 # Print or append this section to your f4inal output
 print(booking_confirmation)
+
+
+st.markdown("---")
+st.subheader("Itinerary Summary")
+
+# Display the route and trip info
+st.markdown(f"**Client Name:** {client_name}")
+st.markdown(f"**Date Range:** {start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}")
+st.markdown(f"**Total Days:** {total_days}, **{total_nights} {night_text}**, **{total_pax} {person_text}**")
+st.markdown(f"**Route:** {final_route}")
+st.markdown(f"**Package Cost:** ₹ {formatted_cost1}")
+st.markdown(f"**Details:** {details_line}")
+
+# Convert itinerary to HTML for printing
+itinerary_df = pd.DataFrame(itinerary)
+itinerary_html = itinerary_df.to_html(index=False)
+
+# Custom HTML and CSS for printing
+print_html = f"""
+    <style>
+        @media print {{
+            body {{
+                font-family: Arial, sans-serif;
+            }}
+            .no-print {{
+                display: none;
+            }}
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+        }}
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #f2f2f2;
+        }}
+    </style>
+
+    <div>
+        <h2>Travel Itinerary</h2>
+        <p><strong>Client:</strong> {client_name}</p>
+        <p><strong>Dates:</strong> {start_date.strftime('%d-%b-%Y')} to {end_date.strftime('%d-%b-%Y')}</p>
+        <p><strong>Route:</strong> {final_route}</p>
+        <p><strong>Cost:</strong> ₹ {formatted_cost1}</p>
+        <p><strong>Details:</strong> {details_line}</p>
+        <br/>
+        {itinerary_html}
+    </div>
+
+    <div class="no-print">
+        <button onclick="window.print()">🖨️ Print Itinerary</button>
+    </div>
+"""
+
+# Render the printable itinerary
+st.components.v1.html(print_html, height=800, scrolling=True)
+
