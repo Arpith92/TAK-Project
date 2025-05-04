@@ -5,11 +5,8 @@ import locale
 import streamlit as st
 
 # Input fields
-#date = st.text_input("Enter the date (dd-mmm-yyyy)")
-#client_name = st.text_input("Enter the client name")
-
-date= 01-April-2025
-client_name=Saurav Saini
+date = st.text_input("Enter the date (dd-mmm-yyyy)")
+client_name = st.text_input("Enter the client name")
 
 # Define raw GitHub URLs
 code_file_url = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
