@@ -6,25 +6,25 @@ import numpy as np
 import streamlit as st
 
 # Input fields
-date = st.text_input("Enter the date (dd-mmm-yyyy)")
-client_name = st.text_input("Enter the client name")
+#date = st.text_input("Enter the date (dd-mmm-yyyy)")
+#client_name = st.text_input("Enter the client name")
 
 #date = 01-April-2025
 #client_name = Saurav Saini
 
+# Input fields
+date = st.text_input("Enter the date (dd-mmm-yyyy)")
+client_name = st.text_input("Enter the client name")
 
-# File paths
-input_folder = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/{date}.xlsx"
-code_file_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
-bhasmarathi_type_path = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
-
-# Load Stay_City data
-stay_city_data = r"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx/Stay_City.xlsx"
+# Define raw GitHub URLs
+code_file_url = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
+input_file_url = f"https://raw.githubusercontent.com/Arpith92/TAK-Project/main/{date}.xlsx"
+bhasmarathi_type_url = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 
 if date and client_name:
     try:
         # Load input Excel and check for client sheet
-        input_data = pd.ExcelFile(input_folder)
+        input_data = pd.ExcelFile(input_file_url)
         if client_name not in input_data.sheet_names:
             st.error(f"Sheet '{client_name}' not found in {date}.xlsx")
             st.write("Available sheets:", input_data.sheet_names)
@@ -41,11 +41,6 @@ if date and client_name:
         st.write(code_data)
     except Exception as e:
         st.error(f"Error loading code file: {e}")
-
-
-
-
-
 
 #try:
  #   stay_city_data = pd.read_excel(stay_city_data, sheet_name="Stay_City")
