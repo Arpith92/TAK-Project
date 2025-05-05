@@ -165,3 +165,70 @@ st.markdown(f"""
 - **Route:** `{final_route}`
 - **Package Cost:** ₹ {formatted_cost_display}
 """)
+
+# --- Extract car and hotel types ---
+car_types = client_data['Car Type'].dropna().unique()
+car_types_str = '-'.join(car_types)
+
+hotel_types = client_data['Hotel Type'].dropna().unique()
+hotel_types_str = '-'.join(hotel_types)
+
+# --- Extract Bhasmarathi descriptions ---
+bhasmarathi_types = client_data['Bhasmarathi Type'].dropna().unique()
+bhasmarathi_descriptions = []
+
+if bhasmarathi_type_df is None or 'Bhasmarathi Type' not in bhasmarathi_type_df.columns or 'Description' not in bhasmarathi_type_df.columns:
+    st.error("Bhasmarathi type data is missing or invalid.")
+    st.stop()
+
+for bhas_type in bhasmarathi_types:
+    match = bhasmarathi_type_df.loc[bhasmarathi_type_df['Bhasmarathi Type'] == bhas_type, 'Description']
+    if not match.empty:
+        bhasmarathi_descriptions.append(match.iloc[0])
+
+bhasmarathi_desc_str = '-'.join(bhasmarathi_descriptions)
+
+# --- Combine into final detail line ---
+details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})"
+
+# --- Generate itinerary message ---
+greeting = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
+plan = f"*Plan:- {total_days} Days and {total_nights} {night_text} {final_route} for {total_pax} {person_text}*"
+
+# --- Display in Streamlit ---
+st.subheader("Final Message Preview")
+st.text_area("Message", value=greeting + plan + f"\n\nDetails: {details_line}", height=200)
+
+# --- Build itinerary message ---
+itinerary_message = greeting + plan + "\n\n*Itinerary:*\n"
+
+# --- Group itinerary entries by formatted date ---
+grouped_itinerary = {}
+for entry in itinerary:
+    if entry['Date'] != 'N/A' and pd.notna(entry['Date']):
+        date = pd.to_datetime(entry['Date']).strftime('%d-%b-%Y')
+        if date not in grouped_itinerary:
+            grouped_itinerary[date] = []
+        grouped_itinerary[date].append(f"{entry['Time']}: {entry['Description']}")
+
+# --- Format grouped itinerary ---
+day_number = 1
+first_day = True
+
+for date, events in grouped_itinerary.items():
+    itinerary_message += f"\n*Day {day_number}: {date}*\n"
+    for event in events:
+        if first_day:
+            itinerary_message += f"{event}\n"
+            first_day = False
+        else:
+            itinerary_message += f"{event[5:]}\n"  # Skip time part for simplicity
+    day_number += 1
+
+# --- Append package cost and details ---
+itinerary_message += f"\n*Package cost: ₹ {formatted_cost1}/-*\n{details_line}"
+
+# --- Display itinerary message ---
+st.subheader("Full Itinerary Message")
+st.text_area("Formatted Itinerary", itinerary_message, height=400)
+
