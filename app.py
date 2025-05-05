@@ -106,3 +106,62 @@ itinerary_df = pd.DataFrame(itinerary)
 # Display the generated itinerary
 st.subheader("Generated Itinerary")
 st.dataframe(itinerary_df)
+
+# Set locale for Indian number formatting
+try:
+    locale.setlocale(locale.LC_ALL, 'en_IN')
+except locale.Error:
+    st.warning("Indian locale setting not supported on this system. Falling back to default formatting.")
+
+# --- Duration calculation ---
+start_date = pd.to_datetime(client_data['Date'].min())
+end_date = pd.to_datetime(client_data['Date'].max())
+total_days = (end_date - start_date).days + 1
+total_nights = total_days - 1
+
+# --- Pax handling ---
+total_pax = int(client_data['Total Pax'].iloc[0])
+night_text = "Night" if total_nights == 1 else "Nights"
+person_text = "Person" if total_pax == 1 else "Persons"
+
+# --- Route generation ---
+route_parts = []
+for code in client_data['Code']:
+    matched_routes = code_df.loc[code_df['Code'] == code, 'Route']
+    if not matched_routes.empty:
+        route_parts.append(matched_routes.iloc[0])
+
+# Remove duplicates and clean formatting
+route_list = [route_parts[0]] if route_parts else []
+for part in route_parts[1:]:
+    if part != route_list[-1]:
+        route_list.append(part)
+
+final_route = "-".join(route_list)
+
+# --- Cost calculation function ---
+def calculate_package_cost(df):
+    car_cost = df['Car Cost'].sum()
+    hotel_cost = df['Hotel Cost'].sum()
+    bhasmarathi_cost = df['Bhasmarathi Cost'].sum()
+    total = car_cost + hotel_cost + bhasmarathi_cost
+    return math.ceil(total / 1000) * 1000 - 1
+
+# Calculate and format cost
+total_package_cost = calculate_package_cost(client_data)
+
+try:
+    formatted_cost = int(locale.format_string("%d", total_package_cost, grouping=True).replace(",", ""))
+    formatted_cost_display = f"{formatted_cost:,}".replace(",", "X").replace("X", ",", 1)
+except:
+    formatted_cost_display = f"{total_package_cost:,}"  # fallback formatting
+
+# --- Display results ---
+st.subheader("Trip Summary")
+st.markdown(f"""
+- **Total Days:** {total_days}
+- **Total Nights:** {total_nights} {night_text}
+- **Total Pax:** {total_pax} {person_text}
+- **Route:** `{final_route}`
+- **Package Cost:** ₹ {formatted_cost_display}
+""")
