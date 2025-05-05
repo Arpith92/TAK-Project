@@ -50,18 +50,18 @@ if uploaded_file and client_name:
     code_df = read_excel_from_url(CODE_FILE_URL, sheet_name="Code")
     bhasmarathi_type_df = read_excel_from_url(BHASMARATHI_TYPE_URL, sheet_name="Bhasmarathi_Type")
 
-    if bhasmarathi_type_df is not None:
-        bhasmarathi_type_df.columns = bhasmarathi_type_df.columns.str.strip()
-        st.subheader("Bhasmarathi Type Preview")
-        st.dataframe(bhasmarathi_type_df.head())
+    #if bhasmarathi_type_df is not None:
+     #   bhasmarathi_type_df.columns = bhasmarathi_type_df.columns.str.strip()
+        #st.subheader("Bhasmarathi Type Preview")
+        #st.dataframe(bhasmarathi_type_df.head())
 
-    if stay_city_df is not None:
-        st.subheader("Stay City Preview")
-        st.dataframe(stay_city_df.head())
+    #if stay_city_df is not None:
+     #   st.subheader("Stay City Preview")
+      #  st.dataframe(stay_city_df.head())
 
-    if code_df is not None:
-        st.subheader("Code File Preview")
-        st.dataframe(code_df.head())
+    #if code_df is not None:
+        #st.subheader("Code File Preview")
+       # st.dataframe(code_df.head())
 
     # Match codes and generate itinerary
     itinerary = []
