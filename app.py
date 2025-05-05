@@ -5,9 +5,9 @@ import io
 import requests
 
 # GitHub raw URLs for static files
-CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Ver_1/code.xlsx"
-BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Ver_1/Bhasmarathi_Type.xlsx"
-STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Ver_1/Stay_City.xlsx"
+CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/code.xlsx"
+BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
+STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
 # Function to read Excel from GitHub URL
 def read_excel_from_url(url, sheet_name=None):
