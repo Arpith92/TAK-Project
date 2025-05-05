@@ -60,3 +60,49 @@ if uploaded_file and client_name:
     if bhasmarathi_type_df is not None:
         st.subheader("Bhasmarathi Type Preview")
         st.dataframe(bhasmarathi_type_df.head())
+
+# Load the client sheet
+client_data = input_data.parse(sheet_name=client_name)
+
+# Ensure code_df is loaded and has the expected format
+if code_df is None or 'Code' not in code_df.columns or 'Particulars' not in code_df.columns:
+    st.error("Code file is either not loaded properly or missing required columns ('Code', 'Particulars').")
+    st.stop()
+
+# Display client data preview
+st.subheader(f"{client_name} Sheet Preview")
+st.dataframe(client_data.head())
+
+# Match codes and generate itinerary
+itinerary = []
+for _, row in client_data.iterrows():
+    code = row.get('Code', None)
+    date = row.get('Date', 'N/A')
+    time = row.get('Time', 'N/A')
+
+    if pd.isna(code):
+        itinerary.append({
+            'Date': date,
+            'Time': time,
+            'Description': "No code provided in row"
+        })
+        continue
+
+    particulars = code_df.loc[code_df['Code'] == code, 'Particulars'].values
+    if particulars.size > 0:
+        description = particulars[0]
+    else:
+        description = f"No description found for code {code}"
+
+    itinerary.append({
+        'Date': date,
+        'Time': time,
+        'Description': description
+    })
+
+# Convert itinerary to DataFrame
+itinerary_df = pd.DataFrame(itinerary)
+
+# Display the generated itinerary
+st.subheader("Generated Itinerary")
+st.dataframe(itinerary_df)
