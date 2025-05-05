@@ -4,6 +4,7 @@ import io
 import requests
 import math
 import locale
+import pyperclip
 
 # GitHub raw URLs for static files
 CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
@@ -396,4 +397,7 @@ st.subheader("Final Itinerary Details")
 st.text_area("Preview", final_output, height=800)
 
 
-
+# Add a copy button
+if st.button("Copy Itinerary to Clipboard"):
+    pyperclip.copy(final_output)  # Copy the generated itinerary text to clipboard
+    st.success("Itinerary copied to clipboard!")
