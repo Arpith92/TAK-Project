@@ -397,19 +397,10 @@ st.subheader("Final Itinerary Details")
 st.text_area("Preview", final_output, height=800)
 
 
-# HTML + JavaScript to create a hidden textarea and a copy button
-copy_html = f"""
-<textarea id="copyTarget" style="position: absolute; left: -9999px;">{final_output}</textarea>
-<button onclick="copyText()" style="margin-top:10px;">📋 Copy Itinerary</button>
-<script>
-    function copyText() {{
-        var copyText = document.getElementById("copyTarget");
-        copyText.select();
-        document.execCommand("copy");
-        alert("Itinerary copied to clipboard!");
-    }}
-</script>
-"""
-
-# Inject the button and JavaScript
-st.markdown(copy_html, unsafe_allow_html=True)
+# Provide a download button (works reliably for copy purposes too)
+st.download_button(
+    label="📋 Copy / Download Itinerary",
+    data=final_output,
+    file_name="itinerary.txt",
+    mime="text/plain"
+)
