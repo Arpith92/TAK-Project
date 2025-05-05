@@ -397,7 +397,18 @@ st.subheader("Final Itinerary Details")
 st.text_area("Preview", final_output, height=800)
 
 
-# Add a copy button
-if st.button("Copy Itinerary to Clipboard"):
-    pyperclip.copy(final_output)  # Copy the generated itinerary text to clipboard
-    st.success("Itinerary copied to clipboard!")
+# JavaScript code for the copy-to-clipboard functionality
+copy_button_html = """
+    <button onclick="copyToClipboard()">Copy Itinerary to Clipboard</button>
+    <script>
+        function copyToClipboard() {
+            var copyText = document.querySelector('textarea');
+            copyText.select();
+            document.execCommand('copy');
+            alert("Itinerary copied to clipboard!");
+        }
+    </script>
+"""
+
+# Display the copy button using st.markdown
+st.markdown(copy_button_html, unsafe_allow_html=True)
