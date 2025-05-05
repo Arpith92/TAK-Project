@@ -5,7 +5,7 @@ import io
 import requests
 
 # GitHub raw URLs for static files
-CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/code.xlsx"
+CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
