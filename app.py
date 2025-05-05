@@ -337,4 +337,63 @@ final_message_with_exclusions_and_notes = final_message + "\n\n" + exclusions_se
 st.subheader("Final Itinerary Message with Exclusions and Important Notes")
 st.text_area("Preview", final_message_with_exclusions_and_notes, height=500)
 
+# Initialize Cancellation Policy
+cancellation_policy = """
+*Cancellation Policy:-*
+1. 30+ days before travel → 20% of the advance amount will be deducted.
+2. 15-29 days before travel → 50% of the advance amount will be deducted.
+3. Less than 15 days before travel → No refund on the advance amount.
+4. No refund for no-shows, last-minute cancellations, or early departures.
+5. One-time rescheduling is allowed if requested at least 15 days before the travel date, subject to availability.
+"""
+
+# Payment terms
+payment_terms = """*Payment Terms:-*
+50% advance and remaining 50% after arrival at Ujjain.
+"""
+
+# Add booking confirmation message and company account details
+booking_confirmation = """For booking confirmation, please make the advance payment to the company's current account provided below.
+
+*Company Account details:-*
+Account Name: ACHALA HOLIDAYS PVT LTD
+Bank: Axis Bank
+Account No: 923020071937652
+IFSC Code: UTIB0000329
+MICR Code: 452211003
+Branch Address: Ground Floor, 77, Dewas Road, Ujjain, Madhya Pradesh 456010
+
+Regards,
+Team TravelAajKal™️
+Reg. Achala Holidays Pvt Limited
+Visit :- www.travelaajkal.com
+Follow us :- https://www.instagram.com/travelaaj_kal/
+
+*Great news! ACHALA HOLIDAYS PVT LTD is now a DPIIT-recognized Startup by the Government of India.*
+*Thank you for your support as we continue to redefine travel.*
+*Travel Aaj aur Kal with us!*
+
+TravelAajKal® is a registered trademark of Achala Holidays Pvt Ltd.
+"""
+
+# Combine everything into a final output string
+final_output = f"""
+{final_message}
+
+{exclusions_section}
+
+{important_notes_section}
+
+{cancellation_policy}
+
+{payment_terms}
+
+{booking_confirmation}
+"""
+
+# Display the final output in the Streamlit app
+st.subheader("Final Itinerary Details")
+st.text_area("Preview", final_output, height=800)
+
+
 
