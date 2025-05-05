@@ -171,8 +171,8 @@ if uploaded_file and client_name:
     itinerary_message += f"\n*Package cost: {formatted_cost1}/-*\n{details_line}"
 
     # Display final message
-    st.subheader("Generated Itinerary Message")
-    st.text_area("Preview", itinerary_message, height=400)
+    #st.subheader("Generated Itinerary Message")
+    #st.text_area("Preview", itinerary_message, height=400)
 
 # 6. Initialize inclusions list
 inclusions = []
@@ -253,8 +253,8 @@ inclusions_section = "*Inclusions:-*\n" + "\n".join([f"{i + 1}. {line}" for i, l
 final_message = itinerary_message + "\n\n" + inclusions_section
 
 # Display final message in the Streamlit app
-st.subheader("Final Itinerary Message with Inclusions")
-st.text_area("Preview", final_message, height=400)
+#st.subheader("Final Itinerary Message with Inclusions")
+#st.text_area("Preview", final_message, height=400)
 
 # 7. Initialize exclusions list
 exclusions = []
@@ -334,8 +334,8 @@ important_notes_section = "\n*Important Notes:-*\n" + "\n".join([f"{i + 1}. {lin
 final_message_with_exclusions_and_notes = final_message + "\n\n" + exclusions_section + "\n\n" + important_notes_section
 
 # Display final message with exclusions and important notes in the Streamlit app
-st.subheader("Final Itinerary Message with Exclusions and Important Notes")
-st.text_area("Preview", final_message_with_exclusions_and_notes, height=500)
+#st.subheader("Final Itinerary Message with Exclusions and Important Notes")
+#st.text_area("Preview", final_message_with_exclusions_and_notes, height=500)
 
 # Initialize Cancellation Policy
 cancellation_policy = """
