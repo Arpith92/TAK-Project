@@ -256,3 +256,85 @@ final_message = itinerary_message + "\n\n" + inclusions_section
 st.subheader("Final Itinerary Message with Inclusions")
 st.text_area("Preview", final_message, height=400)
 
+# 7. Initialize exclusions list
+exclusions = []
+
+# 1. Bhasmarathi pick-up and drop (if Bhasmarathi Type not blank)
+#if not client_data['Bhasmarathi Type'].dropna().empty:
+ #   exclusions.append("Bhasmarathi pick-up and drop.")
+
+# 2. Meals or beverages
+exclusions.append("Any meals or beverages not specified in the itinerary are not included. (e.g., Breakfast, lunch, dinner, snacks, personal beverages).")
+
+# 3. Entry fees (if Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    exclusions.append("Entry fees for any tourist attractions, temples, or monuments not specified in the inclusions.")
+
+# 4. Travel insurance
+exclusions.append("Travel insurance.")
+
+# 5. Personal expenses (if Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    exclusions.append("Expenses related to personal shopping, tips, or gratuities.")
+
+# 6. Early check-in or late check-out charges (if Hotel Type is not blank)
+if not client_data['Hotel Type'].dropna().empty:
+    exclusions.append("Any additional charges for early check-in or late check-out if rooms are not available.")
+
+# 7. Costs due to unforeseen events (if Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    exclusions.append("Costs arising due to natural events, unforeseen roadblocks, or personal travel changes.")
+
+# 8. Charges for additional sightseeing spots (if Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    exclusions.append("Additional charges for any sightseeing spots not listed in the itinerary.")
+
+# Combine exclusions into a formatted list
+exclusions_section = "*Exclusions:-*\n" + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(exclusions)])
+
+# Initialize important notes list
+important_notes = []
+
+# 1. Additional charges for tourist attractions (Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    important_notes.append("Any tourist attractions not mentioned in the itinerary will incur additional charges.")
+
+# 2. Visits to tourist spots (Car Type is not blank)
+if not client_data['Car Type'].dropna().empty:
+    important_notes.append("Visits to tourist spots or temples are subject to traffic conditions and temple management restrictions. If any tourist spot or temple is closed on the specific day of travel due to unforeseen circumstances, TravelaajKal will not be responsible, and no refunds will be provided.")
+
+# 3. Bhasma Aarti ticket details (Bhasmarathi Type is not blank)
+if not client_data['Bhasmarathi Type'].dropna().empty:
+    important_notes.append("For Bhasm-Aarti, we will provide tickets, but timely arrival at the temple and seating arrangements are beyond our control.")
+
+# 4. Hotel entry rules (Hotel Type is not blank)
+#if not client_data['Hotel Type'].dropna().empty:
+ #   important_notes.append("Entry to the hotel is subject to the hotel's rules and regulations. A valid ID proof (Indian citizenship) is required. Only married couples are allowed entry.")
+
+# 5. Bhasma Aarti ticket cancellation policy (Bhasmarathi Type is not blank)
+if not client_data['Bhasmarathi Type'].dropna().empty:
+    important_notes.append("We only facilitate the booking of Bhasm-Aarti tickets. The ticket cost will be charged at actuals, as mentioned on the ticket.")
+
+# 6. Bhasma Aarti ticket cancellation policy (Bhasmarathi Type is not blank)
+if not client_data['Bhasmarathi Type'].dropna().empty:
+    important_notes.append("No commitment can be made regarding ticket availability. Bhasm-Aarti tickets are subject to availability and may be canceled at any time based on the decisions of the temple management committee. In case of an unconfirmed ticket, the ticket cost will be refunded.")
+
+# 7. Hotel entry rules (Hotel Type is not blank)
+if not client_data['Hotel Type'].dropna().empty:
+    important_notes.append("Entry to the hotel is subject to the hotel's rules and regulations. A valid ID proof (Indian citizenship) is required. Only married couples are allowed entry.")
+
+# 8. Hotel entry rules (Hotel Type is not blank) with child rule
+if not client_data['Hotel Type'].dropna().empty:
+    important_notes.append("Children above 9 years will be considered as adults. Children under 9 years must share the same bed with parents. If an extra bed is required, additional charges will apply.")
+
+# Combine important notes into a formatted list
+important_notes_section = "\n*Important Notes:-*\n" + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(important_notes)])
+
+# Combine exclusions and important notes with the itinerary message
+final_message_with_exclusions_and_notes = final_message + "\n\n" + exclusions_section + "\n\n" + important_notes_section
+
+# Display final message with exclusions and important notes in the Streamlit app
+st.subheader("Final Itinerary Message with Exclusions and Important Notes")
+st.text_area("Preview", final_message_with_exclusions_and_notes, height=500)
+
+
