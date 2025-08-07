@@ -1,10 +1,19 @@
+# --- Core Libraries ---
 pandas==2.2.2
 numpy==1.26.4
 openpyxl==3.1.2
 matplotlib==3.8.4
 streamlit==1.35.0
+
+# --- Word Document Generation ---
 python-docx==1.1.0
-pyperclip
-requests
-pymongo[srv]==4.3.3
-dnspython==2.3.0
+
+# --- Clipboard Copy (optional utility) ---
+pyperclip==1.8.2
+
+# --- HTTP Requests ---
+requests==2.31.0
+
+# --- MongoDB & DNS (IMPORTANT: These must be updated) ---
+pymongo[srv]==4.6.3
+dnspython==2.4.2
