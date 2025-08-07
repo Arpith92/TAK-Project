@@ -404,3 +404,33 @@ st.download_button(
     file_name="itinerary.txt",
     mime="text/plain"
 )
+
+# 👇 Add MongoDB saving block here
+from pymongo import MongoClient
+import datetime
+
+MONGO_URI = "mongodb+srv://tak_user:tak_secure123@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority"
+client = MongoClient(MONGO_URI)
+db = client["TAK_DB"]
+collection = db["itineraries"]
+
+record = {
+    "client_name": client_name,
+    "upload_date": datetime.datetime.utcnow(),
+    "start_date": str(start_date.date()),
+    "end_date": str(end_date.date()),
+    "total_days": total_days,
+    "total_pax": total_pax,
+    "final_route": final_route,
+    "car_types": car_types_str,
+    "hotel_types": hotel_types_str,
+    "bhasmarathi_types": bhasmarathi_desc_str,
+    "package_cost": formatted_cost1,
+    "itinerary_text": final_output
+}
+
+try:
+    collection.insert_one(record)
+    st.success("✅ Itinerary saved to MongoDB")
+except Exception as e:
+    st.error(f"❌ Failed to save: {e}")
