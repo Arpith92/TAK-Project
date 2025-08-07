@@ -4,7 +4,7 @@ from pymongo import MongoClient
 import datetime
 
 # ---- MongoDB Setup ----
-MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
+MONGO_URI = st.secrets["mongo_uri"]
 client = MongoClient(MONGO_URI)
 db = client["TAK_DB"]
 updates_col = db["daily_updates"]
@@ -21,7 +21,7 @@ if page == "Submit Daily Update":
     st.subheader("📝 Submit a Daily Update")
     with st.form("daily_update_form"):
         update_date = st.date_input("Date", datetime.date.today())
-        client = st.text_input("Client Name")
+        client_name = st.text_input("Client Name")  # ✅ Renamed to avoid conflict
         status = st.selectbox("Status", ["confirmed", "enquiry"])
         package_cost = st.number_input("Total Package Cost", min_value=0)
         actual_expenses = st.number_input("Actual Expenses", min_value=0)
@@ -33,7 +33,7 @@ if page == "Submit Daily Update":
         profit_loss = package_cost - actual_expenses
         record = {
             "date": update_date.strftime("%Y-%m-%d"),
-            "client_name": client.strip(),
+            "client_name": client_name.strip(),  # ✅ Use correct variable
             "status": status,
             "package_cost": package_cost,
             "actual_expenses": actual_expenses,
