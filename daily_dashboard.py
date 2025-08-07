@@ -5,10 +5,6 @@ import datetime
 
 # ---- MongoDB Setup ----
 #MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
-# ---- MongoDB Setup ----
-MONGO_URI = "mongodb+srv://TAK_USER:Arpith%2692@cluster0.ewncl10.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-#client = MongoClient(MONGO_URI)
-
 client = MongoClient(MONGO_URI)
 db = client["TAK_DB"]
 updates_col = db["daily_updates"]
