@@ -409,7 +409,7 @@ st.download_button(
 from pymongo import MongoClient
 import datetime
 
-MONGO_URI = "mongodb+srv://tak_user:tak_secure123@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority"
+MONGO_URI = "mongodb+srv://TAK_USER:<Arpith&92>@cluster0.rnl5q.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client["TAK_DB"]
 collection = db["itineraries"]
