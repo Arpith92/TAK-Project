@@ -1,20 +1,14 @@
 import streamlit as st
-st.title("Debug Loader")
-try:
-    import pymongo
-    st.success("pymongo imported successfully")
-except Exception as e:
-    st.error(f"Import Error: {e}")
-
-# ✅ Full Streamlit App for Daily Updates, Profit Tracking & Admin Dashboard
-
-import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
 import datetime
 
 # ---- MongoDB Setup ----
-MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
+#MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
+# ---- MongoDB Setup ----
+MONGO_URI = "mongodb+srv://TAK_USER:Arpith%2692@cluster0.ewncl10.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+#client = MongoClient(MONGO_URI)
+
 client = MongoClient(MONGO_URI)
 db = client["TAK_DB"]
 updates_col = db["daily_updates"]
