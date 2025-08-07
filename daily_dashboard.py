@@ -4,7 +4,7 @@ from pymongo import MongoClient
 import datetime
 
 # ---- MongoDB Setup ----
-#MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
+MONGO_URI = st.secrets["mongo_uri"]  # store safely in Streamlit Cloud
 client = MongoClient(MONGO_URI)
 db = client["TAK_DB"]
 updates_col = db["daily_updates"]
