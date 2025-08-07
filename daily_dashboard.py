@@ -1,3 +1,11 @@
+import streamlit as st
+st.title("Debug Loader")
+try:
+    import pymongo
+    st.success("pymongo imported successfully")
+except Exception as e:
+    st.error(f"Import Error: {e}")
+
 # ✅ Full Streamlit App for Daily Updates, Profit Tracking & Admin Dashboard
 
 import streamlit as st
