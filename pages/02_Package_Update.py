@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, date
 
-# Optional: pretty calendar view (falls back to a table if not available)
+# Optional: pretty calendar
 CALENDAR_AVAILABLE = True
 try:
     from streamlit_calendar import calendar
@@ -18,14 +18,13 @@ client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
 db = client["TAK_DB"]
 
 col_itineraries = db["itineraries"]          # created by app.py
-col_updates     = db["package_updates"]      # status + booking_date
+col_updates     = db["package_updates"]      # status + booking_date + advance_amount
 col_expenses    = db["expenses"]             # vendor costs + totals
 
 # ----------------------------
-# Utilities
+# Helpers
 # ----------------------------
 def to_int_money(x):
-    """Convert formatted money strings ('50,999', etc.) to int. Returns 0 if invalid."""
     if x is None:
         return 0
     if isinstance(x, (int, float)):
@@ -37,14 +36,43 @@ def to_int_money(x):
     digits = "".join(ch for ch in s if ch.isdigit())
     return int(digits) if digits else 0
 
+def current_fy_two_digits(today: date | None = None) -> int:
+    """Financial year (India style): Apr–Mar. Return last two digits (e.g., 25)."""
+    d = today or date.today()
+    year = d.year if d.month >= 4 else d.year - 1
+    return year % 100
+
+def next_ach_id(fy_2d: int) -> str:
+    """Find next sequence for ACH-<fy>-NNN based on existing docs with ach_id."""
+    prefix = f"ACH-{fy_2d:02d}-"
+    # get max suffix number for this FY
+    docs = col_itineraries.find({"ach_id": {"$regex": f"^{prefix}\\d{{3}}$"}}, {"ach_id": 1})
+    max_no = 0
+    for d in docs:
+        try:
+            n = int(d["ach_id"].split("-")[-1])
+            if n > max_no:
+                max_no = n
+        except Exception:
+            pass
+    return f"{prefix}{max_no+1:03d}"
+
+def backfill_ach_ids():
+    """Give ACH IDs to itineraries that don't have one yet (once)."""
+    fy = current_fy_two_digits()
+    cursor = col_itineraries.find({"$or": [{"ach_id": {"$exists": False}}, {"ach_id": ""}]})
+    for doc in cursor:
+        new_id = next_ach_id(fy)
+        col_itineraries.update_one({"_id": doc["_id"]}, {"$set": {"ach_id": new_id}})
+
 def fetch_itineraries_df():
+    backfill_ach_ids()
     rows = list(col_itineraries.find({}))
     if not rows:
         return pd.DataFrame()
-
     for r in rows:
         r["itinerary_id"] = str(r.get("_id"))
-        # app.py stores start_date/end_date as strings "YYYY-MM-DD"
+        r["ach_id"] = r.get("ach_id", "")
         try:
             r["start_date"] = pd.to_datetime(r.get("start_date")).date()
         except Exception:
@@ -53,26 +81,31 @@ def fetch_itineraries_df():
             r["end_date"] = pd.to_datetime(r.get("end_date")).date()
         except Exception:
             r["end_date"] = None
-
-        # package_cost is saved as formatted string (e.g. "50,999")
         r["package_cost_num"] = to_int_money(r.get("package_cost"))
     return pd.DataFrame(rows)
 
 def fetch_updates_df():
-    rows = list(col_updates.find({}, {"_id":0}))
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["itinerary_id","status","booking_date"])
+    rows = list(col_updates.find({}, {"_id": 0}))
+    if not rows:
+        return pd.DataFrame(columns=["itinerary_id","status","booking_date","advance_amount"])
+    # normalize booking_date to date
+    for r in rows:
+        if r.get("booking_date"):
+            r["booking_date"] = pd.to_datetime(r["booking_date"]).date()
+    return pd.DataFrame(rows)
 
 def fetch_expenses_df():
     rows = list(col_expenses.find({}, {"_id":0}))
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["itinerary_id","total_expenses","profit"])
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["itinerary_id","total_expenses","profit","package_cost"])
 
-def upsert_status(itinerary_id, status, booking_date):
+def upsert_status(itinerary_id, status, booking_date, advance_amount):
     doc = {
         "itinerary_id": itinerary_id,
         "status": status,
-        "updated_at": datetime.utcnow()
+        "updated_at": datetime.utcnow(),
+        "advance_amount": int(advance_amount or 0)
     }
-    if status == "confirmed":
+    if status == "confirmed" and booking_date:
         doc["booking_date"] = booking_date
     else:
         doc["booking_date"] = None
@@ -85,7 +118,7 @@ def save_expenses(itinerary_id, client_name, booking_date, package_cost, vendors
         "itinerary_id": itinerary_id,
         "client_name": client_name,
         "booking_date": booking_date,
-        "package_cost": int(package_cost),
+        "package_cost": int(package_cost),   # overwrite with latest
         "total_expenses": int(total_expenses),
         "profit": int(profit),
         "vendors": [{"name": n, "cost": int(v or 0)} for n, v in vendors],
@@ -95,11 +128,15 @@ def save_expenses(itinerary_id, client_name, booking_date, package_cost, vendors
     col_expenses.update_one({"itinerary_id": itinerary_id}, {"$set": doc}, upsert=True)
     return profit
 
-def has_expense(itinerary_id):
-    return col_expenses.count_documents({"itinerary_id": itinerary_id}) > 0
+def get_full_package(itinerary_id: str):
+    it = col_itineraries.find_one({"_id": {"$eq": client.get_default_database().codec_options.document_class.objectid_class(itinerary_id)}})
+    # fallback path: query by string if above fails in hosted environment
+    if not it:
+        it = col_itineraries.find_one({"_id": {"$exists": True}, "itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
+    return it
 
 # ----------------------------
-# Page setup
+# Page UI
 # ----------------------------
 st.set_page_config(page_title="Package Update", layout="wide")
 st.title("📦 Package Update")
@@ -109,74 +146,101 @@ if df_it.empty:
     st.info("No packages found yet. Upload a file in the main app first.")
     st.stop()
 
-df_up = fetch_updates_df()
+df_up  = fetch_updates_df()
 df_exp = fetch_expenses_df()
 
-# Merge status
 df = df_it.merge(df_up, on="itinerary_id", how="left")
 df["status"] = df["status"].fillna("pending")
+df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
 
 # ----------------------------
 # Summary KPIs
 # ----------------------------
-pending_count = (df["status"] == "pending").sum()
-cancelled_count = (df["status"] == "cancelled").sum()
+pending_count           = (df["status"] == "pending").sum()
+under_discussion_count  = (df["status"] == "under_discussion").sum()
+cancelled_count         = (df["status"] == "cancelled").sum()
 
 confirmed = df[df["status"] == "confirmed"].copy()
-confirmed_ids_with_expense = set(df_exp["itinerary_id"]) if not df_exp.empty else set()
-confirmed_expense_pending = confirmed[~confirmed["itinerary_id"].isin(confirmed_ids_with_expense)].shape[0]
+have_expense_ids = set(df_exp["itinerary_id"]) if not df_exp.empty else set()
+confirmed_expense_pending = confirmed[~confirmed["itinerary_id"].isin(have_expense_ids)].shape[0]
 
-k1, k2, k3 = st.columns(3)
-k1.metric("🟡 Enquiry status update pending", int(pending_count))
-k2.metric("🟠 Confirmed – expense entry pending", int(confirmed_expense_pending))
-k3.metric("🔴 Cancelled packages", int(cancelled_count))
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("🟡 Pending", int(pending_count))
+k2.metric("🟠 Under discussion", int(under_discussion_count))
+k3.metric("🟧 Confirmed – expense pending", int(confirmed_expense_pending))
+k4.metric("🔴 Cancelled", int(cancelled_count))
 
 st.divider()
 
 # ----------------------------
-# 1) Status Update Table (pending / under_discussion)
+# 1) Status Update (with bulk action)
 # ----------------------------
 st.subheader("1) Update Status for Pending / Under Discussion")
-
 editable = df[df["status"].isin(["pending", "under_discussion"])].copy()
+
 if editable.empty:
     st.success("No pending or under-discussion packages right now. 🎉")
 else:
     cols = [
-        "itinerary_id", "client_name", "final_route", "total_pax",
-        "start_date", "end_date", "package_cost", "status", "booking_date"
+        "ach_id","itinerary_id","client_name","final_route","total_pax",
+        "start_date","end_date","package_cost","status","booking_date","advance_amount"
     ]
-    for c in ["client_name","final_route","total_pax","package_cost"]:
+    for c in ["client_name","final_route","total_pax","package_cost","ach_id"]:
         if c not in editable.columns:
             editable[c] = ""
-
     editable = editable.reindex(columns=[c for c in cols if c in editable.columns])
+    editable = editable.sort_values(["start_date","client_name"])
 
-    st.caption("Set **Status** per row. If you choose **confirmed**, also set **Booking date**.")
+    st.caption("Tip: Select rows below and use the **Bulk update** box to update all selected at once.")
     edited = st.data_editor(
         editable,
         use_container_width=True,
         hide_index=True,
+        selection_mode="multi-row",
         column_config={
             "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["pending","under_discussion","confirmed","cancelled"],
-                required=True,
+                "Status", options=["pending","under_discussion","confirmed","cancelled"], required=True
             ),
-            "booking_date": st.column_config.DateColumn(
-                "Booking date",
-                help="Required when status is confirmed",
-                format="YYYY-MM-DD",
-            ),
+            "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+            "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
         },
+        key="status_editor"
     )
 
-    if st.button("💾 Save Status Updates"):
+    sel = st.session_state.get("status_editor", {}).get("selection", {}).get("rows", [])
+    with st.expander("🔁 Bulk update selected rows"):
+        bcol1, bcol2, bcol3, bcol4 = st.columns([1,1,1,1])
+        with bcol1:
+            bulk_status = st.selectbox("Status", ["pending","under_discussion","confirmed","cancelled"])
+        with bcol2:
+            bulk_date = st.date_input("Booking date (for confirmed)", value=None)
+        with bcol3:
+            bulk_adv = st.number_input("Advance (₹)", min_value=0, step=500, value=0)
+        with bcol4:
+            apply_bulk = st.button("Apply to selected")
+
+        if apply_bulk:
+            if not sel:
+                st.warning("No rows selected.")
+            else:
+                for r_idx in sel:
+                    r = edited.iloc[r_idx]
+                    bdate = None
+                    if bulk_status == "confirmed":
+                        if not bulk_date:
+                            continue
+                        bdate = pd.to_datetime(bulk_date).date().isoformat()
+                    upsert_status(r["itinerary_id"], bulk_status, bdate, bulk_adv)
+                st.success(f"Applied to {len(sel)} row(s).")
+                st.rerun()
+
+    if st.button("💾 Save row-by-row edits"):
         saved, errors = 0, 0
         for _, r in edited.iterrows():
             itinerary_id = r["itinerary_id"]
             status = r["status"]
             bdate = r.get("booking_date")
+            adv   = r.get("advance_amount", 0)
             if status == "confirmed":
                 if pd.isna(bdate):
                     errors += 1
@@ -185,7 +249,7 @@ else:
             else:
                 bdate = None
             try:
-                upsert_status(itinerary_id, status, bdate)
+                upsert_status(itinerary_id, status, bdate, adv)
                 saved += 1
             except Exception:
                 errors += 1
@@ -193,7 +257,6 @@ else:
             st.success(f"Saved {saved} update(s).")
         if errors:
             st.warning(f"{errors} row(s) skipped (missing/invalid booking date for confirmed).")
-        #st.experimental_rerun()
         st.rerun()
 
 st.divider()
@@ -203,10 +266,11 @@ st.divider()
 # ----------------------------
 st.subheader("2) Enter Expenses for Confirmed Packages")
 
-# recompute after save
 df_up = fetch_updates_df()
 df = df_it.merge(df_up, on="itinerary_id", how="left")
 df["status"] = df["status"].fillna("pending")
+df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
+
 confirmed = df[df["status"] == "confirmed"].copy()
 
 if confirmed.empty:
@@ -217,23 +281,29 @@ else:
 
     left, right = st.columns([2,1])
     with left:
+        show_cols = ["ach_id","itinerary_id","client_name","final_route","total_pax",
+                     "package_cost","advance_amount","booking_date","expense_entered"]
         st.dataframe(
-            confirmed[["itinerary_id","client_name","final_route","total_pax","package_cost","booking_date","expense_entered"]].sort_values("booking_date"),
+            confirmed[show_cols].sort_values("booking_date"),
             use_container_width=True
         )
     with right:
         st.markdown("**Select a confirmed package to add/edit expenses:**")
-        options = confirmed["itinerary_id"] + " | " + confirmed["client_name"] + " | " + confirmed["booking_date"].fillna("").astype(str)
+        options = (confirmed["ach_id"].fillna("") + " | " +
+                   confirmed["client_name"].fillna("") + " | " +
+                   confirmed["booking_date"].fillna("").astype(str) + " | " +
+                   confirmed["itinerary_id"])
         sel = st.selectbox("Choose package", options.tolist() if not options.empty else [])
-        chosen_id = sel.split(" | ")[0] if sel else None
+        chosen_id = sel.split(" | ")[-1] if sel else None
 
     if chosen_id:
         row = confirmed[confirmed["itinerary_id"] == chosen_id].iloc[0]
-        client_name = row.get("client_name","")
+        client_name  = row.get("client_name","")
         booking_date = row.get("booking_date","")
-        base_cost = to_int_money(row.get("package_cost") or row.get("package_cost_num"))
+        # allow editing package cost here; overwrite on save
+        base_cost = st.number_input("Package cost (₹)", min_value=0, value=to_int_money(row.get("package_cost") or row.get("package_cost_num")), step=500)
 
-        st.markdown(f"**Client:** {client_name}  \n**Booking date:** {booking_date}  \n**Package cost (₹):** {base_cost:,}")
+        st.markdown(f"**Client:** {client_name}  \n**Booking date:** {booking_date}")
         st.markdown("#### Expense Inputs")
 
         with st.form("expense_form"):
@@ -286,15 +356,15 @@ else:
             ]
             profit = save_expenses(chosen_id, client_name, booking_date, base_cost, vendors, notes)
             st.success(f"Expenses saved. 💰 Profit: ₹ {profit:,}")
-            #st.experimental_rerun()
             st.rerun()
 
 st.divider()
 
 # ----------------------------
-# 3) Calendar – Confirmed packages
+# 3) Calendar – Toggle views & click-to-open details
 # ----------------------------
 st.subheader("3) Calendar – Confirmed Packages")
+view = st.radio("View", ["By Booking Date", "By Travel Dates"], horizontal=True)
 
 confirmed = df[df["status"] == "confirmed"].copy()
 if confirmed.empty:
@@ -302,19 +372,78 @@ if confirmed.empty:
 else:
     events = []
     for _, r in confirmed.iterrows():
-        if pd.isna(r.get("booking_date")):
-            continue
         title = f"{r.get('client_name','')}_{r.get('total_pax','')}pax"
-        start = pd.to_datetime(r["booking_date"]).strftime("%Y-%m-%d")
-        events.append({"title": title, "start": start})
+        ev = {"title": title, "id": r["itinerary_id"]}
 
+        if view == "By Booking Date":
+            if pd.isna(r.get("booking_date")):
+                continue
+            ev["start"] = pd.to_datetime(r["booking_date"]).strftime("%Y-%m-%d")
+        else:
+            if pd.isna(r.get("start_date")) or pd.isna(r.get("end_date")):
+                continue
+            ev["start"] = pd.to_datetime(r["start_date"]).strftime("%Y-%m-%d")
+            # FullCalendar uses exclusive end -> add one day to show stretch
+            end_ = pd.to_datetime(r["end_date"]) + pd.Timedelta(days=1)
+            ev["end"] = end_.strftime("%Y-%m-%d")
+
+        events.append(ev)
+
+    selected_id = None
     if CALENDAR_AVAILABLE:
-        st.caption("Interactive calendar (month view).")
-        calendar(
-            options={"initialView": "dayGridMonth", "height": 600, "events": events},
-            key="pkg_cal",
-        )
+        opts = {"initialView": "dayGridMonth", "height": 620, "eventDisplay": "block"}
+        result = calendar(options=opts, events=events, key=f"pkg_cal_{'booking' if view=='By Booking Date' else 'travel'}")
+        # When user clicks an event you get back payload under eventClick
+        if result and isinstance(result, dict) and result.get("eventClick"):
+            try:
+                selected_id = result["eventClick"]["event"]["id"]
+            except Exception:
+                selected_id = None
     else:
         st.caption("Calendar component not installed. Showing a simple list instead.")
-        display = pd.DataFrame(events).rename(columns={"title":"Package", "start":"Date"})
-        st.dataframe(display.sort_values("Date"), use_container_width=True)
+        display = pd.DataFrame(events).rename(columns={"title": "Package", "start": "Start", "end": "End"})
+        st.dataframe(display.sort_values(["Start","End"]), use_container_width=True)
+        if not confirmed.empty:
+            selected_id = st.selectbox(
+                "Open package details",
+                (confirmed["itinerary_id"] + " | " + confirmed["client_name"]).tolist()
+            )
+            if selected_id:
+                selected_id = selected_id.split(" | ")[0]
+
+    # Right-side details panel
+    if selected_id:
+        st.divider()
+        st.subheader("📦 Package Details")
+
+        it = col_itineraries.find_one({"_id": client.get_default_database().codec_options.document_class.objectid_class(selected_id)})
+        # fallback by string match
+        if not it:
+            it = col_itineraries.find_one({"itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
+
+        upd = col_updates.find_one({"itinerary_id": selected_id}, {"_id":0})
+        exp = col_expenses.find_one({"itinerary_id": selected_id}, {"_id":0})
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Basic**")
+            st.write({
+                "ACH ID": it.get("ach_id", "") if it else "",
+                "Client": it.get("client_name","") if it else "",
+                "Route": it.get("final_route","") if it else "",
+                "Pax": it.get("total_pax","") if it else "",
+                "Travel": f"{it.get('start_date','')} → {it.get('end_date','')}" if it else "",
+            })
+        with c2:
+            st.markdown("**Status & Money**")
+            st.write({
+                "Status": upd.get("status","") if upd else "",
+                "Booking date": upd.get("booking_date","") if upd else "",
+                "Advance (₹)": upd.get("advance_amount",0) if upd else 0,
+                "Package cost (₹)": exp.get("package_cost", to_int_money(it.get("package_cost"))) if (exp or it) else 0,
+                "Total expenses (₹)": exp.get("total_expenses", 0) if exp else 0,
+                "Profit (₹)": exp.get("profit", 0) if exp else 0,
+            })
+
+        st.markdown("**Itinerary text**")
+        st.text_area("Shared with client", value=(it.get("itinerary_text","") if it else ""), height=260, disabled=True)
