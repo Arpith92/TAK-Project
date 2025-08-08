@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
 from datetime import datetime, date
+from bson import ObjectId
 
 # Optional: pretty calendar
 CALENDAR_AVAILABLE = True
@@ -150,8 +151,14 @@ df_up  = fetch_updates_df()
 df_exp = fetch_expenses_df()
 
 df = df_it.merge(df_up, on="itinerary_id", how="left")
+#df["status"] = df["status"].fillna("pending")
+#df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
 df["status"] = df["status"].fillna("pending")
-df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
+# NEW: handle older docs that don't have advance_amount
+if "advance_amount" not in df.columns:
+    df["advance_amount"] = 0
+df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
+
 
 # ----------------------------
 # Summary KPIs
@@ -268,8 +275,14 @@ st.subheader("2) Enter Expenses for Confirmed Packages")
 
 df_up = fetch_updates_df()
 df = df_it.merge(df_up, on="itinerary_id", how="left")
+#df["status"] = df["status"].fillna("pending")
+#df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
 df["status"] = df["status"].fillna("pending")
-df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
+# NEW: handle older docs that don't have advance_amount
+if "advance_amount" not in df.columns:
+    df["advance_amount"] = 0
+df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
+
 
 confirmed = df[df["status"] == "confirmed"].copy()
 
@@ -419,7 +432,7 @@ else:
         it = col_itineraries.find_one({"_id": client.get_default_database().codec_options.document_class.objectid_class(selected_id)})
         # fallback by string match
         if not it:
-            it = col_itineraries.find_one({"itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
+        #    it = col_itineraries.find_one({"itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
 
         upd = col_updates.find_one({"itinerary_id": selected_id}, {"_id":0})
         exp = col_expenses.find_one({"itinerary_id": selected_id}, {"_id":0})
