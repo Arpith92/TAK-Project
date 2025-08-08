@@ -1,3 +1,4 @@
+# pages/02_Package_Update.py
 import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
@@ -46,7 +47,6 @@ def current_fy_two_digits(today: date | None = None) -> int:
 def next_ach_id(fy_2d: int) -> str:
     """Find next sequence for ACH-<fy>-NNN based on existing docs with ach_id."""
     prefix = f"ACH-{fy_2d:02d}-"
-    # get max suffix number for this FY
     docs = col_itineraries.find({"ach_id": {"$regex": f"^{prefix}\\d{{3}}$"}}, {"ach_id": 1})
     max_no = 0
     for d in docs:
@@ -59,7 +59,7 @@ def next_ach_id(fy_2d: int) -> str:
     return f"{prefix}{max_no+1:03d}"
 
 def backfill_ach_ids():
-    """Give ACH IDs to itineraries that don't have one yet (once)."""
+    """Give ACH IDs to itineraries that don't have one yet (one-time per doc)."""
     fy = current_fy_two_digits()
     cursor = col_itineraries.find({"$or": [{"ach_id": {"$exists": False}}, {"ach_id": ""}]})
     for doc in cursor:
@@ -89,7 +89,6 @@ def fetch_updates_df():
     rows = list(col_updates.find({}, {"_id": 0}))
     if not rows:
         return pd.DataFrame(columns=["itinerary_id","status","booking_date","advance_amount"])
-    # normalize booking_date to date
     for r in rows:
         if r.get("booking_date"):
             r["booking_date"] = pd.to_datetime(r["booking_date"]).date()
@@ -129,11 +128,17 @@ def save_expenses(itinerary_id, client_name, booking_date, package_cost, vendors
     col_expenses.update_one({"itinerary_id": itinerary_id}, {"$set": doc}, upsert=True)
     return profit
 
-def get_full_package(itinerary_id: str):
-    it = col_itineraries.find_one({"_id": {"$eq": client.get_default_database().codec_options.document_class.objectid_class(itinerary_id)}})
-    # fallback path: query by string if above fails in hosted environment
-    if not it:
-        it = col_itineraries.find_one({"_id": {"$exists": True}, "itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
+def find_itinerary_doc(selected_id: str):
+    """Fetch itinerary doc by _id (ObjectId), or fallback to string fields."""
+    it = None
+    try:
+        it = col_itineraries.find_one({"_id": ObjectId(selected_id)})
+    except Exception:
+        it = None
+    if it is None:
+        # If you keep plain string ids in a field or use ACH id to link
+        it = (col_itineraries.find_one({"itinerary_id": selected_id}) or
+              col_itineraries.find_one({"ach_id": selected_id}))
     return it
 
 # ----------------------------
@@ -151,14 +156,11 @@ df_up  = fetch_updates_df()
 df_exp = fetch_expenses_df()
 
 df = df_it.merge(df_up, on="itinerary_id", how="left")
-#df["status"] = df["status"].fillna("pending")
-#df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
 df["status"] = df["status"].fillna("pending")
-# NEW: handle older docs that don't have advance_amount
+# Ensure advance_amount exists & is numeric
 if "advance_amount" not in df.columns:
     df["advance_amount"] = 0
 df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
-
 
 # ----------------------------
 # Summary KPIs
@@ -183,8 +185,8 @@ st.divider()
 # 1) Status Update (with bulk action)
 # ----------------------------
 st.subheader("1) Update Status for Pending / Under Discussion")
-editable = df[df["status"].isin(["pending", "under_discussion"])].copy()
 
+editable = df[df["status"].isin(["pending", "under_discussion"])].copy()
 if editable.empty:
     st.success("No pending or under-discussion packages right now. 🎉")
 else:
@@ -275,14 +277,10 @@ st.subheader("2) Enter Expenses for Confirmed Packages")
 
 df_up = fetch_updates_df()
 df = df_it.merge(df_up, on="itinerary_id", how="left")
-#df["status"] = df["status"].fillna("pending")
-#df["advance_amount"] = df["advance_amount"].fillna(0).astype(int)
 df["status"] = df["status"].fillna("pending")
-# NEW: handle older docs that don't have advance_amount
 if "advance_amount" not in df.columns:
     df["advance_amount"] = 0
 df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
-
 
 confirmed = df[df["status"] == "confirmed"].copy()
 
@@ -314,7 +312,12 @@ else:
         client_name  = row.get("client_name","")
         booking_date = row.get("booking_date","")
         # allow editing package cost here; overwrite on save
-        base_cost = st.number_input("Package cost (₹)", min_value=0, value=to_int_money(row.get("package_cost") or row.get("package_cost_num")), step=500)
+        base_cost = st.number_input(
+            "Package cost (₹)",
+            min_value=0,
+            value=to_int_money(row.get("package_cost") or row.get("package_cost_num")),
+            step=500
+        )
 
         st.markdown(f"**Client:** {client_name}  \n**Booking date:** {booking_date}")
         st.markdown("#### Expense Inputs")
@@ -396,7 +399,7 @@ else:
             if pd.isna(r.get("start_date")) or pd.isna(r.get("end_date")):
                 continue
             ev["start"] = pd.to_datetime(r["start_date"]).strftime("%Y-%m-%d")
-            # FullCalendar uses exclusive end -> add one day to show stretch
+            # FullCalendar uses exclusive end -> add one day to show a bar across dates
             end_ = pd.to_datetime(r["end_date"]) + pd.Timedelta(days=1)
             ev["end"] = end_.strftime("%Y-%m-%d")
 
@@ -429,11 +432,7 @@ else:
         st.divider()
         st.subheader("📦 Package Details")
 
-        it = col_itineraries.find_one({"_id": client.get_default_database().codec_options.document_class.objectid_class(selected_id)})
-        # fallback by string match
-        if not it:
-        #    it = col_itineraries.find_one({"itinerary_text": {"$exists": True}, "ach_id": {"$exists": True}})
-
+        it = find_itinerary_doc(selected_id)
         upd = col_updates.find_one({"itinerary_id": selected_id}, {"_id":0})
         exp = col_expenses.find_one({"itinerary_id": selected_id}, {"_id":0})
 
@@ -453,7 +452,9 @@ else:
                 "Status": upd.get("status","") if upd else "",
                 "Booking date": upd.get("booking_date","") if upd else "",
                 "Advance (₹)": upd.get("advance_amount",0) if upd else 0,
-                "Package cost (₹)": exp.get("package_cost", to_int_money(it.get("package_cost"))) if (exp or it) else 0,
+                "Package cost (₹)": (exp.get("package_cost")
+                                     if exp and "package_cost" in exp
+                                     else to_int_money(it.get("package_cost")) if it else 0),
                 "Total expenses (₹)": exp.get("total_expenses", 0) if exp else 0,
                 "Profit (₹)": exp.get("profit", 0) if exp else 0,
             })
