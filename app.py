@@ -30,6 +30,11 @@ uploaded_file = st.file_uploader("Upload date-based Excel file", type=["xlsx"])
 # Enter client name
 client_name = st.text_input("Enter the client name").strip()
 
+# ⛑️ Stop the script until both inputs are provided
+if not uploaded_file or not client_name:
+    st.info("⬆️ Upload the Excel and enter the client name to continue.")
+    st.stop()
+
 if uploaded_file and client_name:
     try:
         input_data = pd.ExcelFile(uploaded_file)
