@@ -14,14 +14,6 @@ CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Cod
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
-#import streamlit as st
-#st.set_page_config(page_title="TAK Tripmate", layout="wide")
-
-#st.sidebar.header("Navigation")
-#st.sidebar.page_link("app.py", label="📝 Itinerary Generator")
-#st.sidebar.page_link("pages/02_Package_Update.py", label="📦 Package Update")
-
-
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -34,6 +26,17 @@ def read_excel_from_url(url, sheet_name=None):
         st.error(f"Error reading file from {url}: {e}")
         return None
 
+def is_valid_mobile(num: str) -> bool:
+    """
+    Basic validation:
+    - keep only digits
+    - must be exactly 10 digits (typical India mobile format)
+    """
+    if num is None:
+        return False
+    digits = "".join(ch for ch in str(num) if ch.isdigit())
+    return len(digits) == 10
+
 # -----------------------------
 # UI
 # -----------------------------
@@ -42,13 +45,25 @@ st.title("TAK Project Itinerary Generator")
 uploaded_file = st.file_uploader("Upload date-based Excel file", type=["xlsx"])
 client_name = st.text_input("Enter the client name").strip()
 
-# ✅ Guard: stop until both inputs provided (prevents NameError on first load)
-if not uploaded_file or not client_name:
-    st.info("⬆️ Upload the Excel and enter the client name to continue.")
+# NEW: Client mobile (must be number) + Representative dropdown
+client_mobile_raw = st.text_input("Enter client mobile number (10 digits)").strip()  # <-- NEW
+rep_options = ["-- Select --", "Arpith", "Reena", "Kuldeep", "Teena"]               # <-- NEW
+representative = st.selectbox("Representative name", rep_options)                    # <-- NEW
+
+# ✅ Guard: stop until all inputs are provided and valid
+if not uploaded_file or not client_name or not client_mobile_raw or representative == "-- Select --":
+    st.info("⬆️ Upload the Excel, enter client name & valid mobile, and choose a representative to continue.")
     st.stop()
 
+# validate mobile number
+if not is_valid_mobile(client_mobile_raw):
+    st.error("❌ Invalid mobile number. Please enter a 10-digit number (digits only).")
+    st.stop()
+# normalized mobile (digits only) to save in DB
+client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
+
 # -----------------------------
-# Main flow (runs only when both inputs exist)
+# Main flow (runs only when all inputs exist)
 # -----------------------------
 try:
     input_data = pd.ExcelFile(uploaded_file)
@@ -153,7 +168,12 @@ details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})"
 # -----------------------------
 # Build itinerary text
 # -----------------------------
-greeting = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
+greeting = (
+    f"Greetings from TravelAajkal,\n\n"
+    f"*Client Name: {client_name}*\n"
+    f"*Mobile: {client_mobile}*\n"                  # <-- NEW (optional to show to client)
+    f"*Representative: {representative}*\n\n"       # <-- NEW (optional to show to client)
+)
 plan = f"*Plan:- {total_days}Days and {total_nights}{night_text} {final_route} for {total_pax} {person_text}*"
 
 itinerary_message = greeting + plan + "\n\n*Itinerary:*\n"
@@ -191,14 +211,10 @@ if not client_data['Bhasmarathi Type'].dropna().empty:
     inclusions.append("Bhasm-Aarti pickup and drop.")
 
 # Hotel stay (nights per city)
-if "Room Type" in client_data.columns:
-    default_room_configuration = client_data["Room Type"].iloc[0]
-
 if "Stay City" in client_data.columns and "Room Type" in client_data.columns and stay_city_df is not None:
     city_nights = {}
     for i in range(len(client_data)):
         stay_city = client_data["Stay City"].iloc[i]
-        room_type = client_data["Room Type"].iloc[i]
         if pd.isna(stay_city):
             continue
         stay_city = str(stay_city).strip()
@@ -341,6 +357,8 @@ collection = db["itineraries"]
 
 record = {
     "client_name": client_name,
+    "client_mobile": client_mobile,           # <-- NEW (digits only)
+    "representative": representative,         # <-- NEW
     "upload_date": datetime.datetime.utcnow(),
     "start_date": str(start_date.date()),
     "end_date": str(end_date.date()),
