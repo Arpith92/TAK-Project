@@ -1,4 +1,4 @@
-streamlit==1.35.0
+streamlit==1.40.1
 pandas==2.2.2
 numpy==1.26.4
 openpyxl==3.1.2
@@ -8,5 +8,4 @@ pyperclip==1.8.2
 requests==2.31.0
 pymongo[srv]==4.6.3
 dnspython==2.4.2
-rich==13.7.1
 streamlit-calendar==0.5.2
