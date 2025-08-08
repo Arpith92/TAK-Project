@@ -3,6 +3,13 @@ import pandas as pd
 from pymongo import MongoClient
 from datetime import datetime
 
+# pages/02_Package_Update.py
+import streamlit as st
+st.set_page_config(page_title="Package Update", page_icon="📦")
+st.title("📦 Package Update")
+st.write("This page loaded correctly.")
+
+
 # Optional: pretty calendar view (falls back to a table if not available)
 CALENDAR_AVAILABLE = True
 try:
