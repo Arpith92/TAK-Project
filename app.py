@@ -14,6 +14,14 @@ CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Cod
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
+import streamlit as st
+st.set_page_config(page_title="TAK Tripmate", layout="wide")
+
+st.sidebar.header("Navigation")
+st.sidebar.page_link("app.py", label="📝 Itinerary Generator")
+st.sidebar.page_link("pages/02_Package_Update.py", label="📦 Package Update")
+
+
 # -----------------------------
 # Helpers
 # -----------------------------
