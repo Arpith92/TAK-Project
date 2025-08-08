@@ -27,11 +27,6 @@ def read_excel_from_url(url, sheet_name=None):
         return None
 
 def is_valid_mobile(num: str) -> bool:
-    """
-    Basic validation:
-    - keep only digits
-    - must be exactly 10 digits (typical India mobile format)
-    """
     if num is None:
         return False
     digits = "".join(ch for ch in str(num) if ch.isdigit())
@@ -43,41 +38,47 @@ def is_valid_mobile(num: str) -> bool:
 st.title("TAK Project Itinerary Generator")
 
 uploaded_file = st.file_uploader("Upload date-based Excel file", type=["xlsx"])
-client_name = st.text_input("Enter the client name").strip()
 
-# NEW: Client mobile (must be number) + Representative dropdown
-client_mobile_raw = st.text_input("Enter client mobile number (10 digits)").strip()  # <-- NEW
-rep_options = ["-- Select --", "Arpith", "Reena", "Kuldeep", "Teena"]               # <-- NEW
-representative = st.selectbox("Representative name", rep_options)                    # <-- NEW
-
-# ✅ Guard: stop until all inputs are provided and valid
-if not uploaded_file or not client_name or not client_mobile_raw or representative == "-- Select --":
-    st.info("⬆️ Upload the Excel, enter client name & valid mobile, and choose a representative to continue.")
+# Only show client dropdown *after* file is uploaded
+if not uploaded_file:
+    st.info("⬆️ Upload the Excel to continue.")
     st.stop()
 
-# validate mobile number
-if not is_valid_mobile(client_mobile_raw):
-    st.error("❌ Invalid mobile number. Please enter a 10-digit number (digits only).")
-    st.stop()
-# normalized mobile (digits only) to save in DB
-client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
-
-# -----------------------------
-# Main flow (runs only when all inputs exist)
-# -----------------------------
+# Read workbook to get sheet names for dropdown
 try:
     input_data = pd.ExcelFile(uploaded_file)
 except Exception as e:
     st.error(f"Error reading uploaded file: {e}")
     st.stop()
 
-if client_name not in input_data.sheet_names:
-    st.error(f"Sheet '{client_name}' not found in uploaded file.")
-    st.info(f"Available sheets: {input_data.sheet_names}")
+sheet_options = input_data.sheet_names or []
+if not sheet_options:
+    st.error("No sheets found in the uploaded Excel.")
     st.stop()
 
+client_name = st.selectbox("Select client (sheet name)", sheet_options, index=0)
+
+# Mobile + Representative
+client_mobile_raw = st.text_input("Enter client mobile number (10 digits)").strip()
+rep_options = ["-- Select --", "Arpith", "Reena", "Kuldeep", "Teena"]
+representative = st.selectbox("Representative name", rep_options)
+
+# Guard: require valid inputs
+if not client_name or not client_mobile_raw or representative == "-- Select --":
+    st.info("Enter valid mobile and choose a representative to proceed.")
+    st.stop()
+
+if not is_valid_mobile(client_mobile_raw):
+    st.error("❌ Invalid mobile number. Please enter a 10-digit number (digits only).")
+    st.stop()
+
+client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
+
+# -----------------------------
+# Parse selected sheet
+# -----------------------------
 client_data = input_data.parse(sheet_name=client_name)
-st.success(f"'{client_name}' sheet found. Proceeding with processing...")
+st.success(f"'{client_name}' sheet selected. Proceeding with processing...")
 
 # Load static Excel files
 stay_city_df = read_excel_from_url(STAY_CITY_URL, sheet_name="Stay_City")
@@ -143,10 +144,10 @@ except locale.Error:
     use_locale = False
 
 total_package_cost = calculate_package_cost(client_data)
-if use_locale:
-    formatted_cost = locale.format_string("%d", total_package_cost, grouping=True)
-else:
-    formatted_cost = f"{total_package_cost:,}"
+formatted_cost = (
+    locale.format_string("%d", total_package_cost, grouping=True)
+    if use_locale else f"{total_package_cost:,}"
+)
 formatted_cost1 = formatted_cost.replace(",", "X").replace("X", ",", 1)
 
 # Types & details line
@@ -166,14 +167,9 @@ bhasmarathi_desc_str = '-'.join(bhasmarathi_descriptions)
 details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})"
 
 # -----------------------------
-# Build itinerary text
+# Build itinerary text (NO mobile/rep lines)
 # -----------------------------
-greeting = (
-    f"Greetings from TravelAajkal,\n\n"
-    f"*Client Name: {client_name}*\n"
-    f"*Mobile: {client_mobile}*\n"                  # <-- NEW (optional to show to client)
-    f"*Representative: {representative}*\n\n"       # <-- NEW (optional to show to client)
-)
+greeting = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
 plan = f"*Plan:- {total_days}Days and {total_nights}{night_text} {final_route} for {total_pax} {person_text}*"
 
 itinerary_message = greeting + plan + "\n\n*Itinerary:*\n"
@@ -210,7 +206,6 @@ if not client_data['Bhasmarathi Type'].dropna().empty:
     inclusions.append(f"{bhasmarathi_desc_str} for {total_pax} {person_text}.")
     inclusions.append("Bhasm-Aarti pickup and drop.")
 
-# Hotel stay (nights per city)
 if "Stay City" in client_data.columns and "Room Type" in client_data.columns and stay_city_df is not None:
     city_nights = {}
     for i in range(len(client_data)):
@@ -347,9 +342,8 @@ st.download_button(
 )
 
 # -----------------------------
-# Save to MongoDB (inside main block!)
+# Save to MongoDB
 # -----------------------------
-# NOTE: For production, prefer: MONGO_URI = st.secrets["mongo_uri"]
 MONGO_URI = "mongodb+srv://TAK_USER:Arpith%2692@cluster0.ewncl10.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["TAK_DB"]
@@ -357,8 +351,8 @@ collection = db["itineraries"]
 
 record = {
     "client_name": client_name,
-    "client_mobile": client_mobile,           # <-- NEW (digits only)
-    "representative": representative,         # <-- NEW
+    "client_mobile": client_mobile,           # NEW
+    "representative": representative,         # NEW
     "upload_date": datetime.datetime.utcnow(),
     "start_date": str(start_date.date()),
     "end_date": str(end_date.date()),
@@ -368,7 +362,7 @@ record = {
     "car_types": car_types_str,
     "hotel_types": hotel_types_str,
     "bhasmarathi_types": bhasmarathi_desc_str,
-    "package_cost": formatted_cost1,   # saved as formatted string (we handle it in Package Update)
+    "package_cost": formatted_cost1,
     "itinerary_text": final_output
 }
 
