@@ -74,14 +74,13 @@ def fetch_itineraries_df():
     for r in rows:
         r["itinerary_id"] = str(r.get("_id"))
         r["ach_id"] = r.get("ach_id", "")
-        try:
-            r["start_date"] = pd.to_datetime(r.get("start_date")).date()
-        except Exception:
-            r["start_date"] = None
-        try:
-            r["end_date"] = pd.to_datetime(r.get("end_date")).date()
-        except Exception:
-            r["end_date"] = None
+        # normalize dates
+        for k in ("start_date", "end_date"):
+            try:
+                v = r.get(k)
+                r[k] = pd.to_datetime(v).date() if pd.notna(v) else None
+            except Exception:
+                r[k] = None
         r["package_cost_num"] = to_int_money(r.get("package_cost"))
     return pd.DataFrame(rows)
 
@@ -91,7 +90,11 @@ def fetch_updates_df():
         return pd.DataFrame(columns=["itinerary_id","status","booking_date","advance_amount"])
     for r in rows:
         if r.get("booking_date"):
-            r["booking_date"] = pd.to_datetime(r["booking_date"]).date()
+            try:
+                r["booking_date"] = pd.to_datetime(r["booking_date"]).date()
+            except Exception:
+                r["booking_date"] = None
+        r["advance_amount"] = to_int_money(r.get("advance_amount", 0))
     return pd.DataFrame(rows)
 
 def fetch_expenses_df():
@@ -136,10 +139,17 @@ def find_itinerary_doc(selected_id: str):
     except Exception:
         it = None
     if it is None:
-        # If you keep plain string ids in a field or use ACH id to link
         it = (col_itineraries.find_one({"itinerary_id": selected_id}) or
               col_itineraries.find_one({"ach_id": selected_id}))
     return it
+
+def to_date_or_none(x):
+    try:
+        if pd.isna(x):
+            return None
+        return pd.to_datetime(x).date()
+    except Exception:
+        return None
 
 # ----------------------------
 # Page UI
@@ -155,12 +165,18 @@ if df_it.empty:
 df_up  = fetch_updates_df()
 df_exp = fetch_expenses_df()
 
-df = df_it.merge(df_up, on="itinerary_id", how="left")
+df = df_it.merge(df_up, on("itinerary_id"), how="left") if False else df_it.merge(df_up, on="itinerary_id", how="left")
 df["status"] = df["status"].fillna("pending")
+
 # Ensure advance_amount exists & is numeric
 if "advance_amount" not in df.columns:
     df["advance_amount"] = 0
 df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
+
+# Normalize date columns to avoid NaT in editor
+for col in ["start_date", "end_date", "booking_date"]:
+    if col in df.columns:
+        df[col] = df[col].apply(to_date_or_none)
 
 # ----------------------------
 # Summary KPIs
@@ -187,36 +203,73 @@ st.divider()
 st.subheader("1) Update Status for Pending / Under Discussion")
 
 editable = df[df["status"].isin(["pending", "under_discussion"])].copy()
+
 if editable.empty:
     st.success("No pending or under-discussion packages right now. 🎉")
 else:
-    cols = [
+    # guarantee required columns exist
+    must_cols = [
         "ach_id","itinerary_id","client_name","final_route","total_pax",
         "start_date","end_date","package_cost","status","booking_date","advance_amount"
     ]
-    for c in ["client_name","final_route","total_pax","package_cost","ach_id"]:
+    for c in must_cols:
         if c not in editable.columns:
-            editable[c] = ""
-    editable = editable.reindex(columns=[c for c in cols if c in editable.columns])
-    editable = editable.sort_values(["start_date","client_name"])
+            editable[c] = None
+
+    # normalize dtypes (critical for data_editor)
+    for c in ["ach_id","itinerary_id","client_name","final_route","package_cost"]:
+        editable[c] = editable[c].astype(str).fillna("")
+    editable["total_pax"] = pd.to_numeric(editable["total_pax"], errors="coerce").fillna(0).astype(int)
+    editable["advance_amount"] = pd.to_numeric(editable["advance_amount"], errors="coerce").fillna(0).astype(int)
+    for c in ["start_date","end_date","booking_date"]:
+        editable[c] = editable[c].apply(to_date_or_none)
+
+    show_cols = [
+        "ach_id","itinerary_id","client_name","final_route","total_pax",
+        "start_date","end_date","package_cost","status","booking_date","advance_amount"
+    ]
+    editable = editable[show_cols].sort_values(["start_date","client_name"], na_position="last")
 
     st.caption("Tip: Select rows below and use the **Bulk update** box to update all selected at once.")
-    edited = st.data_editor(
-        editable,
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="multi-row",
-        column_config={
-            "status": st.column_config.SelectboxColumn(
-                "Status", options=["pending","under_discussion","confirmed","cancelled"], required=True
-            ),
-            "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
-            "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
-        },
-        key="status_editor"
-    )
 
-    sel = st.session_state.get("status_editor", {}).get("selection", {}).get("rows", [])
+    # Some Streamlit versions don't support selection_mode; fall back if needed
+    try:
+        edited = st.data_editor(
+            editable,
+            use_container_width=True,
+            hide_index=True,
+            selection_mode="multi-row",
+            column_config={
+                "status": st.column_config.SelectboxColumn(
+                    "Status", options=["pending","under_discussion","confirmed","cancelled"]
+                ),
+                "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+                "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
+            },
+            key="status_editor"
+        )
+        selection_supported = True
+    except TypeError:
+        # fallback without selection_mode
+        edited = st.data_editor(
+            editable,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "status": st.column_config.SelectboxColumn(
+                    "Status", options=["pending","under_discussion","confirmed","cancelled"]
+                ),
+                "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+                "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
+            },
+            key="status_editor"
+        )
+        selection_supported = False
+
+    sel = []
+    if selection_supported:
+        sel = st.session_state.get("status_editor", {}).get("selection", {}).get("rows", []) or []
+
     with st.expander("🔁 Bulk update selected rows"):
         bcol1, bcol2, bcol3, bcol4 = st.columns([1,1,1,1])
         with bcol1:
@@ -226,9 +279,11 @@ else:
         with bcol3:
             bulk_adv = st.number_input("Advance (₹)", min_value=0, step=500, value=0)
         with bcol4:
-            apply_bulk = st.button("Apply to selected")
+            apply_bulk = st.button("Apply to selected", disabled=not selection_supported)
 
-        if apply_bulk:
+        if not selection_supported:
+            st.caption("Multi-row selection not supported in this Streamlit build; edit rows below, then click **Save row-by-row edits**.")
+        elif apply_bulk:
             if not sel:
                 st.warning("No rows selected.")
             else:
@@ -251,7 +306,7 @@ else:
             bdate = r.get("booking_date")
             adv   = r.get("advance_amount", 0)
             if status == "confirmed":
-                if pd.isna(bdate):
+                if bdate is None or (isinstance(bdate, str) and not bdate):
                     errors += 1
                     continue
                 bdate = pd.to_datetime(bdate).date().isoformat()
@@ -281,6 +336,9 @@ df["status"] = df["status"].fillna("pending")
 if "advance_amount" not in df.columns:
     df["advance_amount"] = 0
 df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
+for c in ["booking_date", "start_date", "end_date"]:
+    if c in df.columns:
+        df[c] = df[c].apply(to_date_or_none)
 
 confirmed = df[df["status"] == "confirmed"].copy()
 
@@ -311,7 +369,6 @@ else:
         row = confirmed[confirmed["itinerary_id"] == chosen_id].iloc[0]
         client_name  = row.get("client_name","")
         booking_date = row.get("booking_date","")
-        # allow editing package cost here; overwrite on save
         base_cost = st.number_input(
             "Package cost (₹)",
             min_value=0,
@@ -409,7 +466,6 @@ else:
     if CALENDAR_AVAILABLE:
         opts = {"initialView": "dayGridMonth", "height": 620, "eventDisplay": "block"}
         result = calendar(options=opts, events=events, key=f"pkg_cal_{'booking' if view=='By Booking Date' else 'travel'}")
-        # When user clicks an event you get back payload under eventClick
         if result and isinstance(result, dict) and result.get("eventClick"):
             try:
                 selected_id = result["eventClick"]["event"]["id"]
@@ -427,7 +483,6 @@ else:
             if selected_id:
                 selected_id = selected_id.split(" | ")[0]
 
-    # Right-side details panel
     if selected_id:
         st.divider()
         st.subheader("📦 Package Details")
