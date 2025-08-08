@@ -193,7 +193,8 @@ else:
             st.success(f"Saved {saved} update(s).")
         if errors:
             st.warning(f"{errors} row(s) skipped (missing/invalid booking date for confirmed).")
-        st.experimental_rerun()
+        #st.experimental_rerun()
+        st.rerun()
 
 st.divider()
 
@@ -285,7 +286,8 @@ else:
             ]
             profit = save_expenses(chosen_id, client_name, booking_date, base_cost, vendors, notes)
             st.success(f"Expenses saved. 💰 Profit: ₹ {profit:,}")
-            st.experimental_rerun()
+            #st.experimental_rerun()
+            st.rerun()
 
 st.divider()
 
