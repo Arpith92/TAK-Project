@@ -32,7 +32,7 @@ def require_admin():
 
     with st.sidebar:
         st.markdown("### Admin access")
-        p = st.text_input("Enter admin password", type="password", placeholder="enter password here")
+        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
     if (p or "").strip() != ADMIN_PASS.strip():
         st.stop()
     st.session_state["user"] = "Admin"
