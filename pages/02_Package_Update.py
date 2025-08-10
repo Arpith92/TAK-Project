@@ -30,7 +30,7 @@ except Exception:
 # --- Admin-only gate (no PIN login here) ---
 # ----------------------------
 def require_admin():
-    ADMIN_PASS_DEFAULT = "Arpith&92--"  # set your default here
+    ADMIN_PASS_DEFAULT = "Arpith&92"  # set your default here
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
 
     with st.sidebar:
@@ -38,7 +38,7 @@ def require_admin():
         p = st.text_input(
             "Enter admin password",
             type="password",
-            placeholder="Arpith&92--  (ends with two dashes)"
+            placeholder="enter pass"
         )
 
     if (p or "").strip() != ADMIN_PASS.strip():
