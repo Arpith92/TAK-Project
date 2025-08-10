@@ -1,6 +1,5 @@
--c constraints.txt
 pip==24.0
-streamlit==1.40.1
+streamlit==1.42.0
 pandas==2.2.2
 numpy==1.26.4
 openpyxl==3.1.2
@@ -13,7 +12,7 @@ dnspython==2.4.2
 streamlit-calendar==1.4.0
 plotly==5.22.0
 reportlab==3.6.13
-rich==13.9.4
+# no explicit rich pin; let 14.x install
 markdown-it-py==3.0.0
 mdurl==0.1.2
 pygments==2.19.2
