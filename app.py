@@ -237,7 +237,7 @@ if "Stay City" in client_data.columns and "Room Type" in client_data.columns and
                 break
 
 if not client_data['Hotel Type'].dropna().empty:
-    inclusions.append("Standard check-in at 12:00 PM and check-out at 09:00 AM.")
+    inclusions.append("*Standard check-in at 12:00 PM and check-out at 09:00 AM.*")
     inclusions.append("Early check-in and late check-out are subject to room availability.")
 
 inclusions_section = "*Inclusions:-*\n" + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(inclusions)])
