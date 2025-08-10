@@ -62,7 +62,7 @@ def _login() -> Optional[str]:
             "Login is not configured yet.\n\n"
             "Add to **Manage app → Secrets**:\n"
             'mongo_uri = "mongodb+srv://…"\n\n'
-            "[users]\nArpith = \"1234\"\nReena = \"5678\"\nTeena = \"7777\"\nKuldeep = \"8888\"\n"
+            "[users]\nArpith = \"Arpith@123\"\nReena = \"Reena@123\"\nTeena = \"Teena@123\"\nKuldeep = \"Kuldeep@123\"\n"
         )
         st.stop()
 
