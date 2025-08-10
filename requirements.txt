@@ -11,4 +11,6 @@ dnspython==2.4.2
 streamlit-calendar==1.4.0
 plotly==5.22.0
 reportlab==3.6.13
+rich==13.9.4
+
 
