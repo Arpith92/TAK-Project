@@ -203,6 +203,49 @@ def count_confirmed(user: str, start_d: Optional[date]=None, end_d: Optional[dat
     return col_updates.count_documents(q)
 
 # ----------------------------
+# Reassign follow-ups (NEW)
+# ----------------------------
+def _latest_next_followup_date(iid: str) -> Optional[datetime]:
+    """Return latest next_followup_on (datetime) from logs, if any."""
+    d = col_followups.find_one(
+        {"itinerary_id": str(iid)},
+        sort=[("created_at", -1)],
+        projection={"next_followup_on": 1}
+    )
+    return d.get("next_followup_on") if d else None
+
+def reassign_followup(iid: str, from_user: str, to_user: str) -> None:
+    """
+    Move a follow-up to another user:
+      - update package_updates.assigned_to
+      - keep status='followup'
+      - write a log entry noting the reassignment (preserve next_followup_on if present)
+    """
+    next_dt = _latest_next_followup_date(iid)
+
+    # log the transfer
+    log_doc = {
+        "itinerary_id": str(iid),
+        "created_at": datetime.utcnow(),
+        "created_by": from_user,
+        "status": "followup",
+        "comment": f"Reassigned from {from_user} to {to_user}",
+        "next_followup_on": next_dt
+    }
+    col_followups.insert_one(log_doc)
+
+    # update current assignment
+    col_updates.update_one(
+        {"itinerary_id": str(iid)},
+        {"$set": {
+            "status": "followup",
+            "assigned_to": to_user,
+            "updated_at": datetime.utcnow()
+        }},
+        upsert=True
+    )
+
+# ----------------------------
 # Updaters
 # ----------------------------
 def upsert_update_status(
@@ -405,6 +448,23 @@ with dc2:
         "Incentive (₹)": upd_doc.get("incentive",0),
         "Rep (credited to)": upd_doc.get("rep_name",""),
     })
+
+# ---- Reassign control (NEW; hidden for Teena) ----
+if user != "Teena":
+    st.markdown("### Reassign this follow-up")
+    users_map = load_users()
+    candidates = [u for u in users_map.keys() if u != user]  # can assign to anyone else (including Teena)
+    if candidates:
+        to_user = st.selectbox("Move to user", candidates, key="reassign_to")
+        if st.button("➡️ Reassign now"):
+            try:
+                reassign_followup(chosen_id, from_user=user, to_user=to_user)
+                st.success(f"Moved to {to_user}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not reassign: {e}")
+    else:
+        st.caption("No other users available to assign.")
 
 # ---- Final Package Cost editor ----
 st.markdown("### Final package cost")
