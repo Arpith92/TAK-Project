@@ -10,3 +10,5 @@ pymongo[srv]==4.6.3
 dnspython==2.4.2
 streamlit-calendar==1.4.0
 plotly==5.22.0
+reportlab==3.6.13
+
