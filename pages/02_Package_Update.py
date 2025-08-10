@@ -12,6 +12,33 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
+import streamlit as st
+if st.session_state.get("user") in ("Teena", "Kuldeep"):
+    st.stop()  # silently deny
+
+# app.py  (root of the repo)
+import streamlit as st
+
+st.set_page_config(page_title="TAK", layout="wide")
+
+# Whoever logged in on other pages (e.g., Followup Tracker) will be here:
+user = st.session_state.get("user", "")
+
+# Build the nav conditionally
+pages = [
+    st.Page("pages/03_Dashboard.py",        title="Dashboard",       icon=":bar_chart:"),
+    st.Page("pages/03_Followup_Tracker.py", title="Followup Tracker", icon=":telephone_receiver:"),
+]
+
+# Hide Package Update for Teena & Kuldeep
+if user not in ("Teena", "Kuldeep"):
+    pages.insert(1, st.Page("pages/02_Package_Update.py", title="Package Update", icon=":package:"))
+
+nav = st.navigation(pages)
+nav.run()
+
+
+
 # ----------------------------
 # Page config
 # ----------------------------
