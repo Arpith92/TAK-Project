@@ -11,6 +11,7 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
+
 # ----------------------------
 # Enforced PIN login (+ Logout)
 # ----------------------------
@@ -18,8 +19,9 @@ def _login() -> Optional[str]:
     """
     Enforce PIN login using st.secrets["users"] = {"Arpith":"1234", ...}.
     No secrets -> show setup instructions and stop.
+    Always shows login unless a user is already set in session.
     """
-    # logout shortcut
+    # logout UI (shows if already logged in)
     with st.sidebar:
         if st.session_state.get("user"):
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
@@ -32,22 +34,20 @@ def _login() -> Optional[str]:
 
     users_map = st.secrets.get("users", None)
 
-    # TEMP debug (open URL with ?debug=1 to see keys; remove after setup)
-    qp = {}
-    try:
-        qp = st.query_params
-    except Exception:
-        pass
-    if qp.get("debug") == "1":
-        st.sidebar.write("Secrets keys:", list(st.secrets.keys()))
-        st.sidebar.write("users type:", type(users_map).__name__)
-
+    # If misconfigured, show what we see (keys only)
     if not isinstance(users_map, dict) or not users_map:
+        with st.sidebar:
+            st.caption("Secrets debug")
+            try:
+                st.write("keys:", list(st.secrets.keys()))
+            except Exception:
+                st.write("keys: unavailable")
+            st.write("users type:", type(users_map).__name__)
         st.error(
             "Login is not configured yet.\n\n"
             "Go to **Manage app → Secrets** and add:\n\n"
-            "mongo_uri = \"...\"\n\n"
-            "[users]\nArpith = \"1234\"\nReena = \"5678\"\nTeena = \"7777\"\nKuldeep = \"8888\"\n"
+            "mongo_uri = \"mongodb+srv://...\"\n\n"
+            "[users]\nArpith = \"1234\"\nReena  = \"5678\"\nTeena  = \"7777\"\nKuldeep = \"8888\"\n"
         )
         st.stop()
 
@@ -60,8 +60,8 @@ def _login() -> Optional[str]:
         pin = st.text_input("PIN", type="password", key="login_pin")
 
     if st.button("Sign in"):
-        # robust compare (handles ints in secrets)
-        if str(users_map.get(name, "")) == str(pin):
+        # robust compare (pins could be stored as int or str)
+        if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
             st.success(f"Welcome, {name}!")
             st.rerun()
@@ -69,7 +69,9 @@ def _login() -> Optional[str]:
             st.error("Invalid PIN")
             st.stop()
 
+    # block the rest of the page until signed in
     return None
+
 
 # ----------------------------
 # Mongo setup
@@ -78,20 +80,23 @@ MONGO_URI = st.secrets["mongo_uri"]
 client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
 db = client["TAK_DB"]
 
-col_itineraries = db["itineraries"]
-col_updates     = db["package_updates"]
-col_followups   = db["followups"]
+col_itineraries = db["itineraries"]         # main app writes here
+col_updates     = db["package_updates"]     # latest status per itinerary (includes incentive, booking_date)
+col_followups   = db["followups"]           # this page: immutable follow-up logs
+
 
 # ----------------------------
-# Vendor master (for info only)
+# (Optional) Vendor master fetch (not used in UI here, kept for parity)
 # ----------------------------
 VENDOR_MASTER_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Vendor_Master.xlsx"
+
 def read_excel_from_url(url, sheet_name=None):
     try:
         r = requests.get(url, timeout=15); r.raise_for_status()
         return pd.read_excel(io.BytesIO(r.content), sheet_name=sheet_name)
     except Exception:
         return None
+
 
 # ----------------------------
 # Helpers
@@ -116,6 +121,7 @@ def _clean_dt(x):
         return None
 
 def _today():
+    # Cloud uses UTC; this is fine for daily tracking
     return datetime.utcnow().date()
 
 def month_bounds(d: date):
@@ -124,10 +130,15 @@ def month_bounds(d: date):
     last = next_month - timedelta(days=1)
     return first, last
 
+
 # ----------------------------
 # Data fetchers
 # ----------------------------
 def fetch_assigned_followups(user: str) -> pd.DataFrame:
+    """
+    Get itineraries with status == 'followup' and assigned_to == user.
+    Merge with itineraries for details.
+    """
     rows = list(col_updates.find({"status":"followup", "assigned_to": user}, {"_id":0}))
     if not rows:
         return pd.DataFrame(columns=["itinerary_id","assigned_to","status"])
@@ -139,6 +150,8 @@ def fetch_assigned_followups(user: str) -> pd.DataFrame:
         "start_date":1, "end_date":1, "final_route":1, "total_pax":1, "representative":1,
         "itinerary_text":1
     }))
+    if not its:
+        return df_u
     for r in its:
         r["itinerary_id"] = str(r["_id"])
         for k in ("start_date","end_date"):
@@ -147,9 +160,14 @@ def fetch_assigned_followups(user: str) -> pd.DataFrame:
             except Exception:
                 r[k] = None
     df_i = pd.DataFrame(its).drop(columns=["_id"])
-    return df_u.merge(df_i, on="itinerary_id", how="left")
+
+    df = df_u.merge(df_i, on="itinerary_id", how="left")
+    return df
 
 def fetch_latest_followup_log_map(itinerary_ids: List[str]) -> Dict[str, dict]:
+    """
+    Return {itinerary_id: latest_log_doc} from col_followups
+    """
     if not itinerary_ids:
         return {}
     cur = col_followups.find({"itinerary_id": {"$in": itinerary_ids}})
@@ -163,6 +181,10 @@ def fetch_latest_followup_log_map(itinerary_ids: List[str]) -> Dict[str, dict]:
     return latest
 
 def fetch_confirmed_incentives(user: str, start_d: date, end_d: date) -> int:
+    """
+    Sum incentive for confirmed packages where rep_name == user in [start_d, end_d].
+    Incentive is saved in package_updates on confirm (from the Package Update page).
+    """
     q = {
         "status": "confirmed",
         "rep_name": user,
@@ -170,7 +192,11 @@ def fetch_confirmed_incentives(user: str, start_d: date, end_d: date) -> int:
                          "$lte": datetime.combine(end_d, datetime.max.time())}
     }
     cur = col_updates.find(q, {"_id":0, "incentive":1})
-    return sum(_to_int(d.get("incentive", 0)) for d in cur)
+    total = 0
+    for d in cur:
+        total += _to_int(d.get("incentive", 0))
+    return total
+
 
 # ----------------------------
 # Updaters
@@ -181,11 +207,15 @@ def upsert_update_status(iid: str, status: str, user: str,
                          comment: str,
                          cancellation_reason: Optional[str],
                          advance_amount: Optional[int]) -> None:
+    """
+    Write a log into col_followups AND update col_updates latest status.
+    """
+    # 1) Insert a followup log (immutable)
     log_doc = {
         "itinerary_id": str(iid),
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.utcnow(),       # system time (user can't change)
         "created_by": user,
-        "status": status,   # "followup" | "confirmed" | "cancelled"
+        "status": status,                      # "followup" | "confirmed" | "cancelled"
         "comment": str(comment or ""),
         "next_followup_on": datetime.combine(next_followup_on, datetime.min.time()) if next_followup_on else None,
         "cancellation_reason": str(cancellation_reason or "") if status == "cancelled" else "",
@@ -195,8 +225,10 @@ def upsert_update_status(iid: str, status: str, user: str,
         log_doc["client_name"] = base.get("client_name", "")
         log_doc["client_mobile"] = base.get("client_mobile", "")
         log_doc["ach_id"] = base.get("ach_id", "")
+
     col_followups.insert_one(log_doc)
 
+    # 2) Update latest status document (current state)
     upd = {
         "itinerary_id": str(iid),
         "status": status if status in ("followup","cancelled") else "confirmed",
@@ -210,7 +242,9 @@ def upsert_update_status(iid: str, status: str, user: str,
             upd["advance_amount"] = int(advance_amount)
     if status == "cancelled":
         upd["cancellation_reason"] = str(cancellation_reason or "")
+
     col_updates.update_one({"itinerary_id": str(iid)}, {"$set": upd}, upsert=True)
+
 
 # ----------------------------
 # UI
@@ -222,29 +256,31 @@ user = _login()
 if not user:
     st.stop()
 
+# Summary header
 df_assigned = fetch_assigned_followups(user)
 itinerary_ids = df_assigned["itinerary_id"].astype(str).tolist()
 latest_map = fetch_latest_followup_log_map(itinerary_ids)
 
+# derive "next follow-up" & last comment from latest log
 df_assigned["next_followup_on"] = df_assigned["itinerary_id"].map(
     lambda x: (latest_map.get(str(x), {}) or {}).get("next_followup_on")
 )
 df_assigned["next_followup_on"] = df_assigned["next_followup_on"].apply(
     lambda x: pd.to_datetime(x).date() if pd.notna(x) else None
 )
-df_assigned["last_comment"] = df_assigned["itinerary_id"].map(
-    lambda x: (latest_map.get(str(x), {}) or {}).get("comment", "")
-)
+df_assigned["last_comment"] = df_assigned["itinerary_id"].map(lambda x: (latest_map.get(str(x), {}) or {}).get("comment", ""))
 
 today = _today()
 tmr = today + timedelta(days=1)
 in7 = today + timedelta(days=7)
 
+# counts
 total_my_pkgs = len(df_assigned)
 due_today = int((df_assigned["next_followup_on"] == today).sum())
 due_tomorrow = int((df_assigned["next_followup_on"] == tmr).sum())
 due_week = int(((df_assigned["next_followup_on"] >= today) & (df_assigned["next_followup_on"] <= in7)).sum())
 
+# incentives — visible only for the logged-in user
 first_this, last_this = month_bounds(today)
 first_last, last_last = month_bounds((first_this - timedelta(days=1)))
 this_month_incentive = fetch_confirmed_incentives(user, first_this, last_this)
@@ -259,7 +295,9 @@ c5.metric("My incentive", f"₹ {this_month_incentive:,}", help=f"Last month: �
 
 st.divider()
 
+# Top table — client, mobile, travel dates, quick actions
 st.subheader("My follow-ups")
+
 if df_assigned.empty:
     st.info("No follow-ups assigned to you right now.")
     st.stop()
@@ -294,6 +332,8 @@ if not chosen_id:
     st.stop()
 
 st.divider()
+
+# Two-pane details for the selected itinerary
 st.subheader("Details & Update")
 
 it_doc = col_itineraries.find_one({"_id": ObjectId(chosen_id)}) or {}
@@ -323,6 +363,7 @@ with dc2:
 with st.expander("Show full itinerary text"):
     st.text_area("Itinerary shared with client", value=it_doc.get("itinerary_text",""), height=260, disabled=True)
 
+# Show full trail (logs) for this itinerary
 st.markdown("### Follow-up trail")
 trail = list(col_followups.find({"itinerary_id": str(chosen_id)}).sort("created_at", -1))
 if trail:
@@ -339,6 +380,8 @@ else:
     st.caption("No follow-up logs yet for this client.")
 
 st.markdown("---")
+
+# Update form
 st.markdown("### Add follow-up update")
 
 with st.form("followup_form"):
@@ -361,6 +404,7 @@ with st.form("followup_form"):
     submitted = st.form_submit_button("💾 Save update")
 
 if submitted:
+    # validations
     if status == "followup required" and not next_date:
         st.error("Please choose the next follow-up date."); st.stop()
     if status == "cancelled" and not (cancel_reason or "").strip():
