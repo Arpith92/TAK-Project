@@ -77,10 +77,32 @@ client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
 # -----------------------------
 # Parse selected sheet
 # -----------------------------
-client_data = input_data.parse(sheet_name=client_name)
+try:
+    client_data = input_data.parse(sheet_name=client_name)
+except Exception as e:
+    st.error(f"Error reading selected sheet: {e}")
+    st.stop()
+
 st.success(f"'{client_name}' sheet selected. Proceeding with processing...")
 
+# ---- Validate travel dates are not in the past ----
+if "Date" not in client_data.columns:
+    st.error("❌ 'Date' column is missing in the uploaded sheet.")
+    st.stop()
+
+dates_series = pd.to_datetime(client_data["Date"], errors="coerce").dt.date
+if dates_series.isna().all():
+    st.error("❌ No valid dates found in the uploaded file.")
+    st.stop()
+
+today = datetime.date.today()
+if (dates_series < today).any():
+    st.error("❌ Travel dates are in the past.")
+    st.stop()
+
+# -----------------------------
 # Load static Excel files
+# -----------------------------
 stay_city_df = read_excel_from_url(STAY_CITY_URL, sheet_name="Stay_City")
 code_df = read_excel_from_url(CODE_FILE_URL, sheet_name="Code")
 bhasmarathi_type_df = read_excel_from_url(BHASMARATHI_TYPE_URL, sheet_name="Bhasmarathi_Type")
@@ -99,8 +121,8 @@ for _, row in client_data.iterrows():
         })
         continue
 
-    particulars = code_df.loc[code_df['Code'] == code, 'Particulars'].values
-    description = particulars[0] if particulars.size > 0 else f"No description found for code {code}"
+    particulars = code_df.loc[code_df['Code'] == code, 'Particulars'].values if code_df is not None else []
+    description = particulars[0] if len(particulars) > 0 else f"No description found for code {code}"
 
     itinerary.append({
         'Date': row.get('Date', 'N/A'),
@@ -115,27 +137,37 @@ start_date = pd.to_datetime(client_data['Date'].min())
 end_date = pd.to_datetime(client_data['Date'].max())
 total_days = (end_date - start_date).days + 1
 total_nights = total_days - 1
+
+if "Total Pax" not in client_data.columns:
+    st.error("❌ 'Total Pax' column is missing in the uploaded sheet.")
+    st.stop()
 total_pax = int(client_data['Total Pax'].iloc[0])
+
 night_text = "Night" if total_nights == 1 else "Nights"
 person_text = "Person" if total_pax == 1 else "Persons"
 
 # Route from codes
 route_parts = []
-for code in client_data['Code']:
-    matched_routes = code_df.loc[code_df['Code'] == code, 'Route']
-    if not matched_routes.empty:
-        route_parts.append(matched_routes.iloc[0])
+if code_df is not None and 'Route' in code_df.columns and 'Code' in client_data.columns:
+    for code in client_data['Code']:
+        matched_routes = code_df.loc[code_df['Code'] == code, 'Route']
+        if not matched_routes.empty:
+            route_parts.append(matched_routes.iloc[0])
+
 route = '-'.join(route_parts).replace(' -', '-').replace('- ', '-')
-route_list = route.split('-')
-final_route = '-'.join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i - 1]])
+route_list = route.split('-') if route else []
+final_route = '-'.join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i - 1]]) if route_list else ""
 
 # Package cost calc
 def calculate_package_cost(df):
+    for required in ['Car Cost', 'Hotel Cost', 'Bhasmarathi Cost']:
+        if required not in df.columns:
+            df[required] = 0
     car_cost = df['Car Cost'].sum()
     hotel_cost = df['Hotel Cost'].sum()
     bhasmarathi_cost = df['Bhasmarathi Cost'].sum()
     total = car_cost + hotel_cost + bhasmarathi_cost
-    return math.ceil(total / 1000) * 1000 - 1
+    return math.ceil(total / 1000) * 1000 - 1 if total > 0 else 0
 
 try:
     locale.setlocale(locale.LC_ALL, 'en_IN')
@@ -151,20 +183,21 @@ formatted_cost = (
 formatted_cost1 = formatted_cost.replace(",", "X").replace("X", ",", 1)
 
 # Types & details line
-car_types = client_data['Car Type'].dropna().unique()
-car_types_str = '-'.join(car_types)
+car_types = client_data['Car Type'].dropna().unique() if 'Car Type' in client_data.columns else []
+car_types_str = '-'.join(car_types) if len(car_types) else ""
 
-hotel_types = client_data['Hotel Type'].dropna().unique()
-hotel_types_str = '-'.join(hotel_types)
+hotel_types = client_data['Hotel Type'].dropna().unique() if 'Hotel Type' in client_data.columns else []
+hotel_types_str = '-'.join(hotel_types) if len(hotel_types) else ""
 
-bhasmarathi_types = client_data['Bhasmarathi Type'].dropna().unique()
+bhasmarathi_types = client_data['Bhasmarathi Type'].dropna().unique() if 'Bhasmarathi Type' in client_data.columns else []
 bhasmarathi_descriptions = []
-for bhas_type in bhasmarathi_types:
-    match = bhasmarathi_type_df.loc[bhasmarathi_type_df['Bhasmarathi Type'] == bhas_type, 'Description']
-    if not match.empty:
-        bhasmarathi_descriptions.append(match.iloc[0])
+if bhasmarathi_type_df is not None and 'Bhasmarathi Type' in bhasmarathi_type_df.columns and 'Description' in bhasmarathi_type_df.columns:
+    for bhas_type in bhasmarathi_types:
+        match = bhasmarathi_type_df.loc[bhasmarathi_type_df['Bhasmarathi Type'] == bhas_type, 'Description']
+        if not match.empty:
+            bhasmarathi_descriptions.append(match.iloc[0])
 bhasmarathi_desc_str = '-'.join(bhasmarathi_descriptions)
-details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})"
+details_line = f"({car_types_str},{hotel_types_str},{bhasmarathi_desc_str})".strip("(),")
 
 # -----------------------------
 # Build itinerary text (NO mobile/rep lines)
@@ -197,12 +230,12 @@ itinerary_message += f"\n*Package cost: {formatted_cost1}/-*\n{details_line}"
 # Inclusions
 # -----------------------------
 inclusions = []
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     inclusions.append(f"Entire travel as per itinerary by {car_types_str}.")
     inclusions.append("Toll, parking, and driver bata are included.")
     inclusions.append("Airport/ Railway station pickup and drop.")
 
-if not client_data['Bhasmarathi Type'].dropna().empty:
+if bhasmarathi_desc_str:
     inclusions.append(f"{bhasmarathi_desc_str} for {total_pax} {person_text}.")
     inclusions.append("Bhasm-Aarti pickup and drop.")
 
@@ -236,7 +269,7 @@ if "Stay City" in client_data.columns and "Room Type" in client_data.columns and
             else:
                 break
 
-if not client_data['Hotel Type'].dropna().empty:
+if hotel_types_str:
     inclusions.append("*Standard check-in at 12:00 PM and check-out at 09:00 AM.*")
     inclusions.append("Early check-in and late check-out are subject to room availability.")
 
@@ -248,33 +281,33 @@ final_message = itinerary_message + "\n\n" + inclusions_section
 # -----------------------------
 exclusions = []
 exclusions.append("Any meals or beverages not specified in the itinerary are not included. (e.g., Breakfast, lunch, dinner, snacks, personal beverages).")
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     exclusions.append("Entry fees for any tourist attractions, temples, or monuments not specified in the inclusions.")
 exclusions.append("Travel insurance.")
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     exclusions.append("Expenses related to personal shopping, tips, or gratuities.")
-if not client_data['Hotel Type'].dropna().empty:
+if hotel_types_str:
     exclusions.append("Any additional charges for early check-in or late check-out if rooms are not available.")
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     exclusions.append("Costs arising due to natural events, unforeseen roadblocks, or personal travel changes.")
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     exclusions.append("Additional charges for any sightseeing spots not listed in the itinerary.")
 exclusions_section = "*Exclusions:-*\n" + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(exclusions)])
 
 important_notes = []
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     important_notes.append("Any tourist attractions not mentioned in the itinerary will incur additional charges.")
-if not client_data['Car Type'].dropna().empty:
+if car_types_str:
     important_notes.append("Visits to tourist spots or temples are subject to traffic conditions and temple management restrictions. If any tourist spot or temple is closed on the specific day of travel due to unforeseen circumstances, TravelaajKal will not be responsible, and no refunds will be provided.")
-if not client_data['Bhasmarathi Type'].dropna().empty:
+if bhasmarathi_desc_str:
     important_notes.append("For Bhasm-Aarti, we will provide tickets, but timely arrival at the temple and seating arrangements are beyond our control.")
-if not client_data['Bhasmarathi Type'].dropna().empty:
+if bhasmarathi_desc_str:
     important_notes.append("We only facilitate the booking of Bhasm-Aarti tickets. The ticket cost will be charged at actuals, as mentioned on the ticket.")
-if not client_data['Bhasmarathi Type'].dropna().empty:
+if bhasmarathi_desc_str:
     important_notes.append("No commitment can be made regarding ticket availability. Bhasm-Aarti tickets are subject to availability and may be canceled at any time based on the decisions of the temple management committee. In case of an unconfirmed ticket, the ticket cost will be refunded.")
-if not client_data['Hotel Type'].dropna().empty:
+if hotel_types_str:
     important_notes.append("Entry to the hotel is subject to the hotel's rules and regulations. A valid ID proof (Indian citizenship) is required. Only married couples are allowed entry.")
-if not client_data['Hotel Type'].dropna().empty:
+if hotel_types_str:
     important_notes.append("Children above 9 years will be considered as adults. Children under 9 years must share the same bed with parents. If an extra bed is required, additional charges will apply.")
 important_notes_section = "\n*Important Notes:-*\n" + "\n".join([f"{i + 1}. {line}" for i, line in enumerate(important_notes)])
 
