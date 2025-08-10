@@ -342,10 +342,15 @@ def save_expense_summary(itinerary_id: str, client_name: str, booking_date, pack
 
 # ----------------------------
 # PDFs (ReportLab)
-# ----------------------------
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm
+
+# ---- PDF generation availability (place this above the "PDFs (ReportLab)" section) ----
+PDF_AVAILABLE = True
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import cm
+except Exception:
+    PDF_AVAILABLE = False
 
 def _pdf_header(c, title):
     c.setFont("Helvetica-Bold", 14)
@@ -837,26 +842,35 @@ else:
         st.markdown("---")
 
         # ---------- Documents (PDF) ----------
-        st.markdown("### Documents")
-        d1, d2 = st.columns(2)
-        it_doc = find_itinerary_doc(chosen_id) or {}
-        upd_doc = col_updates.find_one({"itinerary_id": str(chosen_id)}, {"_id":0}) or {}
-        exp_doc = col_expenses.find_one({"itinerary_id": str(chosen_id)}, {"_id":0}) or {}
-        est_doc = get_estimates(chosen_id)
-        estimates = est_doc.get("estimates", {})
+        # ---------- Documents (PDF) ----------
+st.markdown("### Documents")
+d1, d2 = st.columns(2)
+it_doc = find_itinerary_doc(chosen_id) or {}
+upd_doc = col_updates.find_one({"itinerary_id": str(chosen_id)}, {"_id":0}) or {}
+exp_doc = col_expenses.find_one({"itinerary_id": str(chosen_id)}, {"_id":0}) or {}
+est_doc = get_estimates(chosen_id)
+estimates = est_doc.get("estimates", {})
 
-        with d1:
-            pslip = gen_payment_slip_pdf(it_doc, upd_doc)
-            st.download_button("⬇️ Download Payment Slip (PDF)", data=pslip,
-                               file_name=f"{it_doc.get('ach_id','')}_payment_slip.pdf",
-                               mime="application/pdf")
-        with d2:
-            inv = gen_invoice_pdf(it_doc, exp_doc, estimates)
-            st.download_button("⬇️ Download Invoice (PDF)", data=inv,
-                               file_name=f"{it_doc.get('ach_id','')}_invoice.pdf",
-                               mime="application/pdf")
-
-st.divider()
+if PDF_AVAILABLE:
+    # use the PDF generators you already defined (gen_payment_slip_pdf / gen_invoice_pdf)
+    pslip = gen_payment_slip_pdf(it_doc, upd_doc)
+    with d1:
+        st.download_button("⬇️ Download Payment Slip (PDF)",
+                           data=pslip,
+                           file_name=f"{it_doc.get('ach_id','')}_payment_slip.pdf",
+                           mime="application/pdf")
+    inv = gen_invoice_pdf(it_doc, exp_doc, estimates)
+    with d2:
+        st.download_button("⬇️ Download Invoice (PDF)",
+                           data=inv,
+                           file_name=f"{it_doc.get('ach_id','')}_invoice.pdf",
+                           mime="application/pdf")
+else:
+    # graceful fallback + instruction
+    with d1:
+        st.info("PDF generator unavailable. Install `reportlab` to enable PDF downloads.")
+    with d2:
+        st.caption("Add to requirements.txt:  \n`reportlab==3.6.13`  \nThen redeploy.")
 
 # ----------------------------
 # 3) Calendar – Toggle views & click-to-open details
