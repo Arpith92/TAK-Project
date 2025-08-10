@@ -11,14 +11,24 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
+
 # ----------------------------
-# Enforced PIN login
+# Enforced PIN login (+ Logout)
 # ----------------------------
 def _login() -> Optional[str]:
     """
     Enforce PIN login using st.secrets["users"] = {"Arpith":"1234", ...}.
     No secrets -> show setup instructions and stop.
+    Always shows login unless a user is already set in session.
     """
+    # quick logout UI (shows if already logged in)
+    with st.sidebar:
+        if st.session_state.get("user"):
+            st.markdown(f"**Signed in as:** {st.session_state['user']}")
+            if st.button("Log out"):
+                st.session_state.pop("user", None)
+                st.rerun()
+
     if "user" in st.session_state and st.session_state["user"]:
         return st.session_state["user"]
 
@@ -35,19 +45,22 @@ def _login() -> Optional[str]:
     names = list(users_map.keys())
     c1, c2 = st.columns([1,1])
     with c1:
-        name = st.selectbox("User", names)
+        name = st.selectbox("User", names, key="login_user")
     with c2:
-        pin = st.text_input("PIN", type="password")
+        pin = st.text_input("PIN", type="password", key="login_pin")
 
     if st.button("Sign in"):
         if users_map.get(name, "") == str(pin):
             st.session_state["user"] = name
             st.success(f"Welcome, {name}!")
-            st.rerun()  # <- was experimental_rerun
+            st.rerun()
         else:
             st.error("Invalid PIN")
+            st.stop()
 
+    # block the rest of the page until signed in
     return None
+
 
 # ----------------------------
 # Mongo setup
@@ -59,6 +72,7 @@ db = client["TAK_DB"]
 col_itineraries = db["itineraries"]         # main app writes here
 col_updates     = db["package_updates"]     # latest status per itinerary
 col_followups   = db["followups"]           # this page: per-log entries
+
 
 # ----------------------------
 # Vendor master (for info only)
@@ -72,6 +86,7 @@ def read_excel_from_url(url, sheet_name=None):
     except Exception:
         return None
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -84,7 +99,6 @@ def _to_int(x, default=0):
         return default
 
 def _clean_dt(x):
-    # store timezone-agnostic
     if x is None:
         return None
     try:
@@ -104,6 +118,7 @@ def month_bounds(d: date):
     next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
     last = next_month - timedelta(days=1)
     return first, last
+
 
 # ----------------------------
 # Data fetchers
@@ -171,6 +186,7 @@ def fetch_confirmed_incentives(user: str, start_d: date, end_d: date) -> int:
         total += _to_int(d.get("incentive", 0))
     return total
 
+
 # ----------------------------
 # Updaters
 # ----------------------------
@@ -186,9 +202,9 @@ def upsert_update_status(iid: str, status: str, user: str,
     # 1) Insert a followup log (immutable)
     log_doc = {
         "itinerary_id": str(iid),
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.utcnow(),       # system time (user can't change)
         "created_by": user,
-        "status": status,   # "followup" | "confirmed" | "cancelled"
+        "status": status,                      # "followup" | "confirmed" | "cancelled"
         "comment": str(comment or ""),
         "next_followup_on": datetime.combine(next_followup_on, datetime.min.time()) if next_followup_on else None,
         "cancellation_reason": str(cancellation_reason or "") if status == "cancelled" else "",
@@ -201,7 +217,7 @@ def upsert_update_status(iid: str, status: str, user: str,
 
     col_followups.insert_one(log_doc)
 
-    # 2) Update latest status document
+    # 2) Update latest status document (current state)
     upd = {
         "itinerary_id": str(iid),
         "status": status if status in ("followup","cancelled") else "confirmed",
@@ -213,11 +229,11 @@ def upsert_update_status(iid: str, status: str, user: str,
             upd["booking_date"] = datetime.combine(booking_date, datetime.min.time())
         if advance_amount is not None:
             upd["advance_amount"] = int(advance_amount)
-
     if status == "cancelled":
         upd["cancellation_reason"] = str(cancellation_reason or "")
 
     col_updates.update_one({"itinerary_id": str(iid)}, {"$set": upd}, upsert=True)
+
 
 # ----------------------------
 # UI
@@ -234,7 +250,7 @@ df_assigned = fetch_assigned_followups(user)
 itinerary_ids = df_assigned["itinerary_id"].astype(str).tolist()
 latest_map = fetch_latest_followup_log_map(itinerary_ids)
 
-# derive "next follow-up" from latest log
+# derive "next follow-up" & last comment from latest log
 df_assigned["next_followup_on"] = df_assigned["itinerary_id"].map(
     lambda x: (latest_map.get(str(x), {}) or {}).get("next_followup_on")
 )
@@ -253,7 +269,7 @@ due_today = int((df_assigned["next_followup_on"] == today).sum())
 due_tomorrow = int((df_assigned["next_followup_on"] == tmr).sum())
 due_week = int(((df_assigned["next_followup_on"] >= today) & (df_assigned["next_followup_on"] <= in7)).sum())
 
-# incentives — only visible to the logged-in user
+# incentives — visible only for the logged-in user
 first_this, last_this = month_bounds(today)
 first_last, last_last = month_bounds((first_this - timedelta(days=1)))
 this_month_incentive = fetch_confirmed_incentives(user, first_this, last_this)
@@ -399,4 +415,4 @@ if submitted:
         advance_amount=int(advance_amt) if advance_amt is not None else None
     )
     st.success("Update saved.")
-    st.rerun()  # <- was experimental_rerun
+    st.rerun()
