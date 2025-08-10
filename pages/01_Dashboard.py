@@ -1,3 +1,18 @@
+# --- Optional safety: adjust rich if Cloud ever downgrades Streamlit later ---
+try:
+    import streamlit as st, rich
+    from packaging.version import Version
+    # Streamlit < 1.42 requires rich < 14; 1.42+ doesn't require rich.
+    # If a future image downgrades Streamlit, keep the combo compatible:
+    import sys, subprocess
+    if Version(st.__version__) < Version("1.42.0") and Version(rich.__version__) >= Version("14.0.0"):
+        subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
+        st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
+        st.experimental_rerun()
+except Exception:
+    pass
+
+
 # pages/03_Dashboard.py
 import streamlit as st
 import pandas as pd
