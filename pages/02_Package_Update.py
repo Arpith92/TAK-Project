@@ -1,27 +1,17 @@
-# --- Rich version guard: keep Streamlit 1.40.1 happy (needs rich<14) ---
-import sys, subprocess
-def _ver_tuple(v):
-    try:
-        return tuple(int(x) for x in str(v).split(".")[:2])
-    except Exception:
-        return (0, 0)
-
+# --- Optional safety: adjust rich if Cloud ever downgrades Streamlit later ---
 try:
-    import rich
-    if _ver_tuple(rich.__version__) >= (14, 0):  # too new for Streamlit 1.40.x
+    import streamlit as st, rich
+    from packaging.version import Version
+    # Streamlit < 1.42 requires rich < 14; 1.42+ doesn't require rich.
+    # If a future image downgrades Streamlit, keep the combo compatible:
+    import sys, subprocess
+    if Version(st.__version__) < Version("1.42.0") and Version(rich.__version__) >= Version("14.0.0"):
         subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
-        # optional: tell user & rerun
-        try:
-            import streamlit as st
-            st.warning("Adjusted incompatible rich version at runtime. Rerunning...")
-            st.experimental_rerun()
-        except Exception:
-            pass
-except ModuleNotFoundError:
-    # if rich isn't installed yet, let requirements install it
-    pass
+        st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
+        st.experimental_rerun()
 except Exception:
     pass
+
 
 
 
