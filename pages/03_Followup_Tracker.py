@@ -12,43 +12,42 @@ from bson import ObjectId
 from pymongo import MongoClient
 
 # ----------------------------
-# Basic (lightweight) login
+# Enforced PIN login
 # ----------------------------
 def _login() -> Optional[str]:
     """
-    Simple login using st.secrets["users"] = {"Arpith":"1234", "Reena":"1234", ...}
-    If secrets not provided, fall back to name-only selection (no password).
-    Stores st.session_state["user"] = username on success.
+    Enforce PIN login using st.secrets["users"] = {"Arpith":"1234", ...}.
+    No secrets -> show setup instructions and stop.
     """
     if "user" in st.session_state and st.session_state["user"]:
         return st.session_state["user"]
 
+    users_map = st.secrets.get("users", None)
+    if not isinstance(users_map, dict) or not users_map:
+        st.error(
+            "Login is not configured yet.\n\n"
+            "Go to **Manage app → Secrets** and add:\n\n"
+            "[users]\nArpith = \"1234\"\nReena = \"5678\"\nTeena = \"7777\"\nKuldeep = \"8888\"\n"
+        )
+        st.stop()
+
     st.markdown("### 🔐 Login")
-    users_map = st.secrets.get("users", None)  # {"Arpith":"1234", ...}
-    names = list(users_map.keys()) if isinstance(users_map, dict) else ["Arpith", "Reena", "Teena", "Kuldeep"]
-
-    col1, col2 = st.columns([1,1])
-    with col1:
+    names = list(users_map.keys())
+    c1, c2 = st.columns([1,1])
+    with c1:
         name = st.selectbox("User", names)
-    with col2:
-        pin = st.text_input("PIN", type="password") if isinstance(users_map, dict) else ""
+    with c2:
+        pin = st.text_input("PIN", type="password")
 
-    btn = st.button("Sign in")
-    if btn:
-        if isinstance(users_map, dict):
-            if users_map.get(name, "") == str(pin):
-                st.session_state["user"] = name
-                st.success(f"Welcome, {name}!")
-                st.experimental_rerun()
-            else:
-                st.error("Invalid PIN")
-        else:
+    if st.button("Sign in"):
+        if users_map.get(name, "") == str(pin):
             st.session_state["user"] = name
             st.success(f"Welcome, {name}!")
-            st.experimental_rerun()
+            st.rerun()  # <- was experimental_rerun
+        else:
+            st.error("Invalid PIN")
 
     return None
-
 
 # ----------------------------
 # Mongo setup
@@ -97,7 +96,7 @@ def _clean_dt(x):
         return None
 
 def _today():
-    # app runs in IST – Streamlit Cloud uses UTC; using local date from server
+    # Cloud uses UTC; this is fine for daily tracking
     return datetime.utcnow().date()
 
 def month_bounds(d: date):
@@ -118,10 +117,8 @@ def fetch_assigned_followups(user: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["itinerary_id","assigned_to","status"])
     df_u = pd.DataFrame(rows)
-    # ensure itinerary_id is str
     df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
 
-    # bring itinerary info
     its = list(col_itineraries.find({}, {
         "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
         "start_date":1, "end_date":1, "final_route":1, "total_pax":1, "representative":1,
@@ -160,7 +157,7 @@ def fetch_latest_followup_log_map(itinerary_ids: List[str]) -> Dict[str, dict]:
 def fetch_confirmed_incentives(user: str, start_d: date, end_d: date) -> int:
     """
     Sum incentive for confirmed packages where rep_name == user in [start_d, end_d].
-    Incentive is saved in package_updates on confirm (from your Package Update page).
+    Incentive is saved in package_updates on confirm (from the Package Update page).
     """
     q = {
         "status": "confirmed",
@@ -196,7 +193,6 @@ def upsert_update_status(iid: str, status: str, user: str,
         "next_followup_on": datetime.combine(next_followup_on, datetime.min.time()) if next_followup_on else None,
         "cancellation_reason": str(cancellation_reason or "") if status == "cancelled" else "",
     }
-    # attach client info snapshot for easy querying
     base = col_itineraries.find_one({"_id": ObjectId(iid)}, {"client_name":1,"client_mobile":1,"ach_id":1})
     if base:
         log_doc["client_name"] = base.get("client_name", "")
@@ -213,8 +209,6 @@ def upsert_update_status(iid: str, status: str, user: str,
         "updated_at": datetime.utcnow(),
     }
     if status == "confirmed":
-        # keep booking date + optional advance, incentive is already handled in Package Update page;
-        # if booking_date not provided here, leave existing value
         if booking_date:
             upd["booking_date"] = datetime.combine(booking_date, datetime.min.time())
         if advance_amount is not None:
@@ -259,7 +253,7 @@ due_today = int((df_assigned["next_followup_on"] == today).sum())
 due_tomorrow = int((df_assigned["next_followup_on"] == tmr).sum())
 due_week = int(((df_assigned["next_followup_on"] >= today) & (df_assigned["next_followup_on"] <= in7)).sum())
 
-# incentives (this month + last month) — only visible to the logged-in user
+# incentives — only visible to the logged-in user
 first_this, last_this = month_bounds(today)
 first_last, last_last = month_bounds((first_this - timedelta(days=1)))
 this_month_incentive = fetch_confirmed_incentives(user, first_this, last_this)
@@ -300,7 +294,6 @@ left, right = st.columns([2,1])
 with left:
     st.dataframe(table.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
 with right:
-    # selection
     options = (table["ACH ID"].fillna("").astype(str) + " | " +
                table["Client"].fillna("") + " | " +
                table["Mobile"].fillna("") + " | " +
@@ -406,4 +399,4 @@ if submitted:
         advance_amount=int(advance_amt) if advance_amt is not None else None
     )
     st.success("Update saved.")
-    st.experimental_rerun()
+    st.rerun()  # <- was experimental_rerun
