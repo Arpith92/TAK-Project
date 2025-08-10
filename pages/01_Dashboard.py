@@ -1,3 +1,7 @@
+import streamlit as st
+if st.session_state.get("user") in ("Teena", "Kuldeep"):
+    st.stop()  # silently deny
+    
 # --- Optional safety: adjust rich if Cloud ever downgrades Streamlit later ---
 try:
     import streamlit as st, rich
