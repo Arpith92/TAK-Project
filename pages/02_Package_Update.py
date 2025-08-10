@@ -1,3 +1,30 @@
+# --- Rich version guard: keep Streamlit 1.40.1 happy (needs rich<14) ---
+import sys, subprocess
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split(".")[:2])
+    except Exception:
+        return (0, 0)
+
+try:
+    import rich
+    if _ver_tuple(rich.__version__) >= (14, 0):  # too new for Streamlit 1.40.x
+        subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
+        # optional: tell user & rerun
+        try:
+            import streamlit as st
+            st.warning("Adjusted incompatible rich version at runtime. Rerunning...")
+            st.experimental_rerun()
+        except Exception:
+            pass
+except ModuleNotFoundError:
+    # if rich isn't installed yet, let requirements install it
+    pass
+except Exception:
+    pass
+
+
+
 # pages/02_Package_Update.py
 import math
 import io
