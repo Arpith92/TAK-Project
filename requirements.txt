@@ -12,4 +12,4 @@ python-docx==1.1.0
 pyperclip==1.8.2
 matplotlib==3.8.4
 openpyxl>=3.1.2
-# (or) XlsxWriter>=3.2.0  # and swap engine="xlsxwriter"
+XlsxWriter>=3.2.0
