@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import math
 from datetime import datetime, date, time as dtime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -152,6 +153,22 @@ def _str_or_blank(x):
     except Exception:
         pass
     return "" if x is None else str(x)
+
+# ---- Created-at helpers (use ObjectId timestamp) ----
+IST = ZoneInfo("Asia/Kolkata")
+def _created_utc(iid: str) -> datetime | None:
+    try:
+        return ObjectId(str(iid)).generation_time  # tz-aware UTC
+    except Exception:
+        return None
+
+def _fmt_ist(dt: datetime | None) -> str:
+    if not dt:
+        return ""
+    try:
+        return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M %Z")
+    except Exception:
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 # ---- Final cost logic (base − discount) used everywhere on this page ----
 def _final_cost_for(itinerary_id: str) -> int:
@@ -478,6 +495,21 @@ k2.metric("🟠 Under discussion", int(under_discussion_count))
 kf.metric("🔵 Follow-up", int(followup_count))
 k3.metric("🟧 Confirmed – expense pending", int(confirmed_expense_pending))
 k4.metric("🔴 Cancelled", int(cancelled_count))
+
+st.divider()
+
+# ----------------------------
+# 🕒 Created-at section (new)
+# ----------------------------
+st.subheader("🕒 Package created time")
+with st.expander("Show recently created (last 25)"):
+    created_df = df[["itinerary_id","ach_id","client_name","client_mobile"]].copy()
+    created_df["created_utc"] = created_df["itinerary_id"].apply(_created_utc)
+    created_df = created_df.dropna(subset=["created_utc"]).sort_values("created_utc", ascending=False).head(25)
+    created_df["Created (IST)"] = created_df["created_utc"].apply(_fmt_ist)
+    created_df["Created (UTC)"] = created_df["created_utc"].apply(lambda d: d.strftime("%Y-%m-%d %H:%M %Z"))
+    show_cols = ["ach_id","client_name","client_mobile","Created (IST)","Created (UTC)"]
+    st.dataframe(created_df[show_cols], use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -835,7 +867,7 @@ else:
                 "adv1_amt": _to_int(adv1_amt),
                 "adv1_date": adv1_date.isoformat() if adv1_date else None,
                 "adv2_amt": _to_int(adv2_amt),
-                "adv2_date": _to_int(adv2_date) if isinstance(adv2_date, int) else (adv2_date.isoformat() if adv2_date else None),
+                "adv2_date": adv2_date.isoformat() if adv2_date else None,
                 "final_amt": _to_int(final_amt),
                 "final_date": final_date.isoformat() if final_date else None,
                 "balance": _to_int(bal),
@@ -919,6 +951,10 @@ else:
         upd = col_updates.find_one({"itinerary_id": str(selected_id)}, {"_id":0})
         exp = col_expenses.find_one({"itinerary_id": str(selected_id)}, {"_id":0})
 
+        created_dt_utc = _created_utc(selected_id)
+        created_ist_str = _fmt_ist(created_dt_utc)
+        created_utc_str = created_dt_utc.strftime("%Y-%m-%d %H:%M %Z") if created_dt_utc else ""
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Basic**")
@@ -929,6 +965,8 @@ else:
                 "Route": it.get("final_route","") if it else "",
                 "Pax": it.get("total_pax","") if it else "",
                 "Travel": f"{it.get('start_date','')} → {it.get('end_date','')}" if it else "",
+                "Created (IST)": created_ist_str,
+                "Created (UTC)": created_utc_str,
             })
         with c2:
             st.markdown("**Status & Money**")
