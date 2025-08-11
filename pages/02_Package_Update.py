@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import math
-import sys
 from datetime import datetime, date, time as dtime
 
 import pandas as pd
@@ -39,11 +38,7 @@ def require_admin():
 
     with st.sidebar:
         st.markdown("### Admin access")
-        p = st.text_input(
-            "Enter admin password",
-            type="password",
-            placeholder="enter pass"
-        )
+        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
 
     if (p or "").strip() != ADMIN_PASS.strip():
         st.stop()
@@ -463,16 +458,19 @@ for col_ in ["start_date", "end_date", "booking_date"]:
 
 
 # ----------------------------
-# Summary KPIs
+# Summary KPIs  (unique by client_mobile)
 # ----------------------------
-pending_count           = (df["status"] == "pending").sum()
-under_discussion_count  = (df["status"] == "under_discussion").sum()
-followup_count          = (df["status"] == "followup").sum()
-cancelled_count         = (df["status"] == "cancelled").sum()
+latest_for_counts = group_latest_by_mobile(df.copy())
 
-confirmed_df = df[df["status"] == "confirmed"].copy()
+pending_count           = int((latest_for_counts["status"] == "pending").sum())
+under_discussion_count  = int((latest_for_counts["status"] == "under_discussion").sum())
+followup_count          = int((latest_for_counts["status"] == "followup").sum())
+cancelled_count         = int((latest_for_counts["status"] == "cancelled").sum())
+
+# Confirmed – expense pending (unique by mobile)
 have_expense_ids = set(df_exp["itinerary_id"]) if not df_exp.empty else set()
-confirmed_expense_pending = confirmed_df[~confirmed_df["itinerary_id"].isin(have_expense_ids)].shape[0]
+confirmed_latest = latest_for_counts[latest_for_counts["status"] == "confirmed"].copy()
+confirmed_expense_pending = confirmed_latest[~confirmed_latest["itinerary_id"].isin(have_expense_ids)].shape[0]
 
 k1, k2, kf, k3, k4 = st.columns(5)
 k1.metric("🟡 Pending", int(pending_count))
@@ -522,96 +520,86 @@ else:
         editable["assigned_to"] = ""
     editable["assigned_to"] = editable["assigned_to"].apply(_str_or_blank)
 
+    # --- checkbox column for robust selection ---
+    if "select" not in editable.columns:
+        editable.insert(0, "select", False)
+
     show_cols = [
+        "select",
         "ach_id","itinerary_id","client_name","client_mobile","final_route","total_pax",
         "start_date","end_date","package_cost","status","booking_date","advance_amount","assigned_to"
     ]
     editable = editable[show_cols].sort_values(["start_date","client_name"], na_position="last")
 
-    st.caption("Tip: Select rows and use **Bulk update** to move many to Follow-up.")
+    st.caption("Tick **Select** on the rows you want, then use **Bulk update** below to change Status and/or Assign To.")
 
-    try:
-        edited = st.data_editor(
-            editable,
-            use_container_width=True,
-            hide_index=True,
-            selection_mode="multi-row",
-            column_config={
-                "status": st.column_config.SelectboxColumn(
-                    "Status", options=["pending","under_discussion","followup","confirmed","cancelled"]
-                ),
-                "assigned_to": st.column_config.SelectboxColumn(
-                    "Assign To", options=["", "Arpith","Reena","Teena","Kuldeep"]
-                ),
-                "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
-                "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
-            },
-            key="status_editor"
-        )
-        selection_supported = True
-    except TypeError:
-        edited = st.data_editor(
-            editable,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "status": st.column_config.SelectboxColumn(
-                    "Status", options=["pending","under_discussion","followup","confirmed","cancelled"]
-                ),
-                "assigned_to": st.column_config.SelectboxColumn(
-                    "Assign To", options=["", "Arpith","Reena","Teena","Kuldeep"]
-                ),
-                "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
-                "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
-            },
-            key="status_editor"
-        )
-        selection_supported = False
+    edited = st.data_editor(
+        editable,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "select": st.column_config.CheckboxColumn("Select"),
+            "status": st.column_config.SelectboxColumn(
+                "Status", options=["pending","under_discussion","followup","confirmed","cancelled"]
+            ),
+            "assigned_to": st.column_config.SelectboxColumn(
+                "Assign To", options=["", "Arpith","Reena","Teena","Kuldeep"]
+            ),
+            "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+            "advance_amount": st.column_config.NumberColumn("Advance (₹)", min_value=0, step=500),
+        },
+        key="status_editor_v2"
+    )
 
-    sel = []
-    if selection_supported:
-        sel = st.session_state.get("status_editor", {}).get("selection", {}).get("rows", []) or []
-
+    # --- BULK update using the checkbox selection ---
     with st.expander("🔁 Bulk update selected rows"):
-        b1, b2, b3, b4, b5 = st.columns([1,1,1,1,1])
+        b1, b2, b3, b4 = st.columns([1,1,1,1])
         with b1:
-            bulk_status = st.selectbox("Status", ["pending","under_discussion","followup","confirmed","cancelled"])
+            bulk_status = st.selectbox("Set Status", ["pending","under_discussion","followup","confirmed","cancelled"])
         with b2:
-            bulk_assignee = st.selectbox("Assign To", ["", "Arpith","Reena","Teena","Kuldeep"])
+            bulk_assignee = st.selectbox("Assign To (for follow-up)", ["", "Arpith","Reena","Teena","Kuldeep"])
         with b3:
             bulk_date = st.date_input("Booking date (for confirmed)", value=None)
         with b4:
             bulk_adv = st.number_input("Advance (₹)", min_value=0, step=500, value=0)
-        with b5:
-            apply_bulk = st.button("Apply to selected", disabled=not selection_supported)
 
-        if not selection_supported:
-            st.caption("Multi-row selection not supported; edit rows then click **Save row-by-row edits**.")
-        elif apply_bulk:
-            if not sel:
-                st.warning("No rows selected.")
+        if st.button("Apply to selected"):
+            sel_df = edited[edited["select"] == True]
+            if sel_df.empty:
+                st.warning("No rows ticked.")
             else:
-                if bulk_status == "followup" and not _str_or_blank(bulk_assignee):
-                    st.warning("Choose **Assign To** when moving to Follow-up.")
-                else:
-                    for r_idx in sel:
-                        r = edited.iloc[r_idx]
-                        bdate = None
-                        if bulk_status == "confirmed":
-                            if not bulk_date:
-                                continue
-                            bdate = pd.to_datetime(bulk_date).date().isoformat()
+                applied, skipped = 0, 0
+                for _, r in sel_df.iterrows():
+                    bdate = None
+                    if bulk_status == "confirmed":
+                        if not bulk_date:
+                            skipped += 1
+                            continue
+                        bdate = pd.to_datetime(bulk_date).date().isoformat()
+
+                    assignee = _str_or_blank(bulk_assignee) if bulk_status == "followup" else None
+                    if bulk_status == "followup" and not assignee:
+                        skipped += 1
+                        continue
+
+                    try:
                         upsert_status(
                             r["itinerary_id"],
                             bulk_status,
                             bdate,
                             bulk_adv,
-                            assigned_to=_str_or_blank(bulk_assignee) if bulk_status == "followup" else None
+                            assigned_to=assignee
                         )
-                    st.success(f"Applied to {len(sel)} row(s).")
-                    st.rerun()
+                        applied += 1
+                    except Exception:
+                        skipped += 1
 
-    # Save row-by-row
+                st.success(f"Bulk updated: {applied} ✓")
+                if skipped:
+                    st.warning(f"Skipped: {skipped}")
+                st.rerun()
+
+    # --- Save any row-by-row edits made directly in the grid ---
     if st.button("💾 Save row-by-row edits"):
         saved, errors = 0, 0
         for _, r in edited.iterrows():
@@ -621,7 +609,6 @@ else:
             bdate = r.get("booking_date")
             adv   = r.get("advance_amount", 0)
 
-            # guardrails
             if status == "followup" and not assignee:
                 errors += 1
                 continue
@@ -848,7 +835,7 @@ else:
                 "adv1_amt": _to_int(adv1_amt),
                 "adv1_date": adv1_date.isoformat() if adv1_date else None,
                 "adv2_amt": _to_int(adv2_amt),
-                "adv2_date": adv2_date.isoformat() if adv2_date else None,
+                "adv2_date": _to_int(adv2_date) if isinstance(adv2_date, int) else (adv2_date.isoformat() if adv2_date else None),
                 "final_amt": _to_int(final_amt),
                 "final_date": final_date.isoformat() if final_date else None,
                 "balance": _to_int(bal),
