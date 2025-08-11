@@ -12,7 +12,7 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
-import streamlit as st
+# Deny for these users
 if st.session_state.get("user") in ("Teena", "Kuldeep"):
     st.stop()  # silently deny
 
@@ -157,6 +157,35 @@ def _str_or_blank(x):
     except Exception:
         pass
     return "" if x is None else str(x)
+
+# ---- Final cost logic (base − discount) used everywhere on this page ----
+def _final_cost_for(itinerary_id: str) -> int:
+    """
+    Final cost = base_package_cost - discount.
+    Fallbacks:
+      - if only expenses.package_cost exists, treat it as final
+      - else use itinerary.package_cost - itinerary.discount
+    """
+    exp = col_expenses.find_one(
+        {"itinerary_id": str(itinerary_id)},
+        {"final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
+    ) or {}
+
+    if "final_package_cost" in exp:
+        return _to_int(exp.get("final_package_cost", 0))
+
+    if ("base_package_cost" in exp) or ("discount" in exp):
+        base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
+        disc = _to_int(exp.get("discount", 0))
+        return max(0, base - disc)
+
+    if "package_cost" in exp:
+        return _to_int(exp.get("package_cost", 0))
+
+    it = col_itineraries.find_one({"_id": ObjectId(itinerary_id)}, {"package_cost": 1, "discount": 1}) or {}
+    base = _to_int(it.get("package_cost", 0))
+    disc = _to_int(it.get("discount", 0))
+    return max(0, base - disc)
 
 
 # ----------------------------
@@ -331,20 +360,16 @@ def push_back_status(itinerary_id: str, new_status: str = "under_discussion"):
     col_updates.update_one({"itinerary_id": str(itinerary_id)}, {"$set": doc}, upsert=True)
 
 def upsert_status(itinerary_id, status, booking_date, advance_amount, assigned_to=None):
-    # compute incentive if confirming
+    # compute incentive if confirming -> use FINAL cost
     incentive = 0
     rep_name = ""
     if status == "confirmed":
         it = find_itinerary_doc(itinerary_id)
         rep_name = (it or {}).get("representative", "")
-        exp = col_expenses.find_one({"itinerary_id": str(itinerary_id)}, {"package_cost":1})
-        if exp and "package_cost" in exp:
-            pkg_amt = _to_int(exp["package_cost"])
-        else:
-            pkg_amt = _to_int((it or {}).get("package_cost"))
-        if pkg_amt > 5000 and pkg_amt < 20000:
+        final_amt = _final_cost_for(itinerary_id)
+        if 5000 < final_amt < 20000:
             incentive = 250
-        elif pkg_amt >= 20000:
+        elif final_amt >= 20000:
             incentive = 500
 
     doc = {
@@ -363,7 +388,19 @@ def upsert_status(itinerary_id, status, booking_date, advance_amount, assigned_t
 
     col_updates.update_one({"itinerary_id": str(itinerary_id)}, {"$set": _clean_for_mongo(doc)}, upsert=True)
 
-def save_expense_summary(itinerary_id: str, client_name: str, booking_date, package_cost: int, notes: str = ""):
+def save_expense_summary(
+    itinerary_id: str,
+    client_name: str,
+    booking_date,
+    base_amount: int,
+    discount: int,
+    notes: str = ""
+):
+    """
+    Persist base, discount, and FINAL cost.
+    Also compute total vendor expenses and profit = FINAL - total_expenses.
+    Keep legacy expenses.package_cost aligned to FINAL for old views.
+    """
     vp = get_vendor_pay_doc(itinerary_id)
     items = vp.get("items", [])
     total_expenses = 0
@@ -374,21 +411,29 @@ def save_expense_summary(itinerary_id: str, client_name: str, booking_date, pack
         else:
             total_expenses += _to_int(it.get("adv1_amt", 0)) + _to_int(it.get("adv2_amt", 0)) + _to_int(it.get("final_amt", 0))
 
-    pkg = _to_int(package_cost)
-    profit = pkg - total_expenses
+    base = _to_int(base_amount)
+    disc = _to_int(discount)
+    final_cost = max(0, base - disc)
+    profit = final_cost - total_expenses
 
     doc = {
         "itinerary_id": str(itinerary_id),
         "client_name": str(client_name or ""),
         "booking_date": _to_dt_or_none(booking_date),
-        "package_cost": pkg,
+
+        # store detailed + align legacy key
+        "base_package_cost": base,
+        "discount": disc,
+        "final_package_cost": final_cost,
+        "package_cost": final_cost,  # legacy compatibility
+
         "total_expenses": _to_int(total_expenses),
         "profit": _to_int(profit),
         "notes": str(notes or ""),
         "saved_at": datetime.utcnow(),
     }
     col_expenses.update_one({"itinerary_id": str(itinerary_id)}, {"$set": _clean_for_mongo(doc)}, upsert=True)
-    return profit, total_expenses
+    return profit, total_expenses, final_cost
 
 
 # ----------------------------
@@ -645,6 +690,9 @@ else:
     have_expense = set(df_exp["itinerary_id"]) if not df_exp.empty else set()
     confirmed["expense_entered"] = confirmed["itinerary_id"].isin(have_expense)
 
+    # Add FINAL cost column for display (computed live)
+    confirmed["final_cost"] = confirmed["itinerary_id"].apply(_final_cost_for)
+
     search = st.text_input("🔎 Search confirmed clients (name/mobile/ACH ID)")
     view_tbl = confirmed.copy()
     if search.strip():
@@ -658,11 +706,9 @@ else:
     left, right = st.columns([2,1])
     with left:
         show_cols = ["ach_id","itinerary_id","client_name","client_mobile","final_route","total_pax",
-                     "package_cost","advance_amount","booking_date","expense_entered"]
-        st.dataframe(
-            view_tbl[show_cols].sort_values("booking_date"),
-            use_container_width=True
-        )
+                     "final_cost","advance_amount","booking_date","expense_entered"]
+        view = view_tbl[show_cols].rename(columns={"final_cost":"Final package cost (₹)"})
+        st.dataframe(view.sort_values("booking_date"), use_container_width=True)
     with right:
         st.markdown("**Select a confirmed package to manage:**")
         options = (confirmed["ach_id"].fillna("") + " | " +
@@ -677,7 +723,7 @@ else:
         client_name  = row.get("client_name","")
         booking_date = row.get("booking_date","")
 
-                # --- Admin: push a confirmed package back to "Update Status" ---
+        # --- Admin: push a confirmed package back to "Update Status" ---
         st.markdown("#### ↩️ Admin: Push back to Update Status")
         st.caption("Send this package back to the pipeline so it reappears in Section 1 for editing.")
         colpb1, colpb2 = st.columns([2,1])
@@ -692,7 +738,6 @@ else:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Could not push back: {e}")
-
 
         st.markdown("#### Expense Estimates (edit once)")
         est_doc = get_estimates(chosen_id)
@@ -734,17 +779,31 @@ else:
             st.success("Estimates saved.")
             st.rerun()
 
+        # ---------------- Final package cost editor (base − discount) ----------------
         st.markdown("#### Package Summary")
-        base_cost = st.number_input(
-            "Package cost (₹) — final cost for invoice",
-            min_value=0,
-            value=_to_int(row.get("package_cost") or row.get("package_cost_num")),
-            step=500
-        )
+
+        exp_doc = col_expenses.find_one(
+            {"itinerary_id": str(chosen_id)},
+            {"base_package_cost":1, "discount":1, "final_package_cost":1, "package_cost":1}
+        ) or {}
+        base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(row.get("package_cost") or row.get("package_cost_num"))
+        disc_default = _to_int(exp_doc.get("discount", 0))
+
+        c1c, c2c, c3c = st.columns(3)
+        with c1c:
+            base_amount = st.number_input("Quoted/Initial amount (₹)", min_value=0, step=500, value=int(base_default))
+        with c2c:
+            discount = st.number_input("Discount (₹)", min_value=0, step=500, value=int(disc_default))
+        with c3c:
+            st.metric("Final package cost", f"₹ {max(0, int(base_amount) - int(discount)):,}")
+
         notes = st.text_area("Notes (optional)", value="")
+
         if st.button("💾 Save Summary (compute totals & profit)"):
-            profit, total_expenses = save_expense_summary(chosen_id, client_name, booking_date, base_cost, notes)
-            st.success(f"Saved. Total expenses: ₹{total_expenses:,} | Profit: ₹{profit:,}")
+            profit, total_expenses, final_cost = save_expense_summary(
+                chosen_id, client_name, booking_date, base_amount, discount, notes
+            )
+            st.success(f"Saved. Final cost: ₹{final_cost:,} • Total expenses: ₹{total_expenses:,} • Profit: ₹{profit:,}")
             st.rerun()
 
         st.markdown("---")
@@ -765,7 +824,7 @@ else:
             st.text_input("Vendor (from Estimates)", value=est_vendor, disabled=True,
                           help="To change vendor, unlock & edit Expense Estimates.")
 
-            final_cost = st.number_input("Finalization cost (₹)", min_value=0, step=100, disabled=final_done)
+            final_cost_v = st.number_input("Finalization cost (₹)", min_value=0, step=100, disabled=final_done)
             a1, a2 = st.columns(2)
             with a1:
                 adv1_amt = st.number_input("Advance-1 (₹)", min_value=0, step=100, disabled=final_done)
@@ -781,11 +840,11 @@ else:
 
         if submitted_vp and not final_done:
             vname = str(est_vendor or "").strip()
-            bal = max(_to_int(final_cost) - (_to_int(adv1_amt) + _to_int(adv2_amt) + _to_int(final_amt)), 0)
+            bal = max(_to_int(final_cost_v) - (_to_int(adv1_amt) + _to_int(adv2_amt) + _to_int(final_amt)), 0)
             entry = {
                 "category": c_cat,
                 "vendor": vname,
-                "finalization_cost": _to_int(final_cost),
+                "finalization_cost": _to_int(final_cost_v),
                 "adv1_amt": _to_int(adv1_amt),
                 "adv1_date": adv1_date.isoformat() if adv1_date else None,
                 "adv2_amt": _to_int(adv2_amt),
@@ -886,6 +945,9 @@ else:
             })
         with c2:
             st.markdown("**Status & Money**")
+            final_cost_display = _final_cost_for(selected_id)
+            base_cost_display = _to_int((exp or {}).get("base_package_cost", (it or {}).get("package_cost", 0))) if exp or it else 0
+            discount_display  = _to_int((exp or {}).get("discount", (it or {}).get("discount", 0))) if exp or it else 0
             st.write({
                 "Status": upd.get("status","") if upd else "",
                 "Assigned To": upd.get("assigned_to","") if upd else "",
@@ -893,11 +955,11 @@ else:
                 "Advance (₹)": upd.get("advance_amount",0) if upd else 0,
                 "Incentive (₹)": upd.get("incentive",0) if upd else 0,
                 "Representative": upd.get("rep_name","") if upd else (it.get("representative","") if it else ""),
-                "Package cost (₹)": (exp.get("package_cost")
-                                     if exp and "package_cost" in exp
-                                     else _to_int(it.get("package_cost")) if it else 0),
-                "Total expenses (₹)": exp.get("total_expenses", 0) if exp else 0,
-                "Profit (₹)": exp.get("profit", 0) if exp else 0,
+                "Quoted amount (₹)": base_cost_display,
+                "Discount (₹)": discount_display,
+                "Final package cost (₹)": final_cost_display,
+                "Total expenses (₹)": (exp.get("total_expenses", 0) if exp else 0),
+                "Profit (₹)": (exp.get("profit", 0) if exp else 0),
             })
 
         st.markdown("**Itinerary text**")
