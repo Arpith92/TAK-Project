@@ -1,13 +1,11 @@
 # pages/02_Package_Update.py
 from __future__ import annotations
 
-import io
 import math
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import requests
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
@@ -76,19 +74,7 @@ col_itineraries = db["itineraries"]
 col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]
-
-
-# ----------------------------
-# External Vendor Master (GitHub)
-# ----------------------------
-VENDOR_MASTER_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Vendor_Master.xlsx"
-VENDOR_SHEETS = {
-    "Car": "Car",
-    "Hotel": "Hotel",
-    "Bhasmarathi": "Bhasmarathi",
-    "Poojan": "Poojan",
-    "PhotoFrame": "PhotoFrame",
-}
+col_vendors     = db["vendors"]   # NEW: vendor directory (name, city, category)
 
 
 # ----------------------------
@@ -200,28 +186,6 @@ def _final_cost_for(itinerary_id: str) -> int:
     return max(0, base - disc)
 
 
-# ----------------------------
-# Data loading / transforms
-# ----------------------------
-def read_excel_from_url(url, sheet_name=None):
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        return pd.read_excel(io.BytesIO(resp.content), sheet_name=sheet_name)
-    except Exception as e:
-        st.warning(f"Could not load vendor master: {e}")
-        return None
-
-def get_vendor_list(category: str) -> list[str]:
-    sheet = VENDOR_SHEETS.get(category)
-    if not sheet:
-        return []
-    df = read_excel_from_url(VENDOR_MASTER_URL, sheet_name=sheet)
-    if df is None or "Vendor" not in df.columns:
-        return []
-    vals = sorted([str(v).strip() for v in df["Vendor"].dropna().unique() if str(v).strip()])
-    return vals + ["Create new..."]
-
 def to_int_money(x):
     return _to_int(x, 0)
 
@@ -324,6 +288,72 @@ def group_latest_by_mobile(df_all: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------
+# Vendors directory (DB-driven)
+# ----------------------------
+VENDOR_CATEGORIES = ["Bhasmarathi", "Car", "Hotel", "Poojan", "Others"]
+
+def list_vendor_names(category: str) -> list[str]:
+    q = {"category": category}
+    names = [v.get("name","").strip() for v in col_vendors.find(q, {"name":1}, sort=[("name", 1)])]
+    return [n for n in names if n]  # clean empties
+
+def create_vendor(name: str, city: str, category: str) -> bool:
+    name = (name or "").strip()
+    city = (city or "").strip()
+    category = (category or "").strip()
+    if not name or not category:
+        return False
+    doc = {
+        "name": name,
+        "city": city,
+        "category": category,
+        "created_at": datetime.utcnow(),
+    }
+    try:
+        col_vendors.update_one(
+            {"name": name, "category": category},
+            {"$setOnInsert": _clean_for_mongo(doc)},
+            upsert=True
+        )
+        return True
+    except Exception:
+        return False
+
+
+# ----------------------------
+# Auto-assign brand-new packages to Follow-up for their representative
+# ----------------------------
+def ensure_followup_assigned_for_new_packages():
+    """
+    For each itinerary with a representative but NO package_updates yet:
+      Create a package_update doc:
+        status='followup', assigned_to=<representative>, updated_at=now
+    """
+    cur = col_itineraries.find({}, {"_id":1, "representative":1})
+    for it in cur:
+        iid = str(it["_id"])
+        rep = _str_or_blank(it.get("representative", "")).strip()
+        if not rep:
+            continue
+        if col_updates.count_documents({"itinerary_id": iid}, limit=1) > 0:
+            continue
+        doc = {
+            "itinerary_id": iid,
+            "status": "followup",
+            "assigned_to": rep,
+            "advance_amount": 0,
+            "booking_date": None,
+            "incentive": 0,
+            "rep_name": "",
+            "updated_at": datetime.utcnow(),
+        }
+        try:
+            col_updates.update_one({"itinerary_id": iid}, {"$setOnInsert": _clean_for_mongo(doc)}, upsert=True)
+        except Exception:
+            pass
+
+
+# ----------------------------
 # Estimates & Vendor Payments
 # ----------------------------
 def get_estimates(itinerary_id: str) -> dict:
@@ -370,6 +400,24 @@ def push_back_status(itinerary_id: str, new_status: str = "under_discussion"):
         "updated_at": datetime.utcnow(),
     }
     col_updates.update_one({"itinerary_id": str(itinerary_id)}, {"$set": doc}, upsert=True)
+
+def _final_cost_for(itinerary_id: str) -> int:
+    exp = col_expenses.find_one(
+        {"itinerary_id": str(itinerary_id)},
+        {"final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
+    ) or {}
+    if "final_package_cost" in exp:
+        return _to_int(exp.get("final_package_cost", 0))
+    if ("base_package_cost" in exp) or ("discount" in exp):
+        base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
+        disc = _to_int(exp.get("discount", 0))
+        return max(0, base - disc)
+    if "package_cost" in exp:
+        return _to_int(exp.get("package_cost", 0))
+    it = col_itineraries.find_one({"_id": ObjectId(itinerary_id)}, {"package_cost": 1, "discount": 1}) or {}
+    base = _to_int(it.get("package_cost", 0))
+    disc = _to_int(it.get("discount", 0))
+    return max(0, base - disc)
 
 def upsert_status(itinerary_id, status, booking_date, advance_amount, assigned_to=None):
     # compute incentive if confirming -> use FINAL cost
@@ -432,13 +480,11 @@ def save_expense_summary(
         "itinerary_id": str(itinerary_id),
         "client_name": str(client_name or ""),
         "booking_date": _to_dt_or_none(booking_date),
-
         # store detailed + align legacy key
         "base_package_cost": base,
         "discount": disc,
         "final_package_cost": final_cost,
         "package_cost": final_cost,  # legacy compatibility
-
         "total_expenses": _to_int(total_expenses),
         "profit": _to_int(profit),
         "notes": str(notes or ""),
@@ -451,6 +497,10 @@ def save_expense_summary(
 # ----------------------------
 # Load & Prep data
 # ----------------------------
+# 1) make sure brand-new packages are auto-assigned to follow-up for their representative
+ensure_followup_assigned_for_new_packages()
+
+# 2) load app data
 df_it = fetch_itineraries_df()
 if df_it.empty:
     st.info("No packages found yet. Upload a file in the main app first.")
@@ -472,6 +522,37 @@ df["advance_amount"] = pd.to_numeric(df["advance_amount"], errors="coerce").fill
 for col_ in ["start_date", "end_date", "booking_date"]:
     if col_ in df.columns:
         df[col_] = df[col_].apply(to_date_or_none)
+
+
+# ----------------------------
+# Vendor Directory (create + quick view)
+# ----------------------------
+st.subheader("🧾 Vendor Directory")
+with st.expander("➕ Add vendor"):
+    v1, v2, v3, v4 = st.columns([1.4, 1, 1.2, 1.0])
+    with v1:
+        new_vendor_name = st.text_input("Vendor name")
+    with v2:
+        new_vendor_city = st.text_input("City")
+    with v3:
+        new_vendor_cat = st.selectbox("Nature of service", VENDOR_CATEGORIES, index=2)
+    with v4:
+        st.caption(" ")
+        if st.button("Save vendor"):
+            ok = create_vendor(new_vendor_name, new_vendor_city, new_vendor_cat)
+            if ok:
+                st.success("Vendor saved.")
+                st.experimental_rerun()
+            else:
+                st.warning("Please enter at least vendor name and category.")
+
+with st.expander("📋 Current vendors (by category)"):
+    tabs = st.tabs(VENDOR_CATEGORIES)
+    for i, cat in enumerate(VENDOR_CATEGORIES):
+        with tabs[i]:
+            opt = list_vendor_names(cat)
+            df_v = pd.DataFrame({"Vendor": opt}) if opt else pd.DataFrame({"Vendor": []})
+            st.dataframe(df_v, use_container_width=True, hide_index=True)
 
 
 # ----------------------------
@@ -758,6 +839,7 @@ else:
                 except Exception as e:
                     st.error(f"Could not push back: {e}")
 
+        # ===== Expense Estimates (edit once) using DB vendors, with inline creation =====
         st.markdown("#### Expense Estimates (edit once)")
         est_doc = get_estimates(chosen_id)
         locked = bool(est_doc.get("estimates_locked", False))
@@ -773,27 +855,43 @@ else:
             cols = st.columns(5)
             cats = ["Car","Hotel","Bhasmarathi","Poojan","PhotoFrame"]
             new_names = {}
+            new_cities = {}
             for i, cat in enumerate(cats):
                 with cols[i]:
                     st.caption(cat)
-                    vendors = get_vendor_list(cat)
+                    vendor_options = list_vendor_names(cat if cat!="PhotoFrame" else "Others")
+                    options = vendor_options + ["Create new..."]
                     cur_vendor = estimates.get(cat,{}).get("vendor","")
-                    idx = vendors.index(cur_vendor) if (cur_vendor and cur_vendor in vendors) else 0
-                    selv = st.selectbox(f"{cat} Vendor", vendors, index=idx if vendors else 0,
-                                        key=f"est_v_{cat}", disabled=locked)
-                    if selv == "Create new...":
-                        new_names[cat] = st.text_input(f"New {cat} Vendor", value=cur_vendor, disabled=locked)
+                    idx = options.index(cur_vendor) if (cur_vendor and cur_vendor in options) else 0
+                    selv = st.selectbox(
+                        f"{cat} Vendor", options if options else ["Create new..."],
+                        index=idx if options else 0,
+                        key=f"est_v_{cat}", disabled=locked
+                    )
+                    if selv == "Create new..." and not locked:
+                        new_names[cat] = st.text_input(f"New {cat} vendor name", key=f"new_v_{cat}")
+                        new_cities[cat] = st.text_input(f"{cat} vendor city", key=f"new_c_{cat}")
                         vname = (new_names[cat] or "").strip()
                     else:
                         vname = selv or ""
-                    amt = st.number_input(f"{cat} Estimate (₹)", min_value=0, step=100,
-                                          value=_to_int(estimates.get(cat,{}).get("amount",0)),
-                                          disabled=locked, key=f"est_a_{cat}")
+                    amt = st.number_input(
+                        f"{cat} Estimate (₹)", min_value=0, step=100,
+                        value=_to_int(estimates.get(cat,{}).get("amount",0)),
+                        disabled=locked, key=f"est_a_{cat}"
+                    )
                     estimates[cat] = {"vendor": vname, "amount": _to_int(amt)}
             lock_now = st.checkbox("Lock estimates (cannot edit later here)", value=locked, disabled=locked)
             save_est = st.form_submit_button("💾 Save Estimates", disabled=locked)
 
         if save_est:
+            # create any newly typed vendors in DB
+            for cat, name in new_names.items():
+                name = (name or "").strip()
+                if name:
+                    city = (new_cities.get(cat) or "").strip()
+                    # map PhotoFrame -> Others in directory
+                    cat_dir = cat if cat != "PhotoFrame" else "Others"
+                    create_vendor(name, city, cat_dir)
             save_estimates(chosen_id, estimates, lock_now)
             st.success("Estimates saved.")
             st.rerun()
@@ -827,12 +925,13 @@ else:
 
         st.markdown("---")
 
+        # ===== Vendor Payments =====
         st.markdown("### Vendor Payments")
         vp_doc = get_vendor_pay_doc(chosen_id)
         items = vp_doc.get("items", [])
         final_done = bool(vp_doc.get("final_done", False))
 
-        st.caption("Update vendor-wise payments. Vendor is taken from Estimates. Mark **Final done** to lock further edits.")
+        st.caption("Update vendor-wise payments. Vendor name is taken from Estimates. Mark **Final done** to lock further edits.")
 
         est_doc = get_estimates(chosen_id)
         estimates = est_doc.get("estimates", {})
@@ -841,7 +940,7 @@ else:
             c_cat = st.selectbox("Category", ["Hotel","Car","Bhasmarathi","Poojan","PhotoFrame"], index=0, disabled=final_done)
             est_vendor = (estimates.get(c_cat, {}) or {}).get("vendor", "")
             st.text_input("Vendor (from Estimates)", value=est_vendor, disabled=True,
-                          help="To change vendor, unlock & edit Expense Estimates.")
+                          help="To change vendor, edit above in Expense Estimates.")
 
             final_cost_v = st.number_input("Finalization cost (₹)", min_value=0, step=100, disabled=final_done)
             a1, a2 = st.columns(2)
