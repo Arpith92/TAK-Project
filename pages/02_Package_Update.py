@@ -295,7 +295,7 @@ VENDOR_CATEGORIES = ["Bhasmarathi", "Car", "Hotel", "Poojan", "Others"]
 def list_vendor_names(category: str) -> list[str]:
     q = {"category": category}
     names = [v.get("name","").strip() for v in col_vendors.find(q, {"name":1}, sort=[("name", 1)])]
-    return [n for n in names if n]  # clean empties
+    return [n for n in names if n]
 
 def create_vendor(name: str, city: str, category: str) -> bool:
     name = (name or "").strip()
@@ -354,7 +354,7 @@ def ensure_followup_assigned_for_new_packages():
 
 
 # ----------------------------
-# Estimates & Vendor Payments
+# Estimates & Vendor Payments helpers
 # ----------------------------
 def get_estimates(itinerary_id: str) -> dict:
     doc = col_expenses.find_one({"itinerary_id": str(itinerary_id)},
@@ -400,24 +400,6 @@ def push_back_status(itinerary_id: str, new_status: str = "under_discussion"):
         "updated_at": datetime.utcnow(),
     }
     col_updates.update_one({"itinerary_id": str(itinerary_id)}, {"$set": doc}, upsert=True)
-
-def _final_cost_for(itinerary_id: str) -> int:
-    exp = col_expenses.find_one(
-        {"itinerary_id": str(itinerary_id)},
-        {"final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
-    ) or {}
-    if "final_package_cost" in exp:
-        return _to_int(exp.get("final_package_cost", 0))
-    if ("base_package_cost" in exp) or ("discount" in exp):
-        base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
-        disc = _to_int(exp.get("discount", 0))
-        return max(0, base - disc)
-    if "package_cost" in exp:
-        return _to_int(exp.get("package_cost", 0))
-    it = col_itineraries.find_one({"_id": ObjectId(itinerary_id)}, {"package_cost": 1, "discount": 1}) or {}
-    base = _to_int(it.get("package_cost", 0))
-    disc = _to_int(it.get("discount", 0))
-    return max(0, base - disc)
 
 def upsert_status(itinerary_id, status, booking_date, advance_amount, assigned_to=None):
     # compute incentive if confirming -> use FINAL cost
@@ -480,7 +462,6 @@ def save_expense_summary(
         "itinerary_id": str(itinerary_id),
         "client_name": str(client_name or ""),
         "booking_date": _to_dt_or_none(booking_date),
-        # store detailed + align legacy key
         "base_package_cost": base,
         "discount": disc,
         "final_package_cost": final_cost,
@@ -525,7 +506,53 @@ for col_ in ["start_date", "end_date", "booking_date"]:
 
 
 # ----------------------------
-# Vendor Directory (create + quick view)
+# 💸 Vendor dues summary (top)
+# ----------------------------
+def vendor_dues_summary():
+    from collections import defaultdict
+    sums = defaultdict(int)
+    counts = defaultdict(int)
+    docs = col_vendorpay.find({}, {"_id":0, "items":1})
+    for d in docs:
+        for it in d.get("items", []):
+            vendor = (it.get("vendor") or "").strip()
+            if not vendor:
+                continue
+            bal = it.get("balance")
+            if bal is None:
+                bal = _to_int(it.get("finalization_cost", 0)) - (_to_int(it.get("adv1_amt", 0)) + _to_int(it.get("adv2_amt", 0)) + _to_int(it.get("final_amt", 0)))
+            bal = max(_to_int(bal), 0)
+            if bal <= 0:
+                continue
+            sums[vendor] += bal
+            counts[vendor] += 1
+
+    rows = []
+    for vendor, bal in sorted(sums.items(), key=lambda x: -x[1]):
+        vdoc = col_vendors.find_one({"name": vendor}) or {}
+        rows.append({
+            "Vendor": vendor,
+            "Category": vdoc.get("category", ""),
+            "City": vdoc.get("city", ""),
+            "Bookings": counts[vendor],
+            "Balance (₹)": int(bal),
+        })
+    dfv = pd.DataFrame(rows)
+    total_pending = int(sum(sums.values()))
+    num_vendors = len(sums)
+    return dfv, total_pending, num_vendors
+
+df_dues, total_dues, vendors_with_dues = vendor_dues_summary()
+d1, d2 = st.columns(2)
+d1.metric("💸 Vendor payouts pending (₹)", f"{total_dues:,}")
+d2.metric("🏷️ Vendors with dues", vendors_with_dues)
+if not df_dues.empty:
+    st.dataframe(df_dues, use_container_width=True, hide_index=True)
+st.divider()
+
+
+# ----------------------------
+# 🧾 Vendor Directory
 # ----------------------------
 st.subheader("🧾 Vendor Directory")
 with st.expander("➕ Add vendor"):
@@ -542,7 +569,7 @@ with st.expander("➕ Add vendor"):
             ok = create_vendor(new_vendor_name, new_vendor_city, new_vendor_cat)
             if ok:
                 st.success("Vendor saved.")
-                st.experimental_rerun()
+                st.rerun()         # ✅ avoid experimental API crash
             else:
                 st.warning("Please enter at least vendor name and category.")
 
@@ -553,6 +580,8 @@ with st.expander("📋 Current vendors (by category)"):
             opt = list_vendor_names(cat)
             df_v = pd.DataFrame({"Vendor": opt}) if opt else pd.DataFrame({"Vendor": []})
             st.dataframe(df_v, use_container_width=True, hide_index=True)
+
+st.divider()
 
 
 # ----------------------------
@@ -579,18 +608,70 @@ k4.metric("🔴 Cancelled", int(cancelled_count))
 
 st.divider()
 
+
 # ----------------------------
-# 🕒 Created-at section (new)
+# 🗂️ Package by timeline (with admin delete)
 # ----------------------------
-st.subheader("🕒 Package created time")
-with st.expander("Show recently created (last 25)"):
-    created_df = df[["itinerary_id","ach_id","client_name","client_mobile"]].copy()
+st.subheader("🗂️ Package by timeline")
+with st.expander("Show recently created (last 50)"):
+    created_df = df[["itinerary_id","ach_id","client_name","client_mobile","representative"]].copy()
     created_df["created_utc"] = created_df["itinerary_id"].apply(_created_utc)
-    created_df = created_df.dropna(subset=["created_utc"]).sort_values("created_utc", ascending=False).head(25)
+    created_df = created_df.dropna(subset=["created_utc"]).sort_values("created_utc", ascending=False).head(50)
     created_df["Created (IST)"] = created_df["created_utc"].apply(_fmt_ist)
     created_df["Created (UTC)"] = created_df["created_utc"].apply(lambda d: d.strftime("%Y-%m-%d %H:%M %Z"))
-    show_cols = ["ach_id","client_name","client_mobile","Created (IST)","Created (UTC)"]
-    st.dataframe(created_df[show_cols], use_container_width=True, hide_index=True)
+    created_df["delete"] = False  # selection column
+
+    show_cols = ["delete","ach_id","client_name","client_mobile","representative","Created (IST)","Created (UTC)","itinerary_id"]
+    created_view = created_df[show_cols].rename(columns={"itinerary_id":"_itinerary_id"})
+    edited = st.data_editor(
+        created_view,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "delete": st.column_config.CheckboxColumn("Select"),
+            "_itinerary_id": st.column_config.TextColumn("Itinerary ID", disabled=True),
+        },
+        key="created_timeline_editor",
+    )
+
+    # Delete flow with confirmation
+    if st.button("🗑️ Delete selected package(s)"):
+        to_del = edited[edited["delete"] == True]
+        if to_del.empty:
+            st.warning("No rows selected for deletion.")
+        else:
+            # store pending list in session to confirm
+            st.session_state["_pending_delete_rows"] = to_del[["_itinerary_id","client_name"]].to_dict("records")
+            st.rerun()
+
+# confirmation UI (render outside expander so it’s visible)
+if "_pending_delete_rows" in st.session_state and st.session_state["_pending_delete_rows"]:
+    rows = st.session_state["_pending_delete_rows"]
+    names = ", ".join([f"{r['client_name']}" for r in rows])
+    st.warning(f"Confirm delete for package(s): **{names}** ? This will remove entries from *itineraries*, *package_updates*, *expenses*, and *vendor_payments*.", icon="⚠️")
+    cdel1, cdel2 = st.columns([1,1])
+    with cdel1:
+        if st.button("✅ Yes, delete now"):
+            deleted = 0
+            for r in rows:
+                iid = r["_itinerary_id"]
+                try:
+                    col_itineraries.delete_one({"_id": ObjectId(iid)})
+                except Exception:
+                    # in case iid isn't an ObjectId (fallback)
+                    col_itineraries.delete_one({"itinerary_id": iid})
+                col_updates.delete_many({"itinerary_id": iid})
+                col_expenses.delete_many({"itinerary_id": iid})
+                col_vendorpay.delete_many({"itinerary_id": iid})
+                deleted += 1
+            st.session_state["_pending_delete_rows"] = []
+            st.success(f"Deleted {deleted} package(s).")
+            st.rerun()
+    with cdel2:
+        if st.button("❌ Cancel"):
+            st.session_state["_pending_delete_rows"] = []
+            st.info("Deletion cancelled.")
+            st.rerun()
 
 st.divider()
 
@@ -859,7 +940,9 @@ else:
             for i, cat in enumerate(cats):
                 with cols[i]:
                     st.caption(cat)
-                    vendor_options = list_vendor_names(cat if cat!="PhotoFrame" else "Others")
+                    # map PhotoFrame selection to "Others" directory
+                    look_cat = cat if cat != "PhotoFrame" else "Others"
+                    vendor_options = list_vendor_names(look_cat)
                     options = vendor_options + ["Create new..."]
                     cur_vendor = estimates.get(cat,{}).get("vendor","")
                     idx = options.index(cur_vendor) if (cur_vendor and cur_vendor in options) else 0
@@ -889,7 +972,6 @@ else:
                 name = (name or "").strip()
                 if name:
                     city = (new_cities.get(cat) or "").strip()
-                    # map PhotoFrame -> Others in directory
                     cat_dir = cat if cat != "PhotoFrame" else "Others"
                     create_vendor(name, city, cat_dir)
             save_estimates(chosen_id, estimates, lock_now)
