@@ -1,53 +1,35 @@
 # pages/01_Dashboard.py
 from __future__ import annotations
 
-# --- Block certain users (same logic as other pages) ---
+import io, csv, os
+from datetime import datetime, date, timedelta, time as dtime
+from zoneinfo import ZoneInfo
+from typing import Tuple, Optional
+
+import pandas as pd
 import streamlit as st
+from bson import ObjectId
+from pymongo import MongoClient
+
+# =========================
+# Guard & Page config
+# =========================
 if st.session_state.get("user") in ("Teena", "Kuldeep"):
-    st.stop()  # silently deny
+    st.stop()
 
-# ---- Optional compatibility shim if Streamlit downgrades Rich later ----
-try:
-    import rich  # noqa
-    from packaging.version import Version
-    import subprocess, sys
-    if Version(st.__version__) < Version("1.42.0"):
-        if Version(rich.__version__) >= Version("14.0.0"):
-            subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
-            st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
-            st.experimental_rerun()
-except Exception:
-    pass
-
-# ---- Page config ----
 st.set_page_config(page_title="TAK Dashboard", layout="wide")
+st.markdown("## 📊 TAK – Operations Dashboard")
 
-# ---- Optional calendar widget ----
+# Optional calendar
 CALENDAR_AVAILABLE = True
 try:
     from streamlit_calendar import calendar
 except Exception:
     CALENDAR_AVAILABLE = False
 
-# ---- Plotly for modern interactive charts ----
-PLOTLY = True
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-except Exception:
-    PLOTLY = False
-
-from datetime import datetime, date, timedelta, time as dtime
-from zoneinfo import ZoneInfo
-from bson import ObjectId
-from pymongo import MongoClient
-import pandas as pd
-import io
-import csv
-
-# ----------------------------
-# Admin gate (same style as other admin pages)
-# ----------------------------
+# =========================
+# Admin gate (consistent)
+# =========================
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
@@ -61,168 +43,210 @@ def require_admin():
 
 require_admin()
 
-# ----------------------------
-# Mongo connection (with friendly errors)
-# ----------------------------
-try:
-    MONGO_URI = st.secrets["mongo_uri"]
-except KeyError:
-    st.error("❌ Add `mongo_uri` in Manage app → Settings → Secrets for this app.")
-    st.stop()
+# =========================
+# Mongo (fast, cached)
+# =========================
+IST = ZoneInfo("Asia/Kolkata")
+CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
 
-try:
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
+def _find_uri() -> Optional[str]:
+    for k in CAND_KEYS:
+        try:
+            v = st.secrets.get(k)
+        except Exception:
+            v = None
+        if v:
+            return v
+    for k in CAND_KEYS:
+        v = os.getenv(k)
+        if v:
+            return v
+    return None
+
+@st.cache_resource
+def get_client() -> MongoClient:
+    uri = _find_uri() or st.secrets["mongo_uri"]  # will raise if missing
+    return MongoClient(
+        uri,
+        appName="TAK_Dashboard",
+        maxPoolSize=100,
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        retryWrites=True,
+        tz_aware=True,
+    )
+
+@st.cache_resource
+def get_db():
+    client = get_client()
     client.admin.command("ping")
-except Exception as e:
-    st.error(f"❌ Could not connect to MongoDB: {e}")
-    st.stop()
+    return client["TAK_DB"]
 
-db = client["TAK_DB"]
+db = get_db()
 col_it = db["itineraries"]
 col_up = db["package_updates"]
 col_ex = db["expenses"]
 col_fu = db["followups"]
 
-# ----------------------------
+# =========================
 # Helpers
-# ----------------------------
-IST = ZoneInfo("Asia/Kolkata")
-
-def _to_int(x, default=0):
+# =========================
+def _to_int(x, default=0) -> int:
     try:
-        if x is None: return default
-        s = str(x).replace(",", "")
-        return int(round(float(s)))
+        if x is None:
+            return default
+        return int(round(float(str(x).replace(",", ""))))
     except Exception:
         return default
 
 def _norm_date(x):
     try:
-        if x is None or pd.isna(x): return None
+        if x is None or pd.isna(x):
+            return None
         return pd.to_datetime(x).date()
     except Exception:
         return None
 
-def _created_utc_from_oid(iid: str) -> datetime | None:
+def month_bounds(d: date) -> Tuple[date, date]:
+    first = d.replace(day=1)
+    last = (first + pd.offsets.MonthEnd(1)).date()
+    return first, last
+
+def fy_bounds(d: date) -> Tuple[date, date]:
+    start = date(d.year if d.month >= 4 else d.year - 1, 4, 1)
+    return start, d
+
+def _created_utc_from_oid(iid: str):
     try:
         return ObjectId(str(iid)).generation_time  # tz-aware UTC
     except Exception:
         return None
 
 def _fmt_ist(dt: datetime | None) -> str:
-    if not dt: return ""
+    if not dt:
+        return ""
     try:
         return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
         return dt.strftime("%Y-%m-%d %H:%M UTC")
 
-def month_bounds(d: date):
-    first = d.replace(day=1)
-    last = (first + pd.offsets.MonthEnd(1)).date()
-    return first, last
-
-def fy_bounds(d: date):
-    start = date(d.year if d.month >= 4 else d.year - 1, 4, 1)
-    return start, d
-
-def _final_cost_from_docs(it_row: dict, ex_row: dict | None) -> int:
-    """FINAL = base_package_cost - discount, with sensible fallbacks."""
-    ex_row = ex_row or {}
-    if "final_package_cost" in ex_row:
-        return _to_int(ex_row.get("final_package_cost", 0))
-    if ("base_package_cost" in ex_row) or ("discount" in ex_row):
-        base = _to_int(ex_row.get("base_package_cost", ex_row.get("package_cost", 0)))
-        disc = _to_int(ex_row.get("discount", 0))
-        return max(0, base - disc)
-    if "package_cost" in ex_row:
-        return _to_int(ex_row.get("package_cost", 0))
-    # fall back to itinerary fields
-    base = _to_int((it_row or {}).get("package_cost", 0))
-    disc = _to_int((it_row or {}).get("discount", 0))
-    return max(0, base - disc)
-
-def _load_all():
-    it = list(col_it.find({}))
-    up = list(col_up.find({}))
-    ex = list(col_ex.find({}))
-    # normalize itineraries
-    for r in it:
+# =========================
+# Fast cached readers
+# =========================
+@st.cache_data(ttl=120, show_spinner=False)
+def load_itineraries_df() -> pd.DataFrame:
+    docs = list(col_it.find(
+        {},
+        {
+            "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
+            "representative": 1, "final_route": 1, "total_pax": 1,
+            "upload_date": 1, "start_date": 1, "end_date": 1,
+            "package_cost": 1, "discount": 1
+        }
+    ))
+    if not docs:
+        return pd.DataFrame()
+    for r in docs:
         r["itinerary_id"] = str(r["_id"])
-        r["ach_id"] = r.get("ach_id", "")
-        r["client_name"] = r.get("client_name", "")
-        r["client_mobile"] = r.get("client_mobile", "")
-        r["representative"] = r.get("representative", "")
-        r["final_route"] = r.get("final_route", "")
-        r["total_pax"] = _to_int(r.get("total_pax", 0))
         r["upload_date"] = _norm_date(r.get("upload_date"))
         r["start_date"] = _norm_date(r.get("start_date"))
         r["end_date"] = _norm_date(r.get("end_date"))
+        r["total_pax"] = _to_int(r.get("total_pax", 0))
         r["created_utc"] = _created_utc_from_oid(r["itinerary_id"])
         r["created_ist"] = _fmt_ist(r["created_utc"])
         r["_id"] = None
-    # normalize updates
-    for r in up:
+    return pd.DataFrame(docs)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_updates_df() -> pd.DataFrame:
+    docs = list(col_up.find(
+        {},
+        {"_id": 0, "itinerary_id": 1, "status": 1, "assigned_to": 1,
+         "booking_date": 1, "advance_amount": 1, "rep_name": 1, "incentive": 1}
+    ))
+    if not docs:
+        return pd.DataFrame(columns=["itinerary_id","status","assigned_to","booking_date","advance_amount","rep_name","incentive"])
+    for r in docs:
         r["itinerary_id"] = str(r.get("itinerary_id"))
         r["status"] = r.get("status", "pending")
         r["assigned_to"] = r.get("assigned_to", "")
+        r["rep_name"] = r.get("rep_name", "")
         r["booking_date"] = _norm_date(r.get("booking_date"))
         r["advance_amount"] = _to_int(r.get("advance_amount", 0))
-        r["rep_name"] = r.get("rep_name", "")
         r["incentive"] = _to_int(r.get("incentive", 0))
-        r["_id"] = None
-    # normalize expenses
-    for r in ex:
+    return pd.DataFrame(docs)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_expenses_df() -> pd.DataFrame:
+    docs = list(col_ex.find(
+        {},
+        {"_id": 0, "itinerary_id": 1, "base_package_cost": 1, "discount": 1,
+         "final_package_cost": 1, "package_cost": 1, "total_expenses": 1, "profit": 1}
+    ))
+    if not docs:
+        return pd.DataFrame(columns=["itinerary_id","base_package_cost","discount","final_package_cost","total_expenses","profit"])
+    for r in docs:
         r["itinerary_id"] = str(r.get("itinerary_id"))
         r["base_package_cost"] = _to_int(r.get("base_package_cost", 0))
         r["discount"] = _to_int(r.get("discount", 0))
+        # prefer explicit final; fallback to legacy package_cost
         r["final_package_cost"] = _to_int(r.get("final_package_cost", r.get("package_cost", 0)))
         r["total_expenses"] = _to_int(r.get("total_expenses", 0))
         r["profit"] = _to_int(r.get("profit", 0))
-        r["_id"] = None
-    df_it = pd.DataFrame(it) if it else pd.DataFrame()
-    df_up = pd.DataFrame(up) if up else pd.DataFrame(columns=[
-        "itinerary_id","status","assigned_to","booking_date","advance_amount","rep_name","incentive"
-    ])
-    df_ex = pd.DataFrame(ex) if ex else pd.DataFrame(columns=[
-        "itinerary_id","base_package_cost","discount","final_package_cost","total_expenses","profit"
-    ])
-    # merge
-    df = df_it.merge(df_up, on="itinerary_id", how="left", suffixes=("","_up"))
-    df = df.merge(df_ex, on="itinerary_id", how="left", suffixes=("","_ex"))
-    # default status
-    df["status"] = df["status"].fillna("pending")
-    # compute final cost per row
-    if not df.empty:
-        def _calc_final(row):
-            itrow = {k: row.get(k) for k in df_it.columns} if not df_it.empty else {}
-            exrow = {k: row.get(k) for k in df_ex.columns} if not df_ex.empty else {}
-            return _final_cost_from_docs(itrow, exrow)
-        df["final_cost"] = df.apply(_calc_final, axis=1).astype(int)
-    # ensure numeric cols
-    for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
-    return df
+    return pd.DataFrame(docs)
 
-# ----------------------------
-# Header + Global search + Quick jump
-# ----------------------------
-st.markdown("## 📊 TAK – Operations Dashboard")
+@st.cache_data(ttl=120, show_spinner=False)
+def load_followups_for_ids(iids: list[str]) -> pd.DataFrame:
+    if not iids:
+        return pd.DataFrame()
+    docs = list(col_fu.find({"itinerary_id": {"$in": iids}}, {"_id": 0}))
+    return pd.DataFrame(docs)
 
-top_l, top_m, top_r = st.columns([3,1,2])
-with top_m:
-    st.caption("")  # visual balance
-with top_r:
-    search_txt = st.text_input("🔎 Quick search", placeholder="Client name / Mobile / ACH ID", label_visibility="collapsed")
-
-df_all = _load_all()
-if df_all.empty:
+# =========================
+# Build master DF (vectorized)
+# =========================
+df_it = load_itineraries_df()
+if df_it.empty:
     st.info("No data yet. Upload packages in the main app.")
     st.stop()
 
-# ----------------------------
+df_up = load_updates_df()
+df_ex = load_expenses_df()
+
+df_all = df_it.merge(df_up, on="itinerary_id", how="left")
+df_all = df_all.merge(df_ex, on="itinerary_id", how="left", suffixes=("", "_ex"))
+
+# defaults
+df_all["status"] = df_all["status"].fillna("pending")
+for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
+    if c in df_all.columns:
+        df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
+
+# compute final cost efficiently (no row-wise DB hits)
+final_cost = df_all["final_package_cost"].fillna(0).astype(int)
+fallback_need = final_cost.eq(0)
+if fallback_need.any():
+    base = pd.to_numeric(df_all["base_package_cost"], errors="coerce").fillna(0).astype(int)
+    disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
+    comp = (base - disc).clip(lower=0)
+    # if still 0, fallback to itinerary package_cost - discount if available
+    it_base = pd.to_numeric(df_all["package_cost"], errors="coerce").fillna(0).astype(int)
+    it_disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
+    comp2 = (it_base - it_disc).clip(lower=0)
+    final_cost = final_cost.mask(final_cost.eq(0), comp).mask(final_cost.eq(0), comp2)
+
+df_all["final_cost"] = final_cost.astype(int)
+
+# =========================
+# Top bar: Global search
+# =========================
+top_l, top_m, top_r = st.columns([3,1,2])
+with top_r:
+    search_txt = st.text_input("🔎 Quick search", placeholder="Client name / Mobile / ACH ID", label_visibility="collapsed")
+
+# =========================
 # Filters
-# ----------------------------
+# =========================
 flt1, flt2, flt3, flt4, flt5 = st.columns([1.1, 1.1, 1.8, 1.8, 1.2])
 with flt1:
     basis = st.selectbox("Date basis", ["Upload date", "Booking date", "Travel start date"])
@@ -236,12 +260,11 @@ with flt4:
         start, end = month_bounds(today)
     elif preset == "Last month":
         ft, _ = month_bounds(today)
-        last_prev = ft - timedelta(days=1)
-        start, end = month_bounds(last_prev)
+        start, end = month_bounds(ft - timedelta(days=1))
     elif preset == "This FY":
         start, end = fy_bounds(today)
     elif preset == "This year":
-        start, end = date(today.year,1,1), today
+        start, end = date(today.year, 1, 1), today
     elif preset == "Last 90 days":
         start, end = today - timedelta(days=90), today
     else:
@@ -253,15 +276,12 @@ with flt5:
     reps = sorted([r for r in df_all["representative"].dropna().unique().tolist() if r]) or []
     rep_filter = st.multiselect("Representative", reps, default=reps)
 
-# pick date column
-date_col = {"Upload date":"upload_date","Booking date":"booking_date","Travel start date":"start_date"}[basis]
-
+date_col = {"Upload date":"upload_date", "Booking date":"booking_date", "Travel start date":"start_date"}[basis]
 df = df_all.copy()
 df[date_col] = df[date_col].apply(_norm_date)
 df = df[df[date_col].between(start, end)]
 if rep_filter:
     df = df[df["representative"].isin(rep_filter)]
-# global search
 if (search_txt or "").strip():
     s = search_txt.strip().lower()
     df = df[
@@ -270,22 +290,22 @@ if (search_txt or "").strip():
         df["ach_id"].astype(str).str.lower().str.contains(s)
     ]
 
-# "unique by mobile" view if enabled (latest by created_utc)
+# unique by mobile if enabled (latest by created_utc)
 if dedupe_mobile and not df.empty:
     df = df.sort_values(["client_mobile","created_utc"], ascending=[True, False]) \
            .groupby("client_mobile", as_index=False).first()
 
-# convenience masks
+# masks
 is_confirmed = df["status"].eq("confirmed")
-is_pending = df["status"].eq("pending")
-is_udisc = df["status"].eq("under_discussion")
-is_cancel = df["status"].eq("cancelled")
-is_followup = df["status"].eq("followup")
-is_enquiry = is_pending | is_udisc | is_followup  # sales pipeline
+is_pending   = df["status"].eq("pending")
+is_udisc     = df["status"].eq("under_discussion")
+is_cancel    = df["status"].eq("cancelled")
+is_followup  = df["status"].eq("followup")
+is_enquiry   = is_pending | is_udisc | is_followup
 
-# ----------------------------
-# KPI row
-# ----------------------------
+# =========================
+# KPI Row (structured)
+# =========================
 k1,k2,k3,k4,k5,k6 = st.columns(6)
 k1.metric("✅ Confirmed", int(is_confirmed.sum()))
 k2.metric("🟡 Enquiries", int(is_enquiry.sum()))
@@ -293,34 +313,27 @@ k3.metric("🟠 Under discussion", int(is_udisc.sum()))
 k4.metric("🔵 Follow-up", int(is_followup.sum()))
 k5.metric("🔴 Cancelled", int(is_cancel.sum()))
 # expenses pending among confirmed
-have_cost = set(df.loc[df["total_expenses"]>0, "itinerary_id"])
-k6.metric("🧾 Expense entry pending", int(max(is_confirmed.sum() - len(set(df.loc[is_confirmed,"itinerary_id"]) & have_cost), 0)))
-
+have_cost_ids = set(df.loc[df["total_expenses"] > 0, "itinerary_id"])
+conf_ids = set(df.loc[is_confirmed, "itinerary_id"])
+k6.metric("🧾 Expense entry pending", int(max(len(conf_ids) - len(conf_ids & have_cost_ids), 0)))
 st.divider()
 
-# ----------------------------
-# Donut: status split
-# ----------------------------
+# =========================
+# Status Split (simple)
+# =========================
 st.subheader("Status mix")
 mix = pd.DataFrame({
     "status":["confirmed","under_discussion","followup","pending","cancelled"],
     "count":[int(is_confirmed.sum()), int(is_udisc.sum()), int(is_followup.sum()), int(is_pending.sum()), int(is_cancel.sum())]
 })
 mix = mix[mix["count"]>0]
-if PLOTLY and not mix.empty:
-    fig = px.pie(mix, values="count", names="status", hole=0.55)
-    fig.update_traces(textposition="inside", textinfo="percent+label")
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.dataframe(mix, use_container_width=True, hide_index=True)
-
+st.dataframe(mix, use_container_width=True, hide_index=True)
 st.divider()
 
-# ----------------------------
-# Daily trends: Confirmed vs Enquiries
-# ----------------------------
+# =========================
+# 📈 Daily trends (Confirmed vs Enquiries) — light
+# =========================
 st.subheader("📈 Daily trends (Confirmed vs Enquiries)")
-# confirmed by booking_date, enquiries by upload_date (when created)
 df_c = df_all.copy()
 df_c["booking_date"] = df_c["booking_date"].apply(_norm_date)
 df_c = df_c[df_c["booking_date"].between(start, end) & df_c["status"].eq("confirmed")]
@@ -336,72 +349,83 @@ trend["date"] = trend["date"].dt.date
 trend = trend.merge(daily_conf.rename(columns={"booking_date":"date"}), on="date", how="left") \
              .merge(daily_enq.rename(columns={"upload_date":"date"}), on="date", how="left") \
              .fillna(0)
-
-if PLOTLY and not trend.empty:
-    import plotly.graph_objects as go
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=trend["date"], y=trend["Confirmed"], mode="lines+markers", name="Confirmed"))
-    fig.add_trace(go.Scatter(x=trend["date"], y=trend["Enquiries"], mode="lines+markers", name="Enquiries"))
-    fig.update_layout(xaxis_title=None, yaxis_title="Count")
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.line_chart(trend.set_index("date"))
-
+st.line_chart(trend.set_index("date"))
 st.divider()
 
-# ----------------------------
-# Revenue snapshot (confirmed in range)
-# ----------------------------
+# =========================
+# 💰 Financials — Structured (No interactive chart)
+# =========================
 st.subheader("💰 Revenue snapshot (confirmed in range)")
+
+# Only final packages (confirmed) in table — no trail
 conf_in_range = df[df["status"].eq("confirmed")].copy()
+
+# Totals for the selected range
 sum_final = int(conf_in_range["final_cost"].sum())
 sum_exp   = int(conf_in_range["total_expenses"].sum())
 sum_prof  = int(conf_in_range["profit"].sum())
-c1,c2,c3 = st.columns(3)
-c1.metric("Final package (₹)", f"{sum_final:,}")
-c2.metric("Expenses (₹)", f"{sum_exp:,}")
-c3.metric("Profit (₹)", f"{sum_prof:,}")
 
-if PLOTLY and not conf_in_range.empty:
-    by_rep = conf_in_range.groupby(conf_in_range["rep_name"].replace("", "Unassigned")).agg(
-        Final=("final_cost","sum"), Profit=("profit","sum"), Count=("itinerary_id","nunique")
-    ).reset_index().sort_values("Final", ascending=False)
-    fig = px.bar(by_rep, x="rep_name", y="Final", text="Count", labels={"rep_name":"Representative"})
-    fig.update_traces(textposition="outside")
-    st.plotly_chart(fig, use_container_width=True)
+# Totals (till date) — confirmed any time
+df_confirmed_all = df_all[df_all["status"].eq("confirmed")].copy()
+total_final_all = int(df_confirmed_all["final_cost"].sum())
+total_profit_all = int(df_confirmed_all["profit"].sum())
+
+# Totals (this month) — booking_date in this month
+mstart, mend = month_bounds(date.today())
+df_confirmed_month = df_all[
+    df_all["status"].eq("confirmed") &
+    df_all["booking_date"].apply(_norm_date).between(mstart, mend)
+].copy()
+total_final_month = int(df_confirmed_month["final_cost"].sum())
+total_profit_month = int(df_confirmed_month["profit"].sum())
+
+c1,c2,c3 = st.columns(3)
+c1.metric("Final package (₹) — in range", f"{sum_final:,}")
+c2.metric("Expenses (₹) — in range", f"{sum_exp:,}")
+c3.metric("Profit (₹) — in range", f"{sum_prof:,}")
+
+c4,c5 = st.columns(2)
+c4.metric("Total Final (₹) — till date", f"{total_final_all:,}")
+c5.metric("Total Profit (₹) — till date", f"{total_profit_all:,}")
+
+c6,c7 = st.columns(2)
+c6.metric("Total Final (₹) — this month", f"{total_final_month:,}")
+c7.metric("Total Profit (₹) — this month", f"{total_profit_month:,}")
+
+# Table: who confirmed & at what final cost (confirmed in current filter range)
+if not conf_in_range.empty:
+    view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date","final_cost","profit","itinerary_id"]
+    table_fin = conf_in_range[view_cols].copy()
+    table_fin.rename(columns={
+        "rep_name": "Confirmed by",
+        "final_cost": "Final package (₹)"
+    }, inplace=True)
+    table_fin.sort_values(["booking_date","Final package (₹)"], ascending=[True, False], inplace=True)
+    st.dataframe(table_fin.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
+else:
+    st.caption("No confirmed packages in the selected range.")
 
 st.divider()
 
-# ----------------------------
-# Top routes (bar) & Pax distribution (hist)
-# ----------------------------
+# =========================
+# Top routes (bar-lite) & Pax distribution
+# =========================
 cA, cB = st.columns(2)
 with cA:
     st.subheader("🗺️ Top routes")
     top_routes = df.groupby("final_route")["itinerary_id"].nunique().reset_index().sort_values("itinerary_id", ascending=False).head(12)
     top_routes.columns = ["Route","Packages"]
-    if PLOTLY and not top_routes.empty:
-        fig = px.bar(top_routes, x="Packages", y="Route", orientation="h", text="Packages")
-        fig.update_traces(textposition="outside")
-        fig.update_layout(yaxis_title=None, xaxis_title=None)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.dataframe(top_routes, use_container_width=True, hide_index=True)
+    st.dataframe(top_routes, use_container_width=True, hide_index=True)
+
 with cB:
     st.subheader("👥 Pax distribution")
-    pax = df[df["total_pax"]>0]["total_pax"]
-    if PLOTLY and not pax.empty:
-        fig = px.histogram(pax, nbins=10)
-        fig.update_layout(xaxis_title="Total pax", yaxis_title="Packages")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.bar_chart(pax.value_counts().sort_index())
-
+    pax = df[df["total_pax"] > 0]["total_pax"]
+    st.bar_chart(pax.value_counts().sort_index())
 st.divider()
 
-# ----------------------------
-# Calendars (Confirmed by Booking / Travel)
-# ----------------------------
+# =========================
+# 📅 Calendars
+# =========================
 st.subheader("📅 Calendars")
 cal_tab1, cal_tab2 = st.tabs(["Confirmed – Booking dates", "Travel dates"])
 with cal_tab1:
@@ -411,10 +435,9 @@ with cal_tab1:
     events = [{"title": f"{r.client_name}_{r.total_pax}pax", "id": r.itinerary_id, "start": str(r.booking_date)}
               for r in confirmed.itertuples()]
     if CALENDAR_AVAILABLE:
-        opts = {"initialView":"dayGridMonth", "height": 620, "eventDisplay":"block"}
+        opts = {"initialView": "dayGridMonth", "height": 620, "eventDisplay": "block"}
         calendar(options=opts, events=events, key="cal_book")
     else:
-        st.caption("Calendar component not installed; showing list.")
         show = pd.DataFrame(events).rename(columns={"title":"Package","start":"Date"})
         st.dataframe(show.sort_values("Date"), use_container_width=True, hide_index=True)
 
@@ -429,24 +452,24 @@ with cal_tab2:
         events.append({"title": f"{r.client_name}_{r.total_pax}pax", "id": r.itinerary_id,
                        "start": str(r.start_date), "end": end_.strftime("%Y-%m-%d")})
     if CALENDAR_AVAILABLE:
-        opts = {"initialView":"dayGridMonth", "height": 620, "eventDisplay":"block"}
+        opts = {"initialView": "dayGridMonth", "height": 620, "eventDisplay": "block"}
         calendar(options=opts, events=events, key="cal_travel")
     else:
-        st.caption("Calendar component not installed; showing list.")
         show = pd.DataFrame(events).rename(columns={"title":"Package","start":"Start","end":"End"})
         st.dataframe(show.sort_values(["Start","End"]), use_container_width=True, hide_index=True)
-
 st.divider()
 
-# ----------------------------
-# 🧭 Client explorer (full detail + per-client export)
-# ----------------------------
+# =========================
+# 🧭 Client explorer
+# =========================
 st.subheader("🧭 Client explorer")
 opt_df = df_all.copy()
-opt_df["label"] = (opt_df["ach_id"].fillna("") + " | " +
-                   opt_df["client_name"].fillna("") + " | " +
-                   opt_df["client_mobile"].fillna("") + " | " +
-                   opt_df["created_ist"].fillna(""))
+opt_df["label"] = (
+    opt_df["ach_id"].fillna("") + " | " +
+    opt_df["client_name"].fillna("") + " | " +
+    opt_df["client_mobile"].fillna("") + " | " +
+    opt_df["created_ist"].fillna("")
+)
 choice = st.selectbox("Open client/package", [""] + opt_df["label"].tolist())
 sel_id = None
 if choice:
@@ -482,12 +505,12 @@ if sel_id:
             "Rep (credited)": row.get("rep_name",""),
         })
 
-    # Per-client Excel export
+    # Per-client Excel export (light I/O)
     def _client_excel_bytes(iid: str) -> bytes | None:
         it_doc = df_all[df_all["itinerary_id"]==iid].copy()
         up_docs = pd.DataFrame(list(col_up.find({"itinerary_id": str(iid)}, {"_id":0})))
         fu_docs = pd.DataFrame(list(col_fu.find({"itinerary_id": str(iid)}, {"_id":0})))
-        ex_doc  = pd.DataFrame(list(col_ex.find({"itinerary_id": str(iid)}, {"_id":0})))
+        ex_doc = pd.DataFrame(list(col_ex.find({"itinerary_id": str(iid)}, {"_id":0})))
         buf = io.BytesIO()
         try:
             with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -497,7 +520,6 @@ if sel_id:
                 if not ex_doc.empty: ex_doc.to_excel(xw, index=False, sheet_name="Expenses")
             return buf.getvalue()
         except Exception:
-            # graceful CSV fallback (zip-like multi CSV: minimal single CSV for itinerary)
             try:
                 out = io.StringIO()
                 it_doc.to_csv(out, index=False)
@@ -516,32 +538,27 @@ if sel_id:
         )
     else:
         st.caption("Could not build Excel; please try again later.")
-
 st.divider()
 
-# ----------------------------
-# 📞 Follow-ups by package (expand for trails)
-# ----------------------------
+# =========================
+# 📞 Follow-ups by package (uses current filtered df)
+# =========================
 st.subheader("📞 Follow-ups by package")
-# Use current filtered packages (df), fetch logs for their iids
 iids = df["itinerary_id"].astype(str).unique().tolist()
-fu_bulk = list(col_fu.find({"itinerary_id": {"$in": iids}}, {"_id":0}))
-df_fu_bulk = pd.DataFrame(fu_bulk)
-
+df_fu_bulk = load_followups_for_ids(iids)
 if df_fu_bulk.empty:
     st.caption("No follow-ups for the current filters.")
 else:
-    # latest comment, next date & counts
     df_fu_bulk["created_at"] = pd.to_datetime(df_fu_bulk["created_at"])
     latest = df_fu_bulk.sort_values("created_at").groupby("itinerary_id").last().reset_index()
     attempts = (df_fu_bulk["status"]=="followup").groupby(df_fu_bulk["itinerary_id"]).sum().rename("followup_attempts")
     confirmed_flag = (df_fu_bulk["status"]=="confirmed").groupby(df_fu_bulk["itinerary_id"]).any().rename("confirmed_from_followup")
+
     head = df[["itinerary_id","ach_id","client_name","client_mobile","representative"]].drop_duplicates("itinerary_id").set_index("itinerary_id")
     pkg_fu = head.join([attempts, confirmed_flag]).reset_index()
     pkg_fu["followup_attempts"] = pkg_fu["followup_attempts"].fillna(0).astype(int)
     pkg_fu["confirmed_from_followup"] = pkg_fu["confirmed_from_followup"].fillna(False)
 
-    # summary table + search within followups block
     sfu = st.text_input("Search in follow-ups", value="", placeholder="Client / Mobile / ACH")
     view = pkg_fu.copy()
     if sfu.strip():
@@ -555,7 +572,6 @@ else:
     st.dataframe(view[show_cols].sort_values(["confirmed_from_followup","followup_attempts"], ascending=[False, False]),
                  use_container_width=True, hide_index=True)
 
-    # Expanders: one per package to show full trail
     st.markdown("**Trails (click ➕ to expand)**")
     for iid, grp in df_fu_bulk.sort_values("created_at", ascending=False).groupby("itinerary_id"):
         meta = head.loc[iid].to_dict() if iid in head.index else {}
@@ -571,45 +587,40 @@ else:
                 "comment":"Comment"
             }, inplace=True)
             st.dataframe(trail.sort_values("When", ascending=False), use_container_width=True, hide_index=True)
-
 st.divider()
 
-# ----------------------------
-# Follow-up activity (range overview)
-# ----------------------------
+# =========================
+# 📞 Follow-up activity (range overview)
+# =========================
 st.subheader("📞 Follow-up activity (range overview)")
 start_dt = datetime.combine(start, dtime.min)
-end_dt   = datetime.combine(end,   dtime.max)
+end_dt   = datetime.combine(end, dtime.max)
+df_fu_range = load_followups_for_ids([])  # init empty
+# light query for the range (not cached, depends on range)
 logs = list(col_fu.find({"created_at": {"$gte": start_dt, "$lte": end_dt}}, {"_id":0}))
 df_fu_range = pd.DataFrame(logs)
+
 if df_fu_range.empty:
     st.caption("No follow-up logs in selected range.")
 else:
     df_fu_range["created_at"] = pd.to_datetime(df_fu_range["created_at"])
     df_fu_range["next_followup_on"] = pd.to_datetime(df_fu_range.get("next_followup_on"), errors="coerce")
-    # Quick KPIs
     total_fu = len(df_fu_range)
     total_confirmed_from_fu = int((df_fu_range["status"]=="confirmed").sum())
     fc1, fc2 = st.columns(2)
     fc1.metric("Total follow-up entries", total_fu)
     fc2.metric("Confirmed from follow-up", total_confirmed_from_fu)
-
-    if PLOTLY:
-        by_user = df_fu_range.groupby(df_fu_range["created_by"].replace("", "Unknown"))["status"].count().reset_index(name="entries")
-        fig = px.bar(by_user, x="created_by", y="entries", labels={"created_by":"User","entries":"Entries"})
-        st.plotly_chart(fig, use_container_width=True)
-
     with st.expander("Show follow-up table"):
         show_cols = ["created_at","created_by","ach_id","client_name","client_mobile","status","next_followup_on","comment"]
         for m in show_cols:
             if m not in df_fu_range.columns: df_fu_range[m] = None
-        st.dataframe(df_fu_range[show_cols].sort_values("created_at", ascending=False), use_container_width=True, hide_index=True)
-
+        st.dataframe(df_fu_range[show_cols].sort_values("created_at", ascending=False),
+                     use_container_width=True, hide_index=True)
 st.divider()
 
-# ----------------------------
-# Incentives overview
-# ----------------------------
+# =========================
+# 🎯 Incentives overview
+# =========================
 st.subheader("🎯 Incentives overview")
 pi1, pi2, pi3 = st.columns([1.2, 1.2, 2.6])
 with pi1:
@@ -651,42 +662,27 @@ else:
     cI1.metric("Total confirmed", int(rep_summary["Confirmed"].sum()))
     cI2.metric("Total incentives (₹)", f"{int(rep_summary['Incentive'].sum()):,}")
     st.dataframe(rep_summary.rename(columns={"rep_name":"Representative"}), use_container_width=True, hide_index=True)
-    if PLOTLY:
-        fig = px.bar(rep_summary, x="Representative", y="Incentive", text="Confirmed")
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
-
 st.divider()
 
-# ----------------------------
-# Export (Excel) – filtered data & reference tables
-# ----------------------------
+# =========================
+# ⬇️ Export (Excel) – filtered view + references
+# =========================
 st.subheader("⬇️ Export filtered data")
-
 def export_filtered_bytes() -> bytes | None:
-    # Build follow-ups in the same range
     fu_rng = list(col_fu.find({"created_at": {"$gte": start_dt, "$lte": end_dt}}, {"_id":0}))
     df_fu_rng = pd.DataFrame(fu_rng)
-
-    # Collect raw tables for the filtered itineraries
     iids = df["itinerary_id"].astype(str).unique().tolist()
     raw_up = pd.DataFrame(list(col_up.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
     raw_ex = pd.DataFrame(list(col_ex.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
-
     buf = io.BytesIO()
     try:
-        # ✅ Use openpyxl instead of xlsxwriter
         with pd.ExcelWriter(buf, engine="openpyxl") as xw:
             df.to_excel(xw, index=False, sheet_name="Filtered_Packages")
-            if not df_fu_rng.empty:
-                df_fu_rng.to_excel(xw, index=False, sheet_name="Followups_in_range")
-            if not raw_up.empty:
-                raw_up.to_excel(xw, index=False, sheet_name="Updates_raw")
-            if not raw_ex.empty:
-                raw_ex.to_excel(xw, index=False, sheet_name="Expenses_raw")
+            if not df_fu_rng.empty: df_fu_rng.to_excel(xw, index=False, sheet_name="Followups_in_range")
+            if not raw_up.empty:   raw_up.to_excel(xw, index=False, sheet_name="Updates_raw")
+            if not raw_ex.empty:   raw_ex.to_excel(xw, index=False, sheet_name="Expenses_raw")
         return buf.getvalue()
     except Exception:
-        # Graceful CSV fallback (single sheet equivalent)
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(df.columns.tolist())
