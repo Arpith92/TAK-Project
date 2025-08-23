@@ -88,6 +88,7 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]
 col_vendors     = db["vendors"]
+col_followups   = db.get("followups")  # optional; not required here
 
 # ------------------------------------------------------------------
 # Helpers
@@ -614,7 +615,6 @@ else:
                         }
                         if bulk_status == "confirmed" and bdate:
                             up["booking_date"] = _to_dt_or_none(bdate)
-                            # incentive recompute handled on confirm in your other flows
                         else:
                             up["booking_date"] = None
                         col_updates.update_one({"itinerary_id": str(r["itinerary_id"])}, {"$set": _clean_for_mongo(up)}, upsert=True)
