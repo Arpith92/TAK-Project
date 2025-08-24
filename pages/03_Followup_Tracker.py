@@ -168,6 +168,8 @@ is_admin = (str(user).strip().lower() == "arpith")  # Arpith is admin
 from tak_audit import audit_pageview
 audit_pageview(st.session_state.get("user", "Admin"), "06_Invoice_and_Payment")
 
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), page="03_Followup_Tracker")  # change per page
 
 # =========================
 # Helpers (aligned across pages)
