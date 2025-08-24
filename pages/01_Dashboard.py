@@ -87,8 +87,6 @@ col_it = db["itineraries"]
 col_up = db["package_updates"]
 col_ex = db["expenses"]
 col_fu = db["followups"]
-# NEW: vendor-expense lines entered 1-by-1 (02_Package_Update writes here)
-col_ve = db.get_collection("vendor_expenses")
 
 # =========================
 # Helpers
@@ -198,23 +196,6 @@ def load_expenses_df() -> pd.DataFrame:
     return pd.DataFrame(docs)
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_vendor_spend_df() -> pd.DataFrame:
-    """
-    Aggregate actual vendor expenses captured line-by-line in `vendor_expenses`.
-    This lets dashboard reflect true spend immediately (without waiting for a
-    manual total_expenses/profit update).
-    """
-    try:
-        rows = list(col_ve.find({}, {"_id": 0, "itinerary_id": 1, "amount": 1}))
-    except Exception:
-        rows = []
-    if not rows:
-        return pd.DataFrame(columns=["itinerary_id","vendor_spend"])
-    df = pd.DataFrame(rows)
-    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0).astype(int)
-    return df.groupby("itinerary_id", as_index=False)["amount"].sum().rename(columns={"amount":"vendor_spend"})
-
-@st.cache_data(ttl=120, show_spinner=False)
 def load_followups_for_ids(iids: list[str]) -> pd.DataFrame:
     if not iids:
         return pd.DataFrame()
@@ -231,38 +212,30 @@ if df_it.empty:
 
 df_up = load_updates_df()
 df_ex = load_expenses_df()
-df_vs = load_vendor_spend_df()  # NEW
 
 df_all = df_it.merge(df_up, on="itinerary_id", how="left")
 df_all = df_all.merge(df_ex, on="itinerary_id", how="left", suffixes=("", "_ex"))
-df_all = df_all.merge(df_vs, on="itinerary_id", how="left")
 
 # defaults
 df_all["status"] = df_all["status"].fillna("pending")
-for c in ("total_expenses","profit","incentive","advance_amount","total_pax","vendor_spend"):
+for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
     if c in df_all.columns:
         df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
 
-# Final cost logic (requirement #4):
-# - If discount not applied and no explicit final, use itinerary.package_cost as final
-final_cost = pd.to_numeric(df_all["final_package_cost"], errors="coerce").fillna(0).astype(int)
+# compute final cost efficiently (no row-wise DB hits)
+final_cost = df_all["final_package_cost"].fillna(0).astype(int)
 fallback_need = final_cost.eq(0)
 if fallback_need.any():
     base = pd.to_numeric(df_all["base_package_cost"], errors="coerce").fillna(0).astype(int)
     disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
     comp = (base - disc).clip(lower=0)
-    # if still 0, fallback to itinerary package_cost (treat as final when discount not applied)
+    # if still 0, fallback to itinerary package_cost - discount if available
     it_base = pd.to_numeric(df_all["package_cost"], errors="coerce").fillna(0).astype(int)
-    final_cost = final_cost.mask(final_cost.eq(0), comp).mask(final_cost.eq(0), it_base)
+    it_disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
+    comp2 = (it_base - it_disc).clip(lower=0)
+    final_cost = final_cost.mask(final_cost.eq(0), comp).mask(final_cost.eq(0), comp2)
 
 df_all["final_cost"] = final_cost.astype(int)
-
-# "Live" spend (use vendor_spend first; else fall back to stored total_expenses)
-spend_live = df_all["vendor_spend"]
-need_fallback_spend = spend_live.eq(0)
-spend_live = spend_live.mask(need_fallback_spend, df_all["total_expenses"])
-df_all["spend_live"] = pd.to_numeric(spend_live, errors="coerce").fillna(0).astype(int)
-df_all["profit_live"] = (df_all["final_cost"] - df_all["spend_live"]).clip(lower=0).astype(int)
 
 # =========================
 # Top bar: Global search
@@ -339,10 +312,10 @@ k2.metric("🟡 Enquiries", int(is_enquiry.sum()))
 k3.metric("🟠 Under discussion", int(is_udisc.sum()))
 k4.metric("🔵 Follow-up", int(is_followup.sum()))
 k5.metric("🔴 Cancelled", int(is_cancel.sum()))
-# "Expense entry pending" = confirmed without *any* vendor_spend
-have_vendor_spend_ids = set(df.loc[df["vendor_spend"] > 0, "itinerary_id"])
+# expenses pending among confirmed
+have_cost_ids = set(df.loc[df["total_expenses"] > 0, "itinerary_id"])
 conf_ids = set(df.loc[is_confirmed, "itinerary_id"])
-k6.metric("🧾 Expense entry pending", int(max(len(conf_ids) - len(conf_ids & have_vendor_spend_ids), 0)))
+k6.metric("🧾 Expense entry pending", int(max(len(conf_ids) - len(conf_ids & have_cost_ids), 0)))
 st.divider()
 
 # =========================
@@ -380,21 +353,22 @@ st.line_chart(trend.set_index("date"))
 st.divider()
 
 # =========================
-# 💰 Financials — Structured, fast
+# 💰 Financials — Structured (No interactive chart)
 # =========================
 st.subheader("💰 Revenue snapshot (confirmed in range)")
 
+# Only final packages (confirmed) in table — no trail
 conf_in_range = df[df["status"].eq("confirmed")].copy()
 
+# Totals for the selected range
 sum_final = int(conf_in_range["final_cost"].sum())
-sum_spend = int(conf_in_range["spend_live"].sum())        # prefer live vendor spend
-sum_prof  = int(conf_in_range["profit_live"].sum())
+sum_exp   = int(conf_in_range["total_expenses"].sum())
+sum_prof  = int(conf_in_range["profit"].sum())
 
 # Totals (till date) — confirmed any time
 df_confirmed_all = df_all[df_all["status"].eq("confirmed")].copy()
 total_final_all = int(df_confirmed_all["final_cost"].sum())
-total_spend_all = int(df_confirmed_all["spend_live"].sum())
-total_profit_all = int(df_confirmed_all["profit_live"].sum())
+total_profit_all = int(df_confirmed_all["profit"].sum())
 
 # Totals (this month) — booking_date in this month
 mstart, mend = month_bounds(date.today())
@@ -403,77 +377,34 @@ df_confirmed_month = df_all[
     df_all["booking_date"].apply(_norm_date).between(mstart, mend)
 ].copy()
 total_final_month = int(df_confirmed_month["final_cost"].sum())
-total_spend_month = int(df_confirmed_month["spend_live"].sum())
-total_profit_month = int(df_confirmed_month["profit_live"].sum())
+total_profit_month = int(df_confirmed_month["profit"].sum())
 
 c1,c2,c3 = st.columns(3)
 c1.metric("Final package (₹) — in range", f"{sum_final:,}")
-c2.metric("Expenses (₹) — in range", f"{sum_spend:,}")
+c2.metric("Expenses (₹) — in range", f"{sum_exp:,}")
 c3.metric("Profit (₹) — in range", f"{sum_prof:,}")
 
-c4,c5,c6 = st.columns(3)
+c4,c5 = st.columns(2)
 c4.metric("Total Final (₹) — till date", f"{total_final_all:,}")
-c5.metric("Total Expenses (₹) — till date", f"{total_spend_all:,}")
-c6.metric("Total Profit (₹) — till date", f"{total_profit_all:,}")
+c5.metric("Total Profit (₹) — till date", f"{total_profit_all:,}")
 
-c7,c8,c9 = st.columns(3)
-c7.metric("This month — Final (₹)", f"{total_final_month:,}")
-c8.metric("This month — Expenses (₹)", f"{total_spend_month:,}")
-c9.metric("This month — Profit (₹)", f"{total_profit_month:,}")
+c6,c7 = st.columns(2)
+c6.metric("Total Final (₹) — this month", f"{total_final_month:,}")
+c7.metric("Total Profit (₹) — this month", f"{total_profit_month:,}")
 
 # Table: who confirmed & at what final cost (confirmed in current filter range)
 if not conf_in_range.empty:
-    view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date","final_cost","profit_live","spend_live","itinerary_id"]
+    view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date","final_cost","profit","itinerary_id"]
     table_fin = conf_in_range[view_cols].copy()
     table_fin.rename(columns={
         "rep_name": "Confirmed by",
-        "final_cost": "Final package (₹)",
-        "spend_live": "Expenses (₹)",
-        "profit_live": "Profit (₹)"
+        "final_cost": "Final package (₹)"
     }, inplace=True)
     table_fin.sort_values(["booking_date","Final package (₹)"], ascending=[True, False], inplace=True)
     st.dataframe(table_fin.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
 else:
     st.caption("No confirmed packages in the selected range.")
 
-st.divider()
-
-# =========================
-# ✏️ Admin — Update final package cost (Req #5)
-# =========================
-with st.expander("✏️ Admin: Update final package cost"):
-    base_df = df_all.copy()
-    opts = (base_df["ach_id"].fillna("").astype(str) + " | " +
-            base_df["client_name"].fillna("") + " | " +
-            base_df["client_mobile"].fillna("") + " | " +
-            base_df["itinerary_id"])
-    sel = st.selectbox("Choose package", [""] + opts.tolist())
-    if sel:
-        iid = sel.split(" | ")[-1]
-        # Current values
-        cur = df_all[df_all["itinerary_id"] == iid].iloc[0].to_dict()
-        base_default = int(pd.to_numeric(cur.get("base_package_cost"), errors="coerce").fillna(0)) if "base_package_cost" in cur else int(pd.to_numeric(cur.get("package_cost"), errors="coerce").fillna(0))
-        disc_default = int(pd.to_numeric(cur.get("discount"), errors="coerce").fillna(0))
-
-        c1,c2,c3 = st.columns(3)
-        with c1: base_amt = st.number_input("Base/Quoted (₹)", min_value=0, step=500, value=int(base_default))
-        with c2: disc_amt = st.number_input("Discount (₹)", min_value=0, step=500, value=int(disc_default))
-        with c3: st.metric("Final (auto)", f"₹ {max(0, int(base_amt) - int(disc_amt)):,}")
-
-        if st.button("💾 Save final cost"):
-            col_ex.update_one(
-                {"itinerary_id": iid},
-                {"$set": {
-                    "itinerary_id": iid,
-                    "base_package_cost": int(base_amt),
-                    "discount": int(disc_amt),
-                    "final_package_cost": max(0, int(base_amt) - int(disc_amt)),
-                    "package_cost": max(0, int(base_amt) - int(disc_amt))  # keep legacy aligned
-                }},
-                upsert=True
-            )
-            load_expenses_df.clear()
-            st.success("Saved. Use filters above to refresh the view.")
 st.divider()
 
 # =========================
@@ -569,8 +500,8 @@ if sel_id:
             "Advance (₹)": row.get("advance_amount",0),
             "Incentive (₹)": row.get("incentive",0),
             "Final package (₹)": row.get("final_cost",0),
-            "Expenses (₹)": row.get("spend_live",0),      # live vendor spend
-            "Profit (₹)": row.get("profit_live",0),
+            "Expenses (₹)": row.get("total_expenses",0),
+            "Profit (₹)": row.get("profit",0),
             "Rep (credited)": row.get("rep_name",""),
         })
 
