@@ -20,6 +20,10 @@ if st.session_state.get("user") in ("Teena", "Kuldeep"):
 st.set_page_config(page_title="TAK Dashboard", layout="wide")
 st.markdown("## 📊 TAK – Operations Dashboard")
 
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")   # change name per page
+
+
 # Optional calendar
 CALENDAR_AVAILABLE = True
 try:
