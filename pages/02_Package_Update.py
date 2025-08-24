@@ -88,7 +88,7 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]
 col_vendors     = db["vendors"]
-col_followups   = db.get("followups")  # optional; not required here
+# (removed invalid db.get("followups") – not used on this page)
 
 # ------------------------------------------------------------------
 # Helpers
