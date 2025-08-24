@@ -93,6 +93,10 @@ col_vendors     = db["vendors"]
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), "02_Package_Update.py")   # change name per page
+
 def _to_dt_or_none(x):
     if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
         return None
