@@ -165,6 +165,10 @@ USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
 is_admin = (str(user).strip().lower() == "arpith")  # Arpith is admin
 
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Admin"), "06_Invoice_and_Payment")
+
+
 # =========================
 # Helpers (aligned across pages)
 # =========================
