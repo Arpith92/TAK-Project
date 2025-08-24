@@ -1,4 +1,6 @@
 # App.py
+from __future__ import annotations
+
 # ----------------- Compatibility safety -----------------
 try:
     import streamlit as st, rich
@@ -9,38 +11,51 @@ try:
         st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
         st.experimental_rerun()
 except Exception:
-    import streamlit as st  # ensure st exists even if the block failed
+    import streamlit as st  # ensure st is available
 
 # ----------------- Imports -----------------
-import io, math, locale, datetime, os, hashlib
+import io, math, locale, datetime, os
+from collections.abc import Mapping
+from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 from pymongo import MongoClient
 from bson import ObjectId
 
-# ---- audit helpers (safe if tak_audit.py is absent) ----
-try:
-    from tak_audit import audit_login, audit_pageview, audit_log
-except Exception:
-    audit_login = audit_pageview = lambda *a, **k: None
-    def audit_log(*a, **k): pass
+IST = ZoneInfo("Asia/Kolkata")
 
 # ----------------- App config -----------------
 st.set_page_config(page_title="TAK – Itinerary Generator", layout="wide")
 st.title("🧭 TAK Project – Itinerary Generator")
 
-# ----------------- Constants -----------------
+# ----------------- Masters URLs -----------------
 CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Code.xlsx"
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
-# ----------------- Login (PIN from secrets) -----------------
+# ================= LOGIN (PIN) =================
 def _load_users() -> dict:
+    """Robustly load [users] from Secrets (Mapping on Cloud) or local .streamlit/secrets.toml."""
     try:
-        u = st.secrets.get("users", {})
-        return u if isinstance(u, dict) else {}
+        raw = st.secrets.get("users", {})
+        if isinstance(raw, Mapping): return dict(raw)
+        if isinstance(raw, dict):    return raw
     except Exception:
-        return {}
+        pass
+    # local dev fallback
+    try:
+        try:
+            import tomllib  # py311+
+        except Exception:
+            import tomli as tomllib
+        with open(".streamlit/secrets.toml", "rb") as f:
+            data = tomllib.load(f)
+        u = data.get("users", {})
+        if isinstance(u, Mapping): return dict(u)
+        if isinstance(u, dict):    return u
+    except Exception:
+        pass
+    return {}
 
 def _login() -> str | None:
     with st.sidebar:
@@ -55,7 +70,15 @@ def _login() -> str | None:
 
     users_map = _load_users()
     if not users_map:
-        st.error("Login not configured. Add [users] with PINs in Secrets.")
+        with st.sidebar:
+            st.caption("Secrets debug")
+            try:
+                st.write("Visible secret keys:", list(st.secrets.keys()))
+                if "users" in st.secrets:
+                    st.write("type(users):", type(st.secrets["users"]).__name__)
+            except Exception:
+                st.write("secrets unavailable")
+        st.error("Login not configured. Add a **[users]** section in Secrets with PINs.")
         st.stop()
 
     st.markdown("### 🔐 Login")
@@ -68,47 +91,42 @@ def _login() -> str | None:
     if st.button("Sign in"):
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
-            try: audit_login(name)
-            except Exception: pass
+            try:
+                audit_login(name)  # IST audit
+            except Exception:
+                pass
             st.success(f"Welcome, {name}!")
             st.rerun()
         else:
             st.error("Invalid PIN"); st.stop()
     return None
 
-user = _login()
-if not user:
-    st.stop()
-
-# page view audit
-try: audit_pageview(user, "01_Itinerary_Generator")
-except Exception: pass
-
-# ----------------- Caching helpers -----------------
-@st.cache_data(ttl=900)
-def read_excel_from_url(url, sheet_name=None):
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    return pd.read_excel(io.BytesIO(r.content), sheet_name=sheet_name)
+# ================= Mongo =======================
+def _find_uri() -> str | None:
+    for k in ("mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"):
+        try:
+            v = st.secrets.get(k)
+        except Exception:
+            v = None
+        if v: return v
+    for k in ("mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"):
+        v = os.getenv(k)
+        if v: return v
+    return None
 
 @st.cache_resource
 def mongo_client():
-    uri = (
-        st.secrets.get("mongo_uri")
-        or os.getenv("mongo_uri")
-        or os.getenv("MONGO_URI")
-        or os.getenv("mongodb_uri")
-        or os.getenv("MONGODB_URI")
-    )
+    uri = _find_uri()
     if not uri:
         st.error("Mongo URI not configured. Add `mongo_uri` in Secrets.")
         st.stop()
-    return MongoClient(uri, appName="TAK_App", maxPoolSize=100, serverSelectionTimeoutMS=5000)
+    client = MongoClient(uri, appName="TAK_App", maxPoolSize=100, serverSelectionTimeoutMS=5000, tz_aware=True)
+    client.admin.command("ping")
+    return client
 
 @st.cache_resource
 def get_collections():
     client = mongo_client()
-    client.admin.command("ping")
     db = client["TAK_DB"]
     return {
         "itineraries": db["itineraries"],
@@ -117,12 +135,50 @@ def get_collections():
         "followups": db["followups"],
         "splitwise": db["expense_splitwise"],
         "vendor_expenses": db["vendor_expenses"],
+        "audit_logins": db["audit_logins"],
     }
 
 cols = get_collections()
 col_it = cols["itineraries"]
+col_audit = cols["audit_logins"]
 
-# ----------------- Small utils -----------------
+# ================= Audit helper =================
+def audit_login(user: str):
+    """Write a login audit row with IST timestamp. Safe on Cloud."""
+    now_utc = datetime.datetime.utcnow()
+    try:
+        doc = {
+            "user": str(user),
+            "ts_utc": now_utc,
+            "ts_ist": now_utc.replace(tzinfo=datetime.timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "page": "App.py",
+        }
+        col_audit.insert_one(doc)
+    except Exception:
+        pass
+
+# ensure a login exists if user already in session (first entry to page)
+user = _login()
+if not user:
+    st.stop()
+
+# ================= Caching helpers =================
+@st.cache_data(ttl=900)
+def read_excel_from_url(url, sheet_name=None):
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    return pd.read_excel(io.BytesIO(r.content), sheet_name=sheet_name)
+
+# ================= Load static masters (cached) =================
+try:
+    stay_city_df = read_excel_from_url(STAY_CITY_URL, sheet_name="Stay_City")
+    code_df = read_excel_from_url(CODE_FILE_URL, sheet_name="Code")
+    bhasmarathi_type_df = read_excel_from_url(BHASMARATHI_TYPE_URL, sheet_name="Bhasmarathi_Type")
+except Exception as e:
+    st.error(f"Failed to load master sheets: {e}")
+    st.stop()
+
+# ================= Small utils =================
 def is_valid_mobile(num: str) -> bool:
     digits = "".join(ch for ch in str(num or "") if ch.isdigit())
     return len(digits) == 10
@@ -137,16 +193,7 @@ def in_locale(n: int) -> str:
 def ceil_to_999(n: float) -> int:
     return (math.ceil(n/1000)*1000 - 1) if n > 0 else 0
 
-# ----------------- Load static masters (cached) -----------------
-try:
-    stay_city_df = read_excel_from_url(STAY_CITY_URL, sheet_name="Stay_City")
-    code_df = read_excel_from_url(CODE_FILE_URL, sheet_name="Code")
-    bhasmarathi_type_df = read_excel_from_url(BHASMARATHI_TYPE_URL, sheet_name="Bhasmarathi_Type")
-except Exception as e:
-    st.error(f"Failed to load master sheets: {e}")
-    st.stop()
-
-# ----------------- Upload zone -----------------
+# ================= Upload zone =================
 with st.container():
     st.markdown("### 1) Upload your date-wise Excel")
     uploaded = st.file_uploader("Choose file (.xlsx)", type=["xlsx"])
@@ -173,7 +220,7 @@ if not is_valid_mobile(client_mobile_raw):
 
 client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
 
-# ----------------- Parse selected sheet -----------------
+# ================= Parse selected sheet =================
 try:
     df = xls.parse(sheet)
 except Exception as e:
@@ -200,11 +247,11 @@ if "Total Pax" not in df.columns:
 
 total_pax = int(pd.to_numeric(df["Total Pax"].iloc[0], errors="coerce") or 0)
 
-# ----------------- Build itinerary lines from Code master -----------------
+# ================= Build itinerary lines from Code master =================
 itinerary = []
 for _, r in df.iterrows():
     code = r.get("Code", None)
-    if code_df is not None and ("Code" in code_df.columns) and code in set(code_df["Code"]):
+    if code_df is not None and code in set(code_df["Code"]):
         desc = code_df.loc[code_df["Code"] == code, "Particulars"].iloc[0]
     else:
         desc = f"No description found for code {code}" if code else "No code provided"
@@ -214,7 +261,7 @@ for _, r in df.iterrows():
         "Description": str(desc)
     })
 
-# ----------------- Derive route -----------------
+# ================= Derive route =================
 route_parts = []
 if "Code" in df.columns and "Route" in code_df.columns:
     for c in df["Code"]:
@@ -225,7 +272,7 @@ route_raw = "-".join(route_parts).replace(" -", "-").replace("- ", "-")
 route_list = [x for x in route_raw.split("-") if x]
 final_route = "-".join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i-1]])
 
-# ----------------- Package cost (from sheet columns if present) -----------------
+# ================= Package cost (from sheet columns if present) =================
 for req in ["Car Cost", "Hotel Cost", "Bhasmarathi Cost"]:
     if req not in df.columns:
         df[req] = 0
@@ -235,7 +282,7 @@ tbha = float(pd.to_numeric(df["Bhasmarathi Cost"], errors="coerce").fillna(0).su
 total_package_cost = ceil_to_999(tcar + thot + tbha)
 pkg_cost_fmt = in_locale(total_package_cost)
 
-# ----------------- Type strings -----------------
+# ================= Type strings =================
 car_types = "-".join(pd.Series(df.get("Car Type", [])).dropna().astype(str).unique().tolist())
 hotel_types = "-".join(pd.Series(df.get("Hotel Type", [])).dropna().astype(str).unique().tolist())
 bhas_types = pd.Series(df.get("Bhasmarathi Type", [])).dropna().astype(str).unique().tolist()
@@ -247,7 +294,7 @@ if not bhasmarathi_type_df.empty:
             bhas_descs.append(str(m.iloc[0]))
 bhas_desc_str = "-".join(bhas_descs)
 
-# ----------------- Text build -----------------
+# ================= Text build =================
 night_txt = "Night" if total_nights == 1 else "Nights"
 person_txt = "Person" if total_pax == 1 else "Persons"
 
@@ -316,7 +363,6 @@ notes = "\n*Important Notes:-*\n" + "\n".join([
     "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
     "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
 ])
-
 cxl = """
 *Cancellation Policy:-*
 1. 30+ days → 20% of advance deducted.
@@ -325,11 +371,9 @@ cxl = """
 4. No refund for no-shows/early departures.
 5. One-time reschedule allowed ≥15 days prior, subject to availability.
 """
-
 pay = """*Payment Terms:-*
 50% advance and remaining 50% after arrival at Ujjain.
 """
-
 acct = """For booking confirmation, please make the advance payment to the company's current account provided below.
 
 *Company Account details:-*
@@ -357,14 +401,13 @@ final_output = (
     itinerary_text + "\n\n" + inclusions + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 )
 
-# ----------------- Auto-Save (no button) -----------------
+# ================= Auto-save / Upsert =================
+# key = (client_mobile, start_date)
 key_filter = {"client_mobile": client_mobile, "start_date": str(start_date)}
-
 record = {
     "client_name": sheet,
     "client_mobile": client_mobile,
     "representative": rep,
-    "uploaded_by": user,
     "upload_date": datetime.datetime.utcnow(),
     "start_date": str(start_date),
     "end_date": str(end_date),
@@ -374,45 +417,32 @@ record = {
     "car_types": car_types,
     "hotel_types": hotel_types,
     "bhasmarathi_types": bhas_desc_str,
-    "package_cost": int(total_package_cost),  # store numeral
+    "package_cost": int(total_package_cost),  # numeral
     "itinerary_text": final_output
 }
 
-# only write if content changed (prevents write loops)
-sig_fields = (
-    sheet, client_mobile, rep, str(start_date), str(end_date),
-    total_days, total_pax, final_route, car_types, hotel_types, bhas_desc_str, int(total_package_cost), final_output
-)
-sig = hashlib.sha1(str(sig_fields).encode("utf-8")).hexdigest()
-key_tuple = (client_mobile, str(start_date))
+# avoid multiple success banners on rerun
+saved_key = f"{client_mobile}|{start_date}"
+already = st.session_state.get("_last_saved_key") == saved_key
 
-if (
-    st.session_state.get("_last_key") != key_tuple
-    or st.session_state.get("_last_sig") != sig
-):
+try:
+    # upsert ensures idempotency
     res = col_it.update_one(key_filter, {"$set": record}, upsert=True)
-    st.session_state["_last_key"] = key_tuple
-    st.session_state["_last_sig"] = sig
-    st.success("✅ Auto-saved to MongoDB.")
-    try:
-        audit_log(
-            "itinerary_save",
-            user,
-            page="01_Itinerary_Generator",
-            extra={"client_mobile": client_mobile, "start_date": str(start_date), "upserted": bool(getattr(res, "upserted_id", None))}
-        )
-    except Exception:
-        pass
+    st.session_state["_last_saved_key"] = saved_key
+    if not already:
+        if res.upserted_id:
+            st.success(f"✅ Saved new itinerary (ID: {res.upserted_id}).")
+        else:
+            st.info("🔁 Updated existing itinerary for this mobile + start date.")
+except Exception as e:
+    st.error(f"Could not save itinerary: {e}")
 
-# ----------------- Save info / preview -----------------
+# ================= Preview & Download =================
 st.markdown("### 2) Preview & Share")
 c1, c2 = st.columns([1, 1])
 with c1:
     st.text_area("Preview (copy from here)", final_output, height=420)
 with c2:
-    existing = col_it.find_one(key_filter, {"_id": 1})
-    if existing:
-        st.info(f"Saved as ID: {str(existing['_id'])}")
     st.download_button(
         label="⬇️ Download itinerary as .txt",
         data=final_output,
