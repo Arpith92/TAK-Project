@@ -352,3 +352,9 @@ st.download_button(
     mime="text/plain",
     use_container_width=True
 )
+
+from tak_audit import audit_login   # ← add import at top of the file
+st.session_state["user"] = name
+audit_login(name)                   # ← log the login (IST time)
+st.success(f"Welcome, {name}!")
+st.rerun()
