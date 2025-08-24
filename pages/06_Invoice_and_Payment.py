@@ -1,7 +1,7 @@
 # pages/06_Invoice_and_Payment.py
 from __future__ import annotations
 
-import os, io, base64
+import os, base64
 from datetime import datetime, date
 from typing import Optional, Dict
 
@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
+from fpdf import FPDF
 
 # ================= Page config =================
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
@@ -37,10 +38,12 @@ def _find_uri() -> Optional[str]:
             v = st.secrets.get(k)
         except Exception:
             v = None
-        if v: return v
+        if v:
+            return v
     for k in CAND_KEYS:
         v = os.getenv(k)
-        if v: return v
+        if v:
+            return v
     return None
 
 @st.cache_resource
@@ -59,7 +62,7 @@ col_expenses    = db["expenses"]
 def _from_secrets_multi(key: str) -> Optional[str]:
     """Read from secrets at top-level or inside [users] (your current file has it there)."""
     try:
-        if key in st.secrets:  # top-level
+        if key in st.secrets:
             return st.secrets.get(key)
     except Exception:
         pass
@@ -72,47 +75,52 @@ def _from_secrets_multi(key: str) -> Optional[str]:
     return None
 
 def _asset_path(default_rel: str) -> Optional[str]:
-    # secrets override
+    # choose by name
     p = _from_secrets_multi("org_logo_path") if "logo" in default_rel else _from_secrets_multi("org_sign_path")
     if p and os.path.exists(p):
         return p
-    # default .streamlit path
     if os.path.exists(default_rel):
         return default_rel
-    # try png/jpg swap
-    alt = default_rel.rsplit(".", 1)
-    if len(alt) == 2:
-        altp = f"{alt[0]}.png" if alt[1].lower()=="jpg" else f"{alt[0]}.jpg"
-        if os.path.exists(altp):
-            return altp
+    # try alternate extension
+    root, ext = os.path.splitext(default_rel)
+    alt = f"{root}.png" if ext.lower() == ".jpg" else f"{root}.jpg"
+    if os.path.exists(alt):
+        return alt
     return None
 
+# Exact company details per requirement (ASCII to avoid unicode issues)
 ORG = {
-    # Use ASCII-only to keep FPDF core fonts happy
     "title": "Travelaajkal (TM) - Achala Holidays Pvt. Ltd.",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
     "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com",
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
-ORG_LOGO  = _asset_path(".streamlit/logo.jpg")
-ORG_SIGN  = _asset_path(".streamlit/signature.png")
+ORG_LOGO = _asset_path(".streamlit/logo.jpg")
+ORG_SIGN = _asset_path(".streamlit/signature.png")
+
+# Tunables: logo/sign sizes (mm) – enlarged but safe
+LOGO_W_MM = 36
+SIGN_W_MM = 55
 
 # ================= Helpers =====================
 def _to_int(x, default=0):
     try:
-        if x is None: return default
+        if x is None:
+            return default
         return int(float(str(x).replace(",", "")))
     except Exception:
         return default
 
 def _safe_date(x) -> Optional[date]:
     try:
-        if pd.isna(x): return None
+        if pd.isna(x):
+            return None
         return pd.to_datetime(x).date()
     except Exception:
         return None
 
-def _str(x): return "" if x is None else str(x)
+def _str(x):
+    return "" if x is None else str(x)
 
 def _fmt_money(n: int) -> str:
     # ASCII only (no unicode rupee)
@@ -121,48 +129,52 @@ def _fmt_money(n: int) -> str:
 def _final_cost(iid: str) -> Dict[str, int]:
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
-        {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}
+        {"final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
     ) or {}
     if "final_package_cost" in exp:
         return {
             "base": _to_int(exp.get("base_package_cost", exp.get("package_cost", 0))),
             "discount": _to_int(exp.get("discount", 0)),
-            "final": _to_int(exp.get("final_package_cost", 0))
+            "final": _to_int(exp.get("final_package_cost", 0)),
         }
     base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
     disc = _to_int(exp.get("discount", 0))
     if base or disc:
         return {"base": base, "discount": disc, "final": max(0, base - disc)}
-    it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost":1,"discount":1}) or {}
+    it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost": 1, "discount": 1}) or {}
     base2 = _to_int(it.get("package_cost", 0))
     disc2 = _to_int(it.get("discount", 0))
     return {"base": base2, "discount": disc2, "final": max(0, base2 - disc2)}
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_confirmed() -> pd.DataFrame:
-    its = list(col_itineraries.find({}, {
-        "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
-        "final_route":1, "total_pax":1, "start_date":1, "end_date":1
-    }))
-    if not its: return pd.DataFrame()
+    its = list(col_itineraries.find(
+        {},
+        {"_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
+         "final_route": 1, "total_pax": 1, "start_date": 1, "end_date": 1}
+    ))
+    if not its:
+        return pd.DataFrame()
     for r in its:
         r["itinerary_id"] = str(r["_id"])
         r["start_date"] = _safe_date(r.get("start_date"))
-        r["end_date"]   = _safe_date(r.get("end_date"))
+        r["end_date"] = _safe_date(r.get("end_date"))
         r.pop("_id", None)
     df_i = pd.DataFrame(its)
 
-    ups = list(col_updates.find({"status":"confirmed"}, {
-        "_id":0, "itinerary_id":1, "status":1, "booking_date":1,
-        "advance_amount":1, "rep_name":1, "incentive":1
-    }))
+    ups = list(col_updates.find(
+        {"status": "confirmed"},
+        {"_id": 0, "itinerary_id": 1, "status": 1, "booking_date": 1,
+         "advance_amount": 1, "rep_name": 1, "incentive": 1}
+    ))
     if not ups:
         return pd.DataFrame(columns=[
-            "ach_id","client_name","client_mobile","final_route","total_pax",
-            "start_date","end_date","booking_date","advance_amount","rep_name","incentive","itinerary_id"
+            "ach_id", "client_name", "client_mobile", "final_route", "total_pax",
+            "start_date", "end_date", "booking_date", "advance_amount",
+            "rep_name", "incentive", "itinerary_id"
         ])
     for u in ups:
-        u["booking_date"]   = _safe_date(u.get("booking_date"))
+        u["booking_date"] = _safe_date(u.get("booking_date"))
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
@@ -177,10 +189,9 @@ def fetch_confirmed() -> pd.DataFrame:
     return df
 
 # ================= FPDF (ASCII-safe) =============
-from fpdf import FPDF
-
 def _latin(s: str) -> str:
-    if s is None: s = ""
+    if s is None:
+        s = ""
     s = (str(s)
          .replace("₹", "Rs ")
          .replace("—", "-").replace("–", "-").replace("•", "-")
@@ -193,41 +204,49 @@ def _latin(s: str) -> str:
 
 class PDF(FPDF):
     def header(self):
-        # Outer border rectangle to mimic template
-        self.set_draw_color(150,150,150)
-        self.rect(8, 8, 194, 281)  # A4 page border inside margins
+        # Outer border
+        self.set_draw_color(150, 150, 150)
+        self.set_line_width(0.4)
+        self.rect(8, 8, 194, 281)
 
-        # Logo (if available)
-        x0, y0 = 14, 12
+        # Header block
+        left_margin = 14
+        top_margin = 12
+        x_text = left_margin
         if ORG_LOGO and os.path.exists(ORG_LOGO):
             try:
-                self.image(ORG_LOGO, x=x0, y=y0, w=28)
-                x0 = 14 + 32  # shift title start to the right of logo
+                # keep inside the border
+                self.image(ORG_LOGO, x=left_margin, y=top_margin, w=LOGO_W_MM)
+                x_text = left_margin + LOGO_W_MM + 6
             except Exception:
-                x0 = 14
+                x_text = left_margin
 
-        # Company title & address
-        self.set_xy(x0, 12)
-        self.set_font("Helvetica", "B", 16)
-        self.cell(0, 8, _latin(ORG["title"]), ln=1, align="C")
+        # Title + address centered within content width
+        self.set_xy(x_text, top_margin + 2)
+        self.set_font("Helvetica", "B", 15)
+        self.cell(0, 7, _latin(ORG["title"]), ln=1, align="C")
+
         self.set_font("Helvetica", "", 10)
+        self.set_x(x_text)
         self.cell(0, 6, _latin(ORG["line1"]), ln=1, align="C")
+        self.set_x(x_text)
         self.cell(0, 6, _latin(ORG["line2"]), ln=1, align="C")
+
         # thin rule
-        self.ln(2)
-        self.set_draw_color(0,0,0)
+        self.ln(1)
+        self.set_draw_color(0, 0, 0)
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
     def footer(self):
-        # rights line small + optional sign box
-        self.set_y(-22)
+        # footer text
+        self.set_y(-20)
         self.set_font("Helvetica", "", 8)
-        self.cell(0, 5, _latin(ORG["footer_rights"]), ln=1, align="C")
+        self.cell(0, 6, _latin(ORG["footer_rights"]), align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
-    return bytes(out) if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
+    return bytes(out) if isinstance(out, (bytes, bytearray, memoryview)) else str(out).encode("latin-1", errors="ignore")
 
 # ------------- invoice builder -------------
 def build_invoice_pdf(row: dict, subject: str) -> bytes:
@@ -267,60 +286,55 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     disc  = int(row.get("discount", 0))
     final = int(row.get("final_cost", 0))
 
-    # table frame
     col1_w, col2_w = 130, 52
     th = 8
 
-    # header row
     pdf.set_font("Helvetica", "B", 10)
     x = left; y = pdf.get_y()
-    pdf.rect(x, y, col1_w, th);  pdf.rect(x+col1_w, y, col2_w, th)
-    pdf.text(x+2,  y+th-2, _latin("Description"))
-    pdf.text(x+col1_w+2, y+th-2, _latin("Amount"))
+    pdf.rect(x, y, col1_w, th);  pdf.rect(x + col1_w, y, col2_w, th)
+    pdf.text(x + 2, y + th - 2, _latin("Description"))
+    pdf.text(x + col1_w + 2, y + th - 2, _latin("Amount"))
     pdf.ln(th)
 
-    # item
     pdf.set_font("Helvetica", "", 10)
     desc = f"Travel Package - {_str(row.get('final_route'))} ({_str(row.get('total_pax'))} pax)"
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin(desc))
-    pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, _latin(_fmt_money(base)), align="R")
+    pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, _latin(desc))
+    pdf.set_xy(left + col1_w, y)
+    pdf.cell(col2_w - 2, th, _latin(_fmt_money(base)), align="R")
     pdf.ln(th)
 
-    # discount (if any)
     if disc > 0:
         y = pdf.get_y()
-        pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-        pdf.text(left+2, y+th-2, _latin("Less: Discount"))
-        pdf.set_xy(left+col1_w, y)
-        pdf.cell(col2_w-2, th, _latin(f"- {_fmt_money(disc)}"), align="R")
+        pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+        pdf.text(left + 2, y + th - 2, _latin("Less: Discount"))
+        pdf.set_xy(left + col1_w, y)
+        pdf.cell(col2_w - 2, th, _latin(f"- {_fmt_money(disc)}"), align="R")
         pdf.ln(th)
 
-    # total
     y = pdf.get_y()
     pdf.set_font("Helvetica", "B", 10)
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Total Payable"))
-    pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, _latin(_fmt_money(final)), align="R")
+    pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, _latin("Total Payable"))
+    pdf.set_xy(left + col1_w, y)
+    pdf.cell(col2_w - 2, th, _latin(_fmt_money(final)), align="R")
     pdf.ln(th + 4)
 
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, _latin("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
 
-    # signature block (optional image)
-    pdf.ln(8)
+    # Signature – enlarged, kept inside border and away from lines
+    pdf.ln(10)
     sig_y = pdf.get_y()
-    pdf.set_font("Helvetica", "", 10)
     if ORG_SIGN and os.path.exists(ORG_SIGN):
         try:
-            pdf.image(ORG_SIGN, x=left+120, y=sig_y-2, w=40)
+            pdf.image(ORG_SIGN, x=left + 120, y=sig_y - 2, w=SIGN_W_MM)
         except Exception:
             pass
-    pdf.set_y(sig_y + 18)
-    pdf.set_x(left+120)
+    pdf.set_y(sig_y + (SIGN_W_MM * 0.35))
+    pdf.set_x(left + 120)
+    pdf.set_font("Helvetica", "", 10)
     pdf.cell(60, 6, _latin("Authorised Signatory"), ln=1, align="C")
     return _pdf_bytes(pdf)
 
@@ -353,48 +367,46 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     final   = int(row.get("final_cost", 0))
     bal     = max(final - advance, 0)
 
-    # table
     col1_w, col2_w, th = 130, 52, 8
     pdf.set_font("Helvetica", "B", 10)
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2,  y+th-2, _latin("Item"))
-    pdf.text(left+col1_w+2, y+th-2, _latin("Amount"))
+    pdf.rect(left, y, col1_w, th);  pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2,  y + th - 2, _latin("Item"))
+    pdf.text(left + col1_w + 2, y + th - 2, _latin("Amount"))
     pdf.ln(th)
 
     pdf.set_font("Helvetica", "", 10)
     # row 1
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Amount Paid (Advance)"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(advance)), align="R")
+    pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, _latin("Amount Paid (Advance)"))
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, _latin(_fmt_money(advance)), align="R")
     pdf.ln(th)
     # row 2
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Total Package Value"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(final)), align="R")
+    pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, _latin("Total Package Value"))
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, _latin(_fmt_money(final)), align="R")
     pdf.ln(th)
     # row 3
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Balance Due"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(bal)), align="R")
-    pdf.ln(th+4)
+    pdf.rect(left, y, col1_w, th); pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, _latin("Balance Due"))
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, _latin(_fmt_money(bal)), align="R")
+    pdf.ln(th + 6)
 
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, _latin(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
 
-    # signature block
-    pdf.ln(8)
+    pdf.ln(10)
     sig_y = pdf.get_y()
     if ORG_SIGN and os.path.exists(ORG_SIGN):
         try:
-            pdf.image(ORG_SIGN, x=left+120, y=sig_y-2, w=40)
+            pdf.image(ORG_SIGN, x=left + 120, y=sig_y - 2, w=SIGN_W_MM)
         except Exception:
             pass
-    pdf.set_y(sig_y + 18)
-    pdf.set_x(left+120)
+    pdf.set_y(sig_y + (SIGN_W_MM * 0.35))
+    pdf.set_x(left + 120)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(60, 6, _latin("Authorised Signatory"), ln=1, align="C")
     return _pdf_bytes(pdf)
@@ -447,7 +459,7 @@ st.subheader("🧾 Invoice")
 default_subject = f"Travel Package - {_latin(_str(row.get('final_route')))} for {_latin(_str(row.get('client_name')))}"
 subject = st.text_input("Subject line for invoice", value=default_subject)
 
-c1, c2 = st.columns([1,1])
+c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("Generate Invoice PDF"):
         inv_bytes = build_invoice_pdf(row, subject=_latin(subject))
