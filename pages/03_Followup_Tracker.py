@@ -1,50 +1,53 @@
 # pages/03_Followup_Tracker.py
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional
-
+from datetime import datetime, date, timedelta, time as dtime
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 import os
+import io
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 
-# ----------------------------
+# =========================
 # App config
-# ----------------------------
+# =========================
 st.set_page_config(page_title="Follow-up Tracker", layout="wide")
 st.title("📞 Follow-up Tracker")
 
-# ----------------------------
-# Safe secrets + Mongo helper
-# ----------------------------
+IST = ZoneInfo("Asia/Kolkata")
+
+# =========================
+# Safe secrets + Mongo helpers (parity with other pages)
+# =========================
 CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
 
-def _find_uri():
-    # 1) Prefer Streamlit secrets
+def _visible_secret_keys() -> list[str]:
     try:
-        secret_keys = list(st.secrets.keys())
+        return list(st.secrets.keys())
     except Exception:
-        secret_keys = []
+        return []
+
+def _find_uri() -> Optional[str]:
     for k in CAND_KEYS:
         try:
             v = st.secrets.get(k)
         except Exception:
             v = None
         if v:
-            return v, secret_keys
-    # 2) Env fallbacks
+            return v
     for k in CAND_KEYS:
         v = os.getenv(k)
         if v:
-            return v, secret_keys
-    return None, secret_keys
+            return v
+    return None
 
 @st.cache_resource
-def get_db():
-    uri, secret_keys = _find_uri()
+def _get_client() -> MongoClient:
+    uri = _find_uri()
     if not uri:
         st.error(
             "Mongo connection is not configured.\n\n"
@@ -52,18 +55,30 @@ def get_db():
             "Example:\n"
             'mongo_uri = "mongodb+srv://USER:PASS@host/?retryWrites=true&w=majority"\n'
         )
-        st.caption(f"Visible secret keys in this app: {secret_keys}")
+        st.caption(f"Visible secret keys in this app: {_visible_secret_keys()}")
         env_present = [k for k in CAND_KEYS if os.getenv(k)]
         st.caption(f"Present env vars: {env_present}")
         st.stop()
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(
+        uri,
+        appName="TAK_FollowupTracker",
+        maxPoolSize=100,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+        retryWrites=True,
+        tz_aware=True,
+    )
     try:
         client.admin.command("ping")
     except ServerSelectionTimeoutError as e:
         st.error("Could not connect to MongoDB. Check the URI and Atlas network access.\n\n"
                  f"Details: {e}")
         st.stop()
-    return client["TAK_DB"]
+    return client
+
+@st.cache_resource
+def get_db():
+    return _get_client()["TAK_DB"]
 
 db = get_db()
 col_itineraries = db["itineraries"]
@@ -71,9 +86,9 @@ col_updates     = db["package_updates"]
 col_followups   = db["followups"]
 col_expenses    = db["expenses"]
 
-# ----------------------------
+# =========================
 # Users loader (Secrets or local toml fallback)
-# ----------------------------
+# =========================
 def load_users() -> dict:
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
@@ -98,9 +113,9 @@ def load_users() -> dict:
         pass
     return {}
 
-# ----------------------------
+# =========================
 # Enforced PIN login (+ Logout)
-# ----------------------------
+# =========================
 def _login() -> Optional[str]:
     with st.sidebar:
         if st.session_state.get("user"):
@@ -116,11 +131,8 @@ def _login() -> Optional[str]:
     if not isinstance(users_map, dict) or not users_map:
         with st.sidebar:
             st.caption("Secrets debug")
-            try:
-                st.write("keys:", list(st.secrets.keys()))
-            except Exception:
-                st.write("keys: unavailable")
             st.write("users type:", type(st.secrets.get("users", None)).__name__)
+            st.write("keys:", _visible_secret_keys())
         st.error(
             "Login is not configured yet.\n\n"
             "Add to **Manage app → Secrets**:\n"
@@ -153,18 +165,18 @@ USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
 is_admin = (str(user).strip().lower() == "arpith")  # Arpith is admin
 
-# ----------------------------
-# Helpers
-# ----------------------------
+# =========================
+# Helpers (aligned across pages)
+# =========================
 def _to_int(x, default=0):
     try:
         if x is None:
             return default
-        return int(float(str(x).replace(",", "")))
+        return int(round(float(str(x).replace(",", ""))))
     except Exception:
         return default
 
-def _clean_dt(x):
+def _clean_dt(x: object) -> Optional[datetime]:
     if x is None:
         return None
     try:
@@ -175,42 +187,56 @@ def _clean_dt(x):
     except Exception:
         return None
 
-def _today():
+def _today_utc() -> date:
     return datetime.utcnow().date()
 
-def month_bounds(d: date):
+def month_bounds(d: date) -> Tuple[date, date]:
     first = d.replace(day=1)
-    next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-    last = next_month - timedelta(days=1)
+    last = (first + pd.offsets.MonthEnd(1)).date()
     return first, last
 
-# -------- Final cost logic (base − discount) used everywhere ----------
+def _fmt_ist(dt: datetime | None) -> str:
+    if not dt:
+        return ""
+    try:
+        return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M %Z")
+    except Exception:
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
+    """Robust fetch by _id OR itinerary_id (some older data may store string ids)."""
+    projection = projection or {}
+    doc = None
+    try:
+        doc = col_itineraries.find_one({"_id": ObjectId(iid)}, projection)
+    except Exception:
+        doc = col_itineraries.find_one({"itinerary_id": str(iid)}, projection)
+    return doc or {}
+
+# -------- Final cost logic (base − discount) ----------
 def _final_cost_for(iid: str) -> int:
     """
-    Final cost = base_package_cost - discount.
+    Final cost = base_package_cost - discount, preferred explicit 'final_package_cost' in expenses.
     Falls back to itinerary.package_cost if no expense record exists.
-    Also keeps backward-compat if only 'package_cost' exists in expenses.
+    Back-compat: if only 'package_cost' exists in expenses, treat as final.
     """
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
         {"final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
     ) or {}
 
-    # Preferred explicit field
     if "final_package_cost" in exp:
         return _to_int(exp.get("final_package_cost", 0))
 
-    # Legacy/back-compat: compute if base+discount exist
     if ("base_package_cost" in exp) or ("discount" in exp):
         base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
         disc = _to_int(exp.get("discount", 0))
         return max(0, base - disc)
 
-    # Fallbacks
     if "package_cost" in exp:
-        return _to_int(exp.get("package_cost", 0))  # treat as final if only this exists
+        return _to_int(exp.get("package_cost", 0))
 
-    it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost": 1, "discount": 1}) or {}
+    it = _get_itinerary(iid, {"package_cost": 1, "discount": 1})
     base = _to_int(it.get("package_cost", 0))
     disc = _to_int(it.get("discount", 0))
     return max(0, base - disc)
@@ -222,13 +248,11 @@ def _compute_incentive(final_amt: int) -> int:
         return 500
     return 0
 
-# ----------------------------
+# =========================
 # Data fetchers (admin-aware)
-# ----------------------------
+# =========================
 def fetch_assigned_followups(assigned_to: Optional[str]) -> pd.DataFrame:
-    """
-    If assigned_to is None -> all followups; else only that user's assigned followups.
-    """
+    """If assigned_to is None -> all followups; else only that user's assigned followups."""
     q = {"status": "followup"}
     if assigned_to is not None:
         q["assigned_to"] = assigned_to
@@ -293,9 +317,9 @@ def fetch_confirmed_incentives(user_filter: Optional[str], start_d: date, end_d:
     q = {
         "status": "confirmed",
         "booking_date": {
-            "$gte": datetime.combine(start_d, datetime.min.time()),
-            "$lte": datetime.combine(end_d, datetime.max.time())
-        }
+            "$gte": datetime.combine(start_d, dtime.min),
+            "$lte": datetime.combine(end_d, dtime.max),
+        },
     }
     if user_filter:
         q["rep_name"] = user_filter
@@ -308,14 +332,14 @@ def count_confirmed(user_filter: Optional[str], start_d: Optional[date]=None, en
         q["rep_name"] = user_filter
     if start_d and end_d:
         q["booking_date"] = {
-            "$gte": datetime.combine(start_d, datetime.min.time()),
-            "$lte": datetime.combine(end_d, datetime.max.time())
+            "$gte": datetime.combine(start_d, dtime.min),
+            "$lte": datetime.combine(end_d, dtime.max),
         }
     return col_updates.count_documents(q)
 
-# ----------------------------
+# =========================
 # Reassign follow-ups
-# ----------------------------
+# =========================
 def _latest_next_followup_date(iid: str) -> Optional[datetime]:
     d = col_followups.find_one(
         {"itinerary_id": str(iid)},
@@ -326,7 +350,7 @@ def _latest_next_followup_date(iid: str) -> Optional[datetime]:
 
 def reassign_followup(iid: str, from_user: str, to_user: str) -> None:
     next_dt = _latest_next_followup_date(iid)
-    # log the transfer
+    # Immutable log of transfer
     log_doc = {
         "itinerary_id": str(iid),
         "created_at": datetime.utcnow(),
@@ -335,8 +359,17 @@ def reassign_followup(iid: str, from_user: str, to_user: str) -> None:
         "comment": f"Reassigned from {from_user} to {to_user}",
         "next_followup_on": next_dt
     }
+    # enrich with client meta (for better trail queries)
+    base = _get_itinerary(iid, {"client_name":1,"client_mobile":1,"ach_id":1})
+    if base:
+        log_doc.update({
+            "client_name": base.get("client_name", ""),
+            "client_mobile": base.get("client_mobile", ""),
+            "ach_id": base.get("ach_id", ""),
+        })
     col_followups.insert_one(log_doc)
-    # update current assignment
+
+    # Latest snapshot
     col_updates.update_one(
         {"itinerary_id": str(iid)},
         {"$set": {
@@ -347,9 +380,9 @@ def reassign_followup(iid: str, from_user: str, to_user: str) -> None:
         upsert=True
     )
 
-# ----------------------------
+# =========================
 # Updaters (admin can credit another user)
-# ----------------------------
+# =========================
 def upsert_update_status(
     iid: str,
     status: str,               # "followup" | "confirmed" | "cancelled"
@@ -365,17 +398,16 @@ def upsert_update_status(
     log_doc = {
         "itinerary_id": str(iid),
         "created_at": datetime.utcnow(),
-        "created_by": actor_user,             # keep who actually did it
+        "created_by": actor_user,             # who actually did it
         "status": status,
         "comment": str(comment or ""),
         "next_followup_on": (
-            datetime.combine(next_followup_on, datetime.min.time())
-            if next_followup_on else None
+            datetime.combine(next_followup_on, dtime.min) if next_followup_on else None
         ),
         "cancellation_reason": (str(cancellation_reason or "") if status == "cancelled" else ""),
-        "credited_to": credit_user            # show on-behalf-of
+        "credited_to": credit_user            # on-behalf-of
     }
-    base = col_itineraries.find_one({"_id": ObjectId(iid)}, {"client_name":1,"client_mobile":1,"ach_id":1})
+    base = _get_itinerary(iid, {"client_name":1,"client_mobile":1,"ach_id":1})
     if base:
         log_doc.update({
             "client_name": base.get("client_name", ""),
@@ -392,14 +424,14 @@ def upsert_update_status(
         "updated_at": datetime.utcnow(),
     }
     if final_status == "followup":
-        upd["assigned_to"] = credit_user   # keep in that user's queue
+        upd["assigned_to"] = credit_user
         upd.pop("rep_name", None)
         upd.pop("incentive", None)
         upd.pop("booking_date", None)
         upd.pop("advance_amount", None)
     elif final_status == "confirmed":
         if booking_date:
-            upd["booking_date"] = datetime.combine(booking_date, datetime.min.time())
+            upd["booking_date"] = datetime.combine(booking_date, dtime.min)
         if advance_amount is not None:
             upd["advance_amount"] = int(advance_amount)
         final_amt = _final_cost_for(iid)
@@ -431,7 +463,7 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
     }
     col_expenses.update_one({"itinerary_id": str(iid)}, {"$set": doc}, upsert=True)
 
-    # If confirmed, refresh incentive
+    # If confirmed, refresh incentive (credit to explicit user if provided)
     upd = col_updates.find_one({"itinerary_id": str(iid)}, {"status": 1, "rep_name": 1})
     if upd and upd.get("status") == "confirmed":
         inc = _compute_incentive(int(final_cost))
@@ -458,41 +490,54 @@ with st.sidebar:
 
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
 
-# ----------------------------
+# =========================
 # TAB 1: Follow-ups
-# ----------------------------
+# =========================
 with tabs[0]:
     df_assigned = fetch_assigned_followups(user_filter)
-    itinerary_ids = df_assigned["itinerary_id"].astype(str).tolist()
+    if not df_assigned.empty:
+        # Optional quick-search
+        q = st.text_input("🔎 Search (name / mobile / ACH / route)", "")
+        if q.strip():
+            s = q.strip().lower()
+            df_assigned = df_assigned[
+                df_assigned["client_name"].astype(str).str.lower().str.contains(s) |
+                df_assigned["client_mobile"].astype(str).str.lower().str.contains(s) |
+                df_assigned["ach_id"].astype(str).str.lower().str.contains(s) |
+                df_assigned["final_route"].astype(str).str.lower().str.contains(s)
+            ]
+
+    itinerary_ids = df_assigned["itinerary_id"].astype(str).tolist() if not df_assigned.empty else []
     latest_map = fetch_latest_followup_log_map(itinerary_ids)
 
     # derive "next follow-up" & last comment from latest log
-    df_assigned["next_followup_on"] = df_assigned["itinerary_id"].map(
-        lambda x: (latest_map.get(str(x), {}) or {}).get("next_followup_on")
-    )
-    df_assigned["next_followup_on"] = df_assigned["next_followup_on"].apply(
-        lambda x: pd.to_datetime(x).date() if pd.notna(x) else None
-    )
-    df_assigned["last_comment"] = df_assigned["itinerary_id"].map(
-        lambda x: (latest_map.get(str(x), {}) or {}).get("comment", "")
-    )
+    if not df_assigned.empty:
+        df_assigned["next_followup_on"] = df_assigned["itinerary_id"].map(
+            lambda x: (latest_map.get(str(x), {}) or {}).get("next_followup_on")
+        )
+        df_assigned["next_followup_on"] = df_assigned["next_followup_on"].apply(
+            lambda x: pd.to_datetime(x).date() if pd.notna(x) else None
+        )
+        df_assigned["last_comment"] = df_assigned["itinerary_id"].map(
+            lambda x: (latest_map.get(str(x), {}) or {}).get("comment", "")
+        )
 
-    today = _today()
+    today = _today_utc()
     tmr = today + timedelta(days=1)
     in7 = today + timedelta(days=7)
 
-    total_pkgs = len(df_assigned)
-    due_today = int((df_assigned["next_followup_on"] == today).sum())
-    due_tomorrow = int((df_assigned["next_followup_on"] == tmr).sum())
-    due_week = int(((df_assigned["next_followup_on"] >= today) &
-                    (df_assigned["next_followup_on"] <= in7)).sum())
+    total_pkgs = 0 if df_assigned.empty else len(df_assigned)
+    due_today = 0 if df_assigned.empty else int((df_assigned["next_followup_on"] == today).sum())
+    due_tomorrow = 0 if df_assigned.empty else int((df_assigned["next_followup_on"] == tmr).sum())
+    due_week = 0 if df_assigned.empty else int(((df_assigned["next_followup_on"] >= today) &
+                                                (df_assigned["next_followup_on"] <= in7)).sum())
 
     first_this, last_this = month_bounds(today)
     first_last, last_last = month_bounds(first_this - timedelta(days=1))
     this_month_incentive = fetch_confirmed_incentives(user_filter, first_this, last_this)
-    last_month_incentive = fetch_confirmed_incentives(user_filter, first_last, last_last)
-    confirmed_this_month = count_confirmed(user_filter, first_this, last_this)
-    confirmed_all_time   = count_confirmed(user_filter)
+    last_month_incentive  = fetch_confirmed_incentives(user_filter, first_last, last_last)
+    confirmed_this_month  = count_confirmed(user_filter, first_this, last_this)
+    confirmed_all_time    = count_confirmed(user_filter)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Assigned follow-ups" if user_filter else "Follow-ups (all users)", total_pkgs)
@@ -510,7 +555,6 @@ with tabs[0]:
 
     st.divider()
 
-    # Table of assigned clients
     st.subheader("Follow-ups list")
     if df_assigned.empty:
         st.info("No follow-ups found for the selected filter.")
@@ -535,6 +579,19 @@ with tabs[0]:
     left, right = st.columns([2, 1])
     with left:
         st.dataframe(table.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
+
+        # lightweight CSV export
+        if st.button("⬇️ Export current list (CSV)"):
+            out = io.StringIO()
+            table.drop(columns=["itinerary_id"]).to_csv(out, index=False)
+            st.download_button(
+                "Download CSV",
+                data=out.getvalue().encode("utf-8"),
+                file_name=f"followups_{today}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
     with right:
         options = (table["ACH ID"].fillna("").astype(str) + " | " +
                    table["Client"].fillna("") + " | " +
@@ -549,8 +606,16 @@ with tabs[0]:
     st.divider()
     st.subheader("Details & Update")
 
-    it_doc = col_itineraries.find_one({"_id": ObjectId(chosen_id)}) or {}
+    it_doc = _get_itinerary(chosen_id) or {}
     upd_doc = col_updates.find_one({"itinerary_id": str(chosen_id)}, {"_id": 0}) or {}
+
+    # Created timestamps (nice to have)
+    try:
+        created_dt_utc = ObjectId(str(chosen_id)).generation_time
+    except Exception:
+        created_dt_utc = None
+    created_ist_str = _fmt_ist(created_dt_utc)
+    created_utc_str = created_dt_utc.strftime("%Y-%m-%d %H:%M %Z") if created_dt_utc else ""
 
     dc1, dc2 = st.columns([1, 1])
     with dc1:
@@ -563,6 +628,8 @@ with tabs[0]:
             "Pax": it_doc.get("total_pax",""),
             "Travel": f"{it_doc.get('start_date','')} → {it_doc.get('end_date','')}",
             "Representative": it_doc.get("representative",""),
+            "Created (IST)": created_ist_str,
+            "Created (UTC)": created_utc_str,
         })
     with dc2:
         st.markdown("**Current Status**")
@@ -579,7 +646,8 @@ with tabs[0]:
     # ---- Reassign control (admin only) ----
     if is_admin:
         st.markdown("### Reassign this follow-up")
-        candidates = [u for u in ALL_USERS if u != upd_doc.get("assigned_to")] or ALL_USERS
+        current_assignee = upd_doc.get("assigned_to")
+        candidates = [u for u in ALL_USERS if u != current_assignee] or ALL_USERS
         to_user = st.selectbox("Move to user", candidates, key="reassign_to")
         if st.button("➡️ Reassign now"):
             try:
@@ -630,7 +698,8 @@ with tabs[0]:
     trail = list(col_followups.find({"itinerary_id": str(chosen_id)}).sort("created_at", -1))
     if trail:
         df_trail = pd.DataFrame([{
-            "When": t.get("created_at"),
+            "When (UTC)": t.get("created_at"),
+            "When (IST)": _fmt_ist(_clean_dt(t.get("created_at"))),
             "By": t.get("created_by"),
             "Credited to": t.get("credited_to", ""),
             "Status": t.get("status"),
@@ -642,6 +711,18 @@ with tabs[0]:
             "Cancel reason": t.get("cancellation_reason",""),
         } for t in trail])
         st.dataframe(df_trail, use_container_width=True, hide_index=True)
+
+        # Export trail
+        if st.button("⬇️ Export trail (CSV)"):
+            out2 = io.StringIO()
+            df_trail.to_csv(out2, index=False)
+            st.download_button(
+                "Download CSV",
+                data=out2.getvalue().encode("utf-8"),
+                file_name=f"followup_trail_{chosen_id}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
     else:
         st.caption("No follow-up logs yet for this client.")
 
@@ -696,9 +777,9 @@ with tabs[0]:
         st.success("Update saved.")
         st.rerun()
 
-# ----------------------------
+# =========================
 # TAB 2: All packages (admin overview)
-# ----------------------------
+# =========================
 with tabs[1]:
     if is_admin:
         filter_user_all = st.selectbox("Filter packages by user (assigned/credited)", ["All users"] + ALL_USERS, index=0)
@@ -711,6 +792,17 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
+        # quick search
+        q2 = st.text_input("Search in packages (name / mobile / ACH / route)", "")
+        if q2.strip():
+            s2 = q2.strip().lower()
+            df_all = df_all[
+                df_all["client_name"].astype(str).str.lower().str.contains(s2) |
+                df_all["client_mobile"].astype(str).str.lower().str.contains(s2) |
+                df_all["ach_id"].astype(str).str.lower().str.contains(s2) |
+                df_all["final_route"].astype(str).str.lower().str.contains(s2)
+            ]
+
         view = df_all[[
             "ach_id","client_name","client_mobile","final_route","total_pax",
             "start_date","end_date","status","assigned_to","rep_name","booking_date","advance_amount","incentive","itinerary_id"
@@ -719,5 +811,19 @@ with tabs[1]:
             "ach_id":"ACH ID","client_name":"Client","client_mobile":"Mobile","final_route":"Route","total_pax":"Pax",
             "start_date":"Start","end_date":"End","assigned_to":"Assigned to","rep_name":"Rep (credited)","booking_date":"Booking date"
         }, inplace=True)
-        st.dataframe(view.sort_values(["Booking date","Start","Client"], na_position="last"),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            view.sort_values(["Booking date","Start","Client"], na_position="last").drop(columns=["itinerary_id"]),
+            use_container_width=True, hide_index=True
+        )
+
+        # export
+        if st.button("⬇️ Export table (CSV)"):
+            out3 = io.StringIO()
+            view.drop(columns=["itinerary_id"]).to_csv(out3, index=False)
+            st.download_button(
+                "Download CSV",
+                data=out3.getvalue().encode("utf-8"),
+                file_name=f"packages_{_today_utc()}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
