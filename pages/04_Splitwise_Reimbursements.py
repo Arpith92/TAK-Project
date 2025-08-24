@@ -83,6 +83,10 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Admin"), "04_Splitwise_Reimbursements")
+
+
 # ----------------------------
 # Helpers
 # ----------------------------
