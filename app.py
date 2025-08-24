@@ -9,14 +9,21 @@ try:
         st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
         st.experimental_rerun()
 except Exception:
-    pass
+    import streamlit as st  # ensure st exists even if the block failed
 
 # ----------------- Imports -----------------
-import io, math, locale, datetime, os
+import io, math, locale, datetime, os, hashlib
 import pandas as pd
 import requests
 from pymongo import MongoClient
 from bson import ObjectId
+
+# ---- audit helpers (safe if tak_audit.py is absent) ----
+try:
+    from tak_audit import audit_login, audit_pageview, audit_log
+except Exception:
+    audit_login = audit_pageview = lambda *a, **k: None
+    def audit_log(*a, **k): pass
 
 # ----------------- App config -----------------
 st.set_page_config(page_title="TAK – Itinerary Generator", layout="wide")
@@ -27,6 +34,56 @@ CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Cod
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
+# ----------------- Login (PIN from secrets) -----------------
+def _load_users() -> dict:
+    try:
+        u = st.secrets.get("users", {})
+        return u if isinstance(u, dict) else {}
+    except Exception:
+        return {}
+
+def _login() -> str | None:
+    with st.sidebar:
+        if st.session_state.get("user"):
+            st.markdown(f"**Signed in as:** {st.session_state['user']}")
+            if st.button("Log out"):
+                st.session_state.pop("user", None)
+                st.rerun()
+
+    if st.session_state.get("user"):
+        return st.session_state["user"]
+
+    users_map = _load_users()
+    if not users_map:
+        st.error("Login not configured. Add [users] with PINs in Secrets.")
+        st.stop()
+
+    st.markdown("### 🔐 Login")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        name = st.selectbox("User", list(users_map.keys()), key="login_user")
+    with c2:
+        pin = st.text_input("PIN", type="password", key="login_pin")
+
+    if st.button("Sign in"):
+        if str(users_map.get(name, "")).strip() == str(pin).strip():
+            st.session_state["user"] = name
+            try: audit_login(name)
+            except Exception: pass
+            st.success(f"Welcome, {name}!")
+            st.rerun()
+        else:
+            st.error("Invalid PIN"); st.stop()
+    return None
+
+user = _login()
+if not user:
+    st.stop()
+
+# page view audit
+try: audit_pageview(user, "01_Itinerary_Generator")
+except Exception: pass
+
 # ----------------- Caching helpers -----------------
 @st.cache_data(ttl=900)
 def read_excel_from_url(url, sheet_name=None):
@@ -36,7 +93,6 @@ def read_excel_from_url(url, sheet_name=None):
 
 @st.cache_resource
 def mongo_client():
-    # prefer secrets, then env
     uri = (
         st.secrets.get("mongo_uri")
         or os.getenv("mongo_uri")
@@ -148,7 +204,7 @@ total_pax = int(pd.to_numeric(df["Total Pax"].iloc[0], errors="coerce") or 0)
 itinerary = []
 for _, r in df.iterrows():
     code = r.get("Code", None)
-    if code_df is not None and code in set(code_df["Code"]):
+    if code_df is not None and ("Code" in code_df.columns) and code in set(code_df["Code"]):
         desc = code_df.loc[code_df["Code"] == code, "Particulars"].iloc[0]
     else:
         desc = f"No description found for code {code}" if code else "No code provided"
@@ -211,7 +267,7 @@ for i, (d, evs) in enumerate(grouped.items(), 1):
 details_line = "(" + ",".join([x for x in [car_types, hotel_types, bhas_desc_str] if x]) + ")"
 itinerary_text += f"\n*Package cost: {pkg_cost_fmt}/-*\n{details_line}"
 
-# Inclusions (light, same as your logic but compact)
+# Inclusions
 inc = []
 if car_types:
     inc += [
@@ -225,7 +281,6 @@ if bhas_desc_str:
         "Bhasm-Aarti pickup and drop."
     ]
 if "Stay City" in df.columns and "Room Type" in df.columns and not stay_city_df.empty:
-    # simple city-night roll-up
     stay_series = df["Stay City"].astype(str).fillna("")
     city_nights = stay_series[stay_series != ""].value_counts().to_dict()
     used = 0
@@ -244,7 +299,7 @@ if hotel_types:
     ]
 inclusions = "*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)])
 
-# Exclusions & notes (unchanged spirit, compact)
+# Exclusions & notes
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified (breakfast/lunch/dinner/snacks/personal drinks).",
     "2. Entry fees for attractions/temples unless included.",
@@ -302,16 +357,14 @@ final_output = (
     itinerary_text + "\n\n" + inclusions + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 )
 
-# ----------------- Dedupe logic: 1 upload -> 1 entry -----------------
-# key = (client_mobile, start_date)
+# ----------------- Auto-Save (no button) -----------------
 key_filter = {"client_mobile": client_mobile, "start_date": str(start_date)}
-existing = col_it.find_one(key_filter, {"_id": 1})
 
-# build record
 record = {
     "client_name": sheet,
     "client_mobile": client_mobile,
     "representative": rep,
+    "uploaded_by": user,
     "upload_date": datetime.datetime.utcnow(),
     "start_date": str(start_date),
     "end_date": str(end_date),
@@ -321,40 +374,49 @@ record = {
     "car_types": car_types,
     "hotel_types": hotel_types,
     "bhasmarathi_types": bhas_desc_str,
-    "package_cost": total_package_cost,  # store numeral
+    "package_cost": int(total_package_cost),  # store numeral
     "itinerary_text": final_output
 }
 
-# Save/update gated by a button (prevent reruns creating duplicates)
-st.markdown("### 2) Save & share")
+# only write if content changed (prevents write loops)
+sig_fields = (
+    sheet, client_mobile, rep, str(start_date), str(end_date),
+    total_days, total_pax, final_route, car_types, hotel_types, bhas_desc_str, int(total_package_cost), final_output
+)
+sig = hashlib.sha1(str(sig_fields).encode("utf-8")).hexdigest()
+key_tuple = (client_mobile, str(start_date))
+
+if (
+    st.session_state.get("_last_key") != key_tuple
+    or st.session_state.get("_last_sig") != sig
+):
+    res = col_it.update_one(key_filter, {"$set": record}, upsert=True)
+    st.session_state["_last_key"] = key_tuple
+    st.session_state["_last_sig"] = sig
+    st.success("✅ Auto-saved to MongoDB.")
+    try:
+        audit_log(
+            "itinerary_save",
+            user,
+            page="01_Itinerary_Generator",
+            extra={"client_mobile": client_mobile, "start_date": str(start_date), "upserted": bool(getattr(res, "upserted_id", None))}
+        )
+    except Exception:
+        pass
+
+# ----------------- Save info / preview -----------------
+st.markdown("### 2) Preview & Share")
 c1, c2 = st.columns([1, 1])
 with c1:
     st.text_area("Preview (copy from here)", final_output, height=420)
 with c2:
-    if st.button("💾 Save to MongoDB (create/update)"):
-        if existing:
-            col_it.update_one({"_id": existing["_id"]}, {"$set": record})
-            st.success("✅ Updated existing itinerary (same mobile + start date).")
-            iid = str(existing["_id"])
-        else:
-            res = col_it.insert_one(record)
-            st.success("✅ Saved new itinerary.")
-            iid = str(res.inserted_id)
-        st.session_state["last_iid"] = iid
-
-    if st.session_state.get("last_iid"):
-        st.info(f"Saved as ID: {st.session_state['last_iid']}")
-
-st.download_button(
-    label="⬇️ Download itinerary as .txt",
-    data=final_output,
-    file_name=f"itinerary_{sheet}_{start_date}.txt",
-    mime="text/plain",
-    use_container_width=True
-)
-
-from tak_audit import audit_login   # ← add import at top of the file
-st.session_state["user"] = name
-audit_login(name)                   # ← log the login (IST time)
-st.success(f"Welcome, {name}!")
-st.rerun()
+    existing = col_it.find_one(key_filter, {"_id": 1})
+    if existing:
+        st.info(f"Saved as ID: {str(existing['_id'])}")
+    st.download_button(
+        label="⬇️ Download itinerary as .txt",
+        data=final_output,
+        file_name=f"itinerary_{sheet}_{start_date}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
