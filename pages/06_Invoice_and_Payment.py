@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError, ConfigurationError, PyMongoError
 
 # ========= Page config =========
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
@@ -47,15 +48,33 @@ def _find_uri() -> Optional[str]:
 
 @st.cache_resource
 def _get_client() -> MongoClient:
-    uri = _find_uri() or st.secrets["mongo_uri"]
-    client = MongoClient(uri, appName="TAK_InvoiceSlip", serverSelectionTimeoutMS=6000, tz_aware=True)
+    uri = _find_uri() or st.secrets.get("mongo_uri")
+    if not uri:
+        raise ConfigurationError("Missing mongo_uri in secrets or env.")
+    client = MongoClient(
+        uri,
+        appName="TAK_InvoiceSlip",
+        serverSelectionTimeoutMS=4000,   # fail fast
+        connectTimeoutMS=4000,
+        tz_aware=True,
+    )
     client.admin.command("ping")
     return client
 
-db = _get_client()["TAK_DB"]
-col_itineraries = db["itineraries"]
-col_updates     = db["package_updates"]
-col_expenses    = db["expenses"]
+try:
+    db = _get_client()["TAK_DB"]
+    col_itineraries = db["itineraries"]
+    col_updates     = db["package_updates"]
+    col_expenses    = db["expenses"]
+except (ServerSelectionTimeoutError, ConfigurationError, PyMongoError) as e:
+    st.error(
+        "Could not connect to MongoDB quickly enough.\n\n"
+        "• Check Atlas IP allowlist (add Streamlit Cloud egress IP)\n"
+        "• Ensure your cluster is running\n"
+        "• Verify mongo_uri in Secrets/Env\n\n"
+        f"Details: {e}"
+    )
+    st.stop()
 
 # ========= Helpers =========
 def _to_int(x, default=0):
@@ -79,6 +98,9 @@ def _str(x):
 def _fmt_money(n: int) -> str:
     # ASCII-friendly (avoid ₹ to keep core fonts happy)
     return f"Rs {int(n):,}"
+
+def _b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("ascii")
 
 def _final_cost(iid: str) -> Dict[str, int]:
     exp = col_expenses.find_one(
@@ -150,7 +172,6 @@ def _sanitize_text(s: str) -> str:
     """
     if s is None:
         s = ""
-    # Common replacements
     s = (str(s)
          .replace("₹", "Rs ")
          .replace("—", "-")
@@ -189,7 +210,6 @@ def _pdf_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
     if isinstance(out, (bytes, bytearray)):
         return bytes(out)
-    # else we assume str
     return str(out).encode("latin-1", errors="ignore")
 
 def build_invoice_pdf(row: dict, subject: str) -> bytes:
@@ -334,7 +354,7 @@ with right:
             view["client_name"].fillna("") + " | " +
             view["booking_date"].astype(str).fillna("") + " | " +
             view["itinerary_id"])
-    choice = st.selectbox("Choose", opts.tolist())
+    choice = st.selectbox("Choose", opts.tolist(), key="choose_pkg")
     chosen_id = choice.split(" | ")[-1] if choice else None
 
 st.divider()
@@ -345,52 +365,81 @@ row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
 
 st.subheader("🧾 Invoice")
 default_subject = f"Travel Package - {_sanitize_text(_str(row.get('final_route')))} for {_sanitize_text(_str(row.get('client_name')))}"
-subject = st.text_input("Subject line for invoice", value=default_subject)
+subject = st.text_input("Subject line for invoice", value=default_subject, key="inv_subject")
 
 c1, c2 = st.columns([1,1])
 with c1:
-    if st.button("Generate Invoice PDF"):
-        inv_bytes = build_invoice_pdf(row, subject=_sanitize_text(subject))
-        st.session_state["inv_pdf"] = inv_bytes
+    if st.button("Generate Invoice PDF", key="btn_gen_inv"):
+        try:
+            inv_bytes = build_invoice_pdf(row, subject=_sanitize_text(subject))
+            st.session_state["inv_pdf"] = inv_bytes
+            st.success("Invoice generated.")
+        except Exception as e:
+            st.error(f"Failed to generate invoice: {e}")
 with c2:
     pay_date_default = row.get("booking_date") or date.today()
-    # ensure it's a date object
     if not isinstance(pay_date_default, date):
         try:
             pay_date_default = pd.to_datetime(pay_date_default).date()
         except Exception:
             pay_date_default = date.today()
-    pay_date = st.date_input("Payment made date (for slip)", value=pay_date_default)
-    if st.button("Generate Payment Slip PDF"):
-        slip_bytes = build_payment_slip_pdf(row, payment_date=pay_date)
-        st.session_state["slip_pdf"] = slip_bytes
+    pay_date = st.date_input("Payment made date (for slip)", value=pay_date_default, key="pay_date")
+    if st.button("Generate Payment Slip PDF", key="btn_gen_slip"):
+        try:
+            slip_bytes = build_payment_slip_pdf(row, payment_date=pay_date)
+            st.session_state["slip_pdf"] = slip_bytes
+            st.success("Payment slip generated.")
+        except Exception as e:
+            st.error(f"Failed to generate payment slip: {e}")
 
 st.markdown("---")
 
 # ===== Preview + Download (Invoice) =====
 if "inv_pdf" in st.session_state:
+    inv_bytes = st.session_state["inv_pdf"]
     st.markdown("#### Invoice preview")
-    b64 = base64.b64encode(st.session_state["inv_pdf"]).decode()
-    st.components.v1.html(f"""
-        <iframe src="data:application/pdf;base64,{b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>
-    """, height=620, scrolling=True)
+    inv_b64 = _b64(inv_bytes)
+    # Reliable preview: new tab link
+    st.markdown(
+        f'<a href="data:application/pdf;base64,{inv_b64}" target="_blank" rel="noopener noreferrer">🖨️ Open invoice preview in a new tab</a>',
+        unsafe_allow_html=True
+    )
+    # Optional inline preview (off by default)
+    if st.checkbox("Show inline preview (invoice)", value=False, key="chk_inv_inline"):
+        with st.spinner("Rendering inline preview..."):
+            st.components.v1.html(
+                f'<iframe src="data:application/pdf;base64,{inv_b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
+                height=620,
+                scrolling=True
+            )
     st.download_button(
         "⬇️ Download Invoice (PDF)",
-        data=st.session_state["inv_pdf"],
+        data=inv_bytes,
         file_name=f"Invoice_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
-        mime="application/pdf"
+        mime="application/pdf",
+        key="dl_invoice_btn"
     )
 
 # ===== Preview + Download (Payment Slip) =====
 if "slip_pdf" in st.session_state:
+    slip_bytes = st.session_state["slip_pdf"]
     st.markdown("#### Payment slip preview")
-    b64s = base64.b64encode(st.session_state["slip_pdf"]).decode()
-    st.components.v1.html(f"""
-        <iframe src="data:application/pdf;base64,{b64s}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>
-    """, height=620, scrolling=True)
+    slip_b64 = _b64(slip_bytes)
+    st.markdown(
+        f'<a href="data:application/pdf;base64,{slip_b64}" target="_blank" rel="noopener noreferrer">🖨️ Open payment slip preview in a new tab</a>',
+        unsafe_allow_html=True
+    )
+    if st.checkbox("Show inline preview (payment slip)", value=False, key="chk_slip_inline"):
+        with st.spinner("Rendering inline preview..."):
+            st.components.v1.html(
+                f'<iframe src="data:application/pdf;base64,{slip_b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
+                height=620,
+                scrolling=True
+            )
     st.download_button(
         "⬇️ Download Payment Slip (PDF)",
-        data=st.session_state["slip_pdf"],
+        data=slip_bytes,
         file_name=f"PaymentSlip_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
-        mime="application/pdf"
+        mime="application/pdf",
+        key="dl_slip_btn"
     )
