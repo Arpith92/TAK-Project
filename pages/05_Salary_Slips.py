@@ -85,6 +85,7 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
+audit_pageview(user, "05_Salary_Slips")
 # ----------------------------
 # Helpers
 # ----------------------------
