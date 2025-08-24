@@ -51,6 +51,10 @@ def _get_client() -> MongoClient:
     client.admin.command("ping")
     return client
 
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), page="06_Invoice_and_Payment")  # change per page
+
+
 db = _get_client()["TAK_DB"]
 col_itineraries = db["itineraries"]
 col_updates     = db["package_updates"]
