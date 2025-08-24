@@ -1,9 +1,7 @@
 # pages/06_Invoice_and_Payment.py
 from __future__ import annotations
 
-import io
-import os
-import base64
+import os, base64
 from datetime import datetime, date
 from typing import Optional, Dict
 
@@ -12,6 +10,19 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError, ConfigurationError, PyMongoError
+
+# ========= Streamlit compatibility (no upgrade required) =========
+# Provide cache decorators that work across old/new versions.
+if hasattr(st, "cache_resource"):
+    cache_resource = st.cache_resource
+else:
+    # Old Streamlit fallback
+    cache_resource = st.experimental_singleton
+
+if hasattr(st, "cache_data"):
+    cache_data = st.cache_data
+else:
+    cache_data = st.experimental_memo
 
 # ========= Page config =========
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
@@ -23,7 +34,7 @@ def require_admin():
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
     with st.sidebar:
         st.markdown("### Admin access")
-        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
+        p = st.text_input("Enter admin password", type="password", placeholder="enter pass", key="inv_admin_pass")
     if (p or "").strip() != ADMIN_PASS.strip():
         st.stop()
     st.session_state["user"] = "Admin"
@@ -46,16 +57,17 @@ def _find_uri() -> Optional[str]:
         if v: return v
     return None
 
-@st.cache_resource
+@cache_resource
 def _get_client() -> MongoClient:
     uri = _find_uri() or st.secrets.get("mongo_uri")
     if not uri:
-        raise ConfigurationError("Missing mongo_uri in secrets or env.")
+        raise ConfigurationError("Missing mongo_uri in Secrets/Env.")
+    # Very short timeouts so page never hangs
     client = MongoClient(
         uri,
         appName="TAK_InvoiceSlip",
-        serverSelectionTimeoutMS=4000,   # fail fast
-        connectTimeoutMS=4000,
+        serverSelectionTimeoutMS=3000,
+        connectTimeoutMS=3000,
         tz_aware=True,
     )
     client.admin.command("ping")
@@ -69,8 +81,7 @@ try:
 except (ServerSelectionTimeoutError, ConfigurationError, PyMongoError) as e:
     st.error(
         "Could not connect to MongoDB quickly enough.\n\n"
-        "• Check Atlas IP allowlist (add Streamlit Cloud egress IP)\n"
-        "• Ensure your cluster is running\n"
+        "• Check Atlas IP allowlist / cluster state\n"
         "• Verify mongo_uri in Secrets/Env\n\n"
         f"Details: {e}"
     )
@@ -87,8 +98,7 @@ def _to_int(x, default=0):
 def _safe_date(x) -> Optional[date]:
     try:
         if pd.isna(x): return None
-        d = pd.to_datetime(x)
-        return d.date()
+        return pd.to_datetime(x).date()
     except Exception:
         return None
 
@@ -96,7 +106,7 @@ def _str(x):
     return "" if x is None else str(x)
 
 def _fmt_money(n: int) -> str:
-    # ASCII-friendly (avoid ₹ to keep core fonts happy)
+    # ASCII-friendly for core fonts
     return f"Rs {int(n):,}"
 
 def _b64(b: bytes) -> str:
@@ -122,7 +132,7 @@ def _final_cost(iid: str) -> Dict[str, int]:
     disc2 = _to_int(it.get("discount", 0))
     return {"base": base2, "discount": disc2, "final": max(0, base2 - disc2)}
 
-@st.cache_data(ttl=120, show_spinner=False)
+@cache_data(ttl=120, show_spinner=False)
 def fetch_confirmed() -> pd.DataFrame:
     its = list(col_itineraries.find({}, {
         "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
@@ -130,21 +140,16 @@ def fetch_confirmed() -> pd.DataFrame:
     }))
     if not its: return pd.DataFrame()
     for r in its:
-        r["itinerary_id"] = str(r["_id"])
+        r["itinerary_id"] = str(r["_id"]); r.pop("_id", None)
         r["start_date"] = _safe_date(r.get("start_date"))
         r["end_date"]   = _safe_date(r.get("end_date"))
-        r.pop("_id", None)
     df_i = pd.DataFrame(its)
 
     ups = list(col_updates.find({"status":"confirmed"}, {
-        "_id":0, "itinerary_id":1, "status":1, "booking_date":1,
-        "advance_amount":1, "rep_name":1, "incentive":1
+        "_id":0, "itinerary_id":1, "booking_date":1, "advance_amount":1, "rep_name":1, "incentive":1
     }))
     if not ups:
-        return pd.DataFrame(columns=[
-            "ach_id","client_name","client_mobile","final_route","total_pax",
-            "start_date","end_date","booking_date","advance_amount","rep_name","incentive","itinerary_id"
-        ])
+        return pd.DataFrame()
     for u in ups:
         u["booking_date"]   = _safe_date(u.get("booking_date"))
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
@@ -161,24 +166,16 @@ def fetch_confirmed() -> pd.DataFrame:
     df["final_cost"]  = finals
     return df
 
-# ========= PDF builders (fpdf2; sanitize text to Latin-1) =========
+# ========= PDF (fpdf2) with ASCII-safe text =========
 from fpdf import FPDF
 
 def _sanitize_text(s: str) -> str:
-    """
-    Convert to Latin-1 safe text for FPDF core fonts.
-    - Replace common Unicode punctuation (₹, —, –, “”, ‘’, •) with ASCII equivalents.
-    - Then encode/decode with latin-1 and replace unencodable chars by '?'.
-    """
     if s is None:
         s = ""
     s = (str(s)
          .replace("₹", "Rs ")
-         .replace("—", "-")
-         .replace("–", "-")
-         .replace("•", "-")
-         .replace("“", '"').replace("”", '"')
-         .replace("‘", "'").replace("’", "'"))
+         .replace("—", "-").replace("–", "-").replace("•", "-")
+         .replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'"))
     try:
         return s.encode("latin-1", "replace").decode("latin-1")
     except Exception:
@@ -190,10 +187,7 @@ class PDF(FPDF):
         self.cell(0, 8, _sanitize_text("TRAVEL & KAILASH - TAX INVOICE / RECEIPT"), ln=1, align="C")
         self.set_font("Helvetica", "", 9)
         self.cell(0, 6, _sanitize_text("Address: Your Office Address, City | Phone: +91-XXXXXXXXXX | Email: info@example.com"), ln=1, align="C")
-        self.ln(2)
-        self.set_draw_color(0,0,0)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(4)
+        self.ln(2); self.set_draw_color(0,0,0); self.line(10, self.get_y(), 200, self.get_y()); self.ln(4)
 
     def footer(self):
         self.set_y(-15)
@@ -201,131 +195,59 @@ class PDF(FPDF):
         self.cell(0, 8, _sanitize_text(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}"), align="R")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
-    """
-    fpdf2 behavior differs by version:
-      - Some return bytes for output(dest="S")
-      - Older return a str (latin-1)
-    Handle both safely.
-    """
     out = pdf.output(dest="S")
-    if isinstance(out, (bytes, bytearray)):
-        return bytes(out)
+    if isinstance(out, (bytes, bytearray)): return bytes(out)
     return str(out).encode("latin-1", errors="ignore")
 
 def build_invoice_pdf(row: dict, subject: str) -> bytes:
-    pdf = PDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "", 11)
-
-    # Invoice title & meta
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, _sanitize_text("INVOICE"), ln=1)
+    pdf = PDF(format="A4"); pdf.set_auto_page_break(auto=True, margin=15); pdf.add_page(); pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("Helvetica", "B", 12); pdf.cell(0, 8, _sanitize_text("INVOICE"), ln=1)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, _sanitize_text(f"Invoice Date: {datetime.now().strftime('%Y-%m-%d')}"), ln=1)
-    pdf.cell(0, 6, _sanitize_text(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
-    pdf.ln(2)
-
-    # Bill To
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _sanitize_text("Bill To:"), ln=1)
+    pdf.cell(0, 6, _sanitize_text(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1); pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 6, _sanitize_text("Bill To:"), ln=1)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, _sanitize_text(f"Client: {_str(row.get('client_name'))}"), ln=1)
     pdf.cell(0, 6, _sanitize_text(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
     travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
     pdf.cell(0, 6, _sanitize_text(f"Travel: {travel}"), ln=1)
-    pdf.cell(0, 6, _sanitize_text(f"Route: {_str(row.get('final_route'))}"), ln=1)
-    pdf.ln(2)
-
-    # Subject
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.multi_cell(0, 6, _sanitize_text(f"Subject: {subject}"))
-    pdf.ln(2)
-
-    # Line items
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(120, 7, _sanitize_text("Description"), border=1)
-    pdf.cell(60, 7, _sanitize_text("Amount"), border=1, ln=1, align="R")
+    pdf.cell(0, 6, _sanitize_text(f"Route: {_str(row.get('final_route'))}"), ln=1); pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 11); pdf.multi_cell(0, 6, _sanitize_text(f"Subject: {subject}")); pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 10); pdf.cell(120, 7, _sanitize_text("Description"), border=1); pdf.cell(60, 7, _sanitize_text("Amount"), border=1, ln=1, align="R")
     pdf.set_font("Helvetica", "", 10)
-
-    base = int(row.get("base_amount", 0))
-    disc = int(row.get("discount", 0))
-    final = int(row.get("final_cost", 0))
-
+    base = int(row.get("base_amount", 0)); disc = int(row.get("discount", 0)); final = int(row.get("final_cost", 0))
     desc = f"Travel Package - {_str(row.get('final_route'))} ({_str(row.get('total_pax'))} pax)"
-    pdf.cell(120, 7, _sanitize_text(desc), border=1)
-    pdf.cell(60, 7, _sanitize_text(_fmt_money(base)), border=1, ln=1, align="R")
-
-    if disc > 0:
-        pdf.cell(120, 7, _sanitize_text("Less: Discount"), border=1)
-        pdf.cell(60, 7, _sanitize_text(f"- {_fmt_money(disc)}"), border=1, ln=1, align="R")
-
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(120, 7, _sanitize_text("Total Payable"), border=1)
-    pdf.cell(60, 7, _sanitize_text(_fmt_money(final)), border=1, ln=1, align="R")
-
-    pdf.ln(6)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, _sanitize_text("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
-
+    pdf.cell(120, 7, _sanitize_text(desc), border=1); pdf.cell(60, 7, _sanitize_text(_fmt_money(base)), border=1, ln=1, align="R")
+    if disc > 0: pdf.cell(120, 7, _sanitize_text("Less: Discount"), border=1); pdf.cell(60, 7, _sanitize_text(f"- {_fmt_money(disc)}"), border=1, ln=1, align="R")
+    pdf.set_font("Helvetica", "B", 10); pdf.cell(120, 7, _sanitize_text("Total Payable"), border=1); pdf.cell(60, 7, _sanitize_text(_fmt_money(final)), border=1, ln=1, align="R")
+    pdf.ln(6); pdf.set_font("Helvetica", "", 9); pdf.multi_cell(0, 5, _sanitize_text("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
     return _pdf_bytes(pdf)
 
 def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
-    pdf = PDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "", 11)
-
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, _sanitize_text("PAYMENT SLIP"), ln=1)
-    pdf.set_font("Helvetica", "", 10)
-
-    slip_date = payment_date or row.get("booking_date")
-    slip_date_str = _str(slip_date)
-
-    pdf.cell(0, 6, _sanitize_text(f"Slip Date: {slip_date_str}"), ln=1)
-    pdf.cell(0, 6, _sanitize_text(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
-    pdf.ln(2)
-
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _sanitize_text("Client:"), ln=1)
+    pdf = PDF(format="A4"); pdf.set_auto_page_break(auto=True, margin=15); pdf.add_page(); pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("Helvetica", "B", 12); pdf.cell(0, 8, _sanitize_text("PAYMENT SLIP"), ln=1); pdf.set_font("Helvetica", "", 10)
+    slip_date = payment_date or row.get("booking_date"); slip_date_str = _str(slip_date)
+    pdf.cell(0, 6, _sanitize_text(f"Slip Date: {slip_date_str}"), ln=1); pdf.cell(0, 6, _sanitize_text(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1); pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 6, _sanitize_text("Client:"), ln=1)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, _sanitize_text(f"{_str(row.get('client_name'))}  |  Mobile: {_str(row.get('client_mobile'))}"), ln=1)
     travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
-    pdf.cell(0, 6, _sanitize_text(f"Travel: {travel}  |  Route: {_str(row.get('final_route'))}"), ln=1)
-    pdf.ln(2)
-
-    advance = int(row.get("advance_amount", 0))
-    final   = int(row.get("final_cost", 0))
-
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(120, 7, _sanitize_text("Item"), border=1)
-    pdf.cell(60, 7, _sanitize_text("Amount"), border=1, ln=1, align="R")
+    pdf.cell(0, 6, _sanitize_text(f"Travel: {travel}  |  Route: {_str(row.get('final_route'))}"), ln=1); pdf.ln(2)
+    advance = int(row.get("advance_amount", 0)); final = int(row.get("final_cost", 0))
+    pdf.set_font("Helvetica", "B", 10); pdf.cell(120, 7, _sanitize_text("Item"), border=1); pdf.cell(60, 7, _sanitize_text("Amount"), border=1, ln=1, align="R")
     pdf.set_font("Helvetica", "", 10)
-
-    pdf.cell(120, 7, _sanitize_text("Amount Paid (Advance)"), border=1)
-    pdf.cell(60, 7, _sanitize_text(_fmt_money(advance)), border=1, ln=1, align="R")
-
-    pdf.cell(120, 7, _sanitize_text("Total Package Value"), border=1)
-    pdf.cell(60, 7, _sanitize_text(_fmt_money(final)), border=1, ln=1, align="R")
-
-    bal = max(final - advance, 0)
-    pdf.cell(120, 7, _sanitize_text("Balance Due"), border=1)
-    pdf.cell(60, 7, _sanitize_text(_fmt_money(bal)), border=1, ln=1, align="R")
-
-    pdf.ln(6)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, _sanitize_text(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
-
+    pdf.cell(120, 7, _sanitize_text("Amount Paid (Advance)"), border=1); pdf.cell(60, 7, _sanitize_text(_fmt_money(advance)), border=1, ln=1, align="R")
+    pdf.cell(120, 7, _sanitize_text("Total Package Value"), border=1); pdf.cell(60, 7, _sanitize_text(_fmt_money(final)), border=1, ln=1, align="R")
+    bal = max(final - advance, 0); pdf.cell(120, 7, _sanitize_text("Balance Due"), border=1); pdf.cell(60, 7, _sanitize_text(_fmt_money(bal)), border=1, ln=1, align="R")
+    pdf.ln(6); pdf.set_font("Helvetica", "", 9); pdf.multi_cell(0, 5, _sanitize_text(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
     return _pdf_bytes(pdf)
 
 # ========= UI =========
 df = fetch_confirmed()
 if df.empty:
-    st.info("No confirmed packages found.")
-    st.stop()
+    st.info("No confirmed packages found."); st.stop()
 
-search = st.text_input("🔎 Search (name / mobile / ACH ID / route)")
+search = st.text_input("🔎 Search (name / mobile / ACH ID / route)", key="inv_search")
 view = df.copy()
 if search.strip():
     s = search.lower()
@@ -371,75 +293,46 @@ c1, c2 = st.columns([1,1])
 with c1:
     if st.button("Generate Invoice PDF", key="btn_gen_inv"):
         try:
-            inv_bytes = build_invoice_pdf(row, subject=_sanitize_text(subject))
-            st.session_state["inv_pdf"] = inv_bytes
+            st.session_state["inv_pdf"] = build_invoice_pdf(row, subject=_sanitize_text(subject))
             st.success("Invoice generated.")
         except Exception as e:
             st.error(f"Failed to generate invoice: {e}")
 with c2:
     pay_date_default = row.get("booking_date") or date.today()
     if not isinstance(pay_date_default, date):
-        try:
-            pay_date_default = pd.to_datetime(pay_date_default).date()
-        except Exception:
-            pay_date_default = date.today()
+        try: pay_date_default = pd.to_datetime(pay_date_default).date()
+        except Exception: pay_date_default = date.today()
     pay_date = st.date_input("Payment made date (for slip)", value=pay_date_default, key="pay_date")
     if st.button("Generate Payment Slip PDF", key="btn_gen_slip"):
         try:
-            slip_bytes = build_payment_slip_pdf(row, payment_date=pay_date)
-            st.session_state["slip_pdf"] = slip_bytes
+            st.session_state["slip_pdf"] = build_payment_slip_pdf(row, payment_date=pay_date)
             st.success("Payment slip generated.")
         except Exception as e:
             st.error(f"Failed to generate payment slip: {e}")
 
 st.markdown("---")
 
-# ===== Preview + Download (Invoice) =====
+# ===== Lightweight Preview + Download (Invoice) =====
 if "inv_pdf" in st.session_state:
-    inv_bytes = st.session_state["inv_pdf"]
+    inv_bytes = st.session_state["inv_pdf"]; inv_b64 = _b64(inv_bytes)
     st.markdown("#### Invoice preview")
-    inv_b64 = _b64(inv_bytes)
-    # Reliable preview: new tab link
+    # Open in new tab (no heavy iframe by default)
     st.markdown(
-        f'<a href="data:application/pdf;base64,{inv_b64}" target="_blank" rel="noopener noreferrer">🖨️ Open invoice preview in a new tab</a>',
+        f'<a href="data:application/pdf;base64,{inv_b64}" target="_blank" rel="noopener">🖨️ Open invoice preview in a new tab</a>',
         unsafe_allow_html=True
     )
-    # Optional inline preview (off by default)
-    if st.checkbox("Show inline preview (invoice)", value=False, key="chk_inv_inline"):
-        with st.spinner("Rendering inline preview..."):
-            st.components.v1.html(
-                f'<iframe src="data:application/pdf;base64,{inv_b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
-                height=620,
-                scrolling=True
-            )
-    st.download_button(
-        "⬇️ Download Invoice (PDF)",
-        data=inv_bytes,
-        file_name=f"Invoice_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
-        mime="application/pdf",
-        key="dl_invoice_btn"
-    )
+    st.download_button("⬇️ Download Invoice (PDF)", data=inv_bytes,
+                       file_name=f"Invoice_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
+                       mime="application/pdf", key="dl_invoice_btn")
 
-# ===== Preview + Download (Payment Slip) =====
+# ===== Lightweight Preview + Download (Payment Slip) =====
 if "slip_pdf" in st.session_state:
-    slip_bytes = st.session_state["slip_pdf"]
+    slip_bytes = st.session_state["slip_pdf"]; slip_b64 = _b64(slip_bytes)
     st.markdown("#### Payment slip preview")
-    slip_b64 = _b64(slip_bytes)
     st.markdown(
-        f'<a href="data:application/pdf;base64,{slip_b64}" target="_blank" rel="noopener noreferrer">🖨️ Open payment slip preview in a new tab</a>',
+        f'<a href="data:application/pdf;base64,{slip_b64}" target="_blank" rel="noopener">🖨️ Open payment slip preview in a new tab</a>',
         unsafe_allow_html=True
     )
-    if st.checkbox("Show inline preview (payment slip)", value=False, key="chk_slip_inline"):
-        with st.spinner("Rendering inline preview..."):
-            st.components.v1.html(
-                f'<iframe src="data:application/pdf;base64,{slip_b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
-                height=620,
-                scrolling=True
-            )
-    st.download_button(
-        "⬇️ Download Payment Slip (PDF)",
-        data=slip_bytes,
-        file_name=f"PaymentSlip_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
-        mime="application/pdf",
-        key="dl_slip_btn"
-    )
+    st.download_button("⬇️ Download Payment Slip (PDF)", data=slip_bytes,
+                       file_name=f"PaymentSlip_{_sanitize_text(_str(row.get('ach_id')))}.pdf",
+                       mime="application/pdf", key="dl_slip_btn")
