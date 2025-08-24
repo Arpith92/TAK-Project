@@ -180,8 +180,17 @@ class PDF(FPDF):
         self.cell(0, 8, _sanitize_text(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}"), align="R")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
-    # FPDF returns str; encode to latin-1 safe bytes
-    return pdf.output(dest="S").encode("latin-1", errors="ignore")
+    """
+    fpdf2 behavior differs by version:
+      - Some return bytes for output(dest="S")
+      - Older return a str (latin-1)
+    Handle both safely.
+    """
+    out = pdf.output(dest="S")
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out)
+    # else we assume str
+    return str(out).encode("latin-1", errors="ignore")
 
 def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf = PDF(format="A4")
@@ -344,7 +353,14 @@ with c1:
         inv_bytes = build_invoice_pdf(row, subject=_sanitize_text(subject))
         st.session_state["inv_pdf"] = inv_bytes
 with c2:
-    pay_date = st.date_input("Payment made date (for slip)", value=row.get("booking_date") or date.today())
+    pay_date_default = row.get("booking_date") or date.today()
+    # ensure it's a date object
+    if not isinstance(pay_date_default, date):
+        try:
+            pay_date_default = pd.to_datetime(pay_date_default).date()
+        except Exception:
+            pay_date_default = date.today()
+    pay_date = st.date_input("Payment made date (for slip)", value=pay_date_default)
     if st.button("Generate Payment Slip PDF"):
         slip_bytes = build_payment_slip_pdf(row, payment_date=pay_date)
         st.session_state["slip_pdf"] = slip_bytes
