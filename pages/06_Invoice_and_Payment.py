@@ -1,9 +1,10 @@
+# pages/06_Invoice_and_Payment.py
 from __future__ import annotations
 
 import io
 import os
 import base64
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, Dict
 
 import pandas as pd
@@ -15,7 +16,7 @@ from pymongo import MongoClient
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
 st.title("🧾 Invoice & Payment Slip (Confirmed packages only)")
 
-# ================= Admin-only gate =================
+# ================= Admin gate =================
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
@@ -29,15 +30,30 @@ def require_admin():
 
 require_admin()
 
+# ================= Brand / Template =================
+# Place your assets in these paths. Change if needed.
+BRAND = {
+    "company": "Achala Holidays Pvt Limited",
+    "address_lines": [
+        "Mangrola",
+        "Ujjain, Madhya Pradesh 456006, India"
+    ],
+    "phone": "+91-XXXXXXXXXX",
+    "email": "travelaajkal@gmail.com",
+    "website": "www.travelaajkal.com",
+    "logo_path": "assets/logo.png",          # <- put your logo here
+    "signature_path": "assets/signature.png",# <- put your sign image here
+    "unicode_ttf": "assets/DejaVuSans.ttf",  # <- optional font to render ₹ and long dashes
+    "notes": "Thanks for your business.",
+}
+
 # ================= Mongo boot =================
 CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
 
 def _find_uri() -> Optional[str]:
     for k in CAND_KEYS:
-        try:
-            v = st.secrets.get(k)
-        except Exception:
-            v = None
+        try: v = st.secrets.get(k)
+        except Exception: v = None
         if v: return v
     for k in CAND_KEYS:
         v = os.getenv(k)
@@ -57,18 +73,6 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 
 # ================= Helpers =================
-ASSETS_DIR = "assets"
-LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
-SIGN_PATH = os.path.join(ASSETS_DIR, "signature.png")
-FONT_REG  = os.path.join(ASSETS_DIR, "DejaVuSans.ttf")
-FONT_BOLD = os.path.join(ASSETS_DIR, "DejaVuSans-Bold.ttf")
-
-def _asset_exists(p: str) -> bool:
-    try:
-        return os.path.exists(p) and os.path.getsize(p) > 0
-    except Exception:
-        return False
-
 def _to_int(x, default=0):
     try:
         if x is None: return default
@@ -84,12 +88,33 @@ def _safe_date(x) -> Optional[date]:
     except Exception:
         return None
 
-def _str(x):
-    return "" if x is None else str(x)
+def _str(x): return "" if x is None else str(x)
 
-def _fmt_money_inr(n: int, symbol=True) -> str:
+# Money formatting: if Unicode font is available we will print ₹, else "Rs"
+def _rupee_symbol():
+    try:
+        if os.path.exists(BRAND["unicode_ttf"]):
+            return "₹"
+    except Exception:
+        pass
+    return "Rs"
+
+def _fmt_money(n: int) -> str:
     s = f"{int(n):,}"
-    return (f"₹{s}" if symbol else s) if _asset_exists(FONT_REG) else f"Rs {s}"
+    sym = _rupee_symbol()
+    if sym == "₹":
+        return f"{sym}{s}"
+    return f"{sym} {s}"
+
+# Words (best-effort without adding packages)
+def _amount_in_words(n: int) -> str:
+    try:
+        # try num2words if present
+        from num2words import num2words
+        words = num2words(n, lang="en_IN").replace(",", "").title()
+        return f"Indian Rupee {words} Only"
+    except Exception:
+        return f"Indian Rupee {n:,} Only"
 
 def _final_cost(iid: str) -> Dict[str, int]:
     exp = col_expenses.find_one(
@@ -140,7 +165,7 @@ def fetch_confirmed() -> pd.DataFrame:
     df_u = pd.DataFrame(ups)
 
     df = df_i.merge(df_u, on="itinerary_id", how="inner")
-    # attach cost fields
+
     bases, discs, finals = [], [], []
     for iid in df["itinerary_id"]:
         c = _final_cost(iid)
@@ -150,259 +175,261 @@ def fetch_confirmed() -> pd.DataFrame:
     df["final_cost"]  = finals
     return df
 
-# --------- "Amount in words" (Indian format up to 999,99,99,999) ----------
-ONES = ["", "One","Two","Three","Four","Five","Six","Seven","Eight","Nine","Ten",
-        "Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen","Seventeen","Eighteen","Nineteen"]
-TENS = ["","", "Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"]
-
-def _two_digit_words(n):
-    if n < 20: return ONES[n]
-    return TENS[n//10] + ("" if n%10==0 else f" {ONES[n%10]}")
-
-def inr_words(n: int) -> str:
-    if n == 0: return "Zero"
-    parts = []
-    crores = n // 10_000_000; n %= 10_000_000
-    lakhs  = n // 100_000;    n %= 100_000
-    thous  = n // 1000;       n %= 1000
-    hund   = n // 100;        n %= 100
-    tens   = n
-
-    if crores: parts.append(f"{_two_digit_words(crores)} Crore")
-    if lakhs:  parts.append(f"{_two_digit_words(lakhs)} Lakh")
-    if thous:  parts.append(f"{_two_digit_words(thous)} Thousand")
-    if hund:   parts.append(f"{ONES[hund]} Hundred")
-    if tens:
-        if parts: parts.append("and " + _two_digit_words(tens))
-        else: parts.append(_two_digit_words(tens))
-    return " ".join(p for p in parts if p).strip()
-
-# ================= PDF builders (FPDF) =================
+# ================= PDF (fpdf2) =================
 from fpdf import FPDF
 
-def _has_unicode_font() -> bool:
-    return _asset_exists(FONT_REG) and _asset_exists(FONT_BOLD)
-
-def _apply_font(pdf: FPDF, bold=False, size=10):
-    if _has_unicode_font():
-        # registered names
-        pdf.set_font("DejaVu", "B" if bold else "", size)
-    else:
-        pdf.set_font("Helvetica", "B" if bold else "", size)
-
-def _register_fonts(pdf: FPDF):
-    if _has_unicode_font():
+def _font_setup(pdf: FPDF):
+    """Load Unicode TTF if available to allow ₹ and fancy punctuation."""
+    ttf = BRAND["unicode_ttf"]
+    if os.path.exists(ttf):
         try:
-            pdf.add_font("DejaVu", "", FONT_REG, uni=True)
+            pdf.add_font("DejaVu", "", ttf, uni=True)
+            pdf.add_font("DejaVu", "B", ttf, uni=True)
+            pdf.set_font("DejaVu", "", 11)
+            return ("DejaVu",)
         except Exception:
             pass
-        try:
-            pdf.add_font("DejaVu", "B", FONT_BOLD, uni=True)
-        except Exception:
-            pass
+    pdf.set_font("Helvetica", "", 11)
+    return ("Helvetica",)
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", "ignore")
 
-class TemplatePDF(FPDF):
-    def header(self):
-        # Top strip
-        if _asset_exists(LOGO_PATH):
-            try:
-                self.image(LOGO_PATH, x=10, y=10, w=28)
-            except Exception:
-                pass
-        _apply_font(self, bold=True, size=14)
-        self.cell(0, 8, "TAX INVOICE", ln=1, align="R")
-        # Company block
-        _apply_font(self, bold=True, size=11)
-        self.set_xy(10, 16)
-        self.cell(0, 6, "Achala Holidays Pvt Limited")
-        self.ln(5)
-        _apply_font(self, size=9)
-        self.set_x(10)
-        self.multi_cell(90, 5, "Mangrola\nUjjain Madhya Pradesh 456006\nIndia\ntravelaajkal@gmail.com\nwww.travelaajkal.com")
-        # Divider
-        self.set_draw_color(200,200,200)
-        self.set_line_width(0.2)
-        self.line(10, 45, 200, 45)
-        self.ln(2)
+def _header_block(pdf: FPDF, title: str):
+    # Logo
+    if os.path.exists(BRAND["logo_path"]):
+        try:
+            pdf.image(BRAND["logo_path"], x=10, y=10, w=36)
+        except Exception:
+            pass
 
-    def footer(self):
-        self.set_y(-15)
-        _apply_font(self, size=8)
-        self.cell(0, 8, f"Powered by TAK • Generated {datetime.now().strftime('%d/%m/%Y %H:%M')}", align="R")
+    # Company name & contacts
+    pdf.set_xy(50, 10)
+    pdf.set_font(pdf.font_family, "B", 16)
+    pdf.cell(0, 8, BRAND["company"], ln=1)
+    pdf.set_x(50)
+    pdf.set_font(pdf.font_family, "", 9)
+    line = " | ".join([", ".join(BRAND["address_lines"]), f"Phone: {BRAND['phone']}", f"Email: {BRAND['email']}"])
+    pdf.multi_cell(0, 5, line)
+    if BRAND.get("website"):
+        pdf.set_x(50)
+        pdf.cell(0, 5, f"Website: {BRAND['website']}", ln=1)
+    pdf.ln(2)
+    pdf.set_draw_color(0,0,0)
+    pdf.set_line_width(0.4)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
 
-def _field(pdf, label, value, w_label=26, w_value=58, h=6):
-    _apply_font(pdf, bold=True, size=9)
-    pdf.cell(w_label, h, label, border=0)
-    _apply_font(pdf, size=9)
-    pdf.cell(w_value, h, str(value), border=0)
+    # Big title
+    pdf.set_font(pdf.font_family, "B", 13)
+    pdf.cell(0, 8, title, ln=1)
+
+def _two_col_label(pdf: FPDF, label: str, value: str, w_label=32, h=6):
+    pdf.set_font(pdf.font_family, "B", 10); pdf.cell(w_label, h, f"{label}:", ln=0)
+    pdf.set_font(pdf.font_family, "", 10);   pdf.cell(0, h, value, ln=1)
 
 def build_invoice_pdf(row: dict, subject: str) -> bytes:
-    pdf = TemplatePDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=18)
-    _register_fonts(pdf)
+    pdf = FPDF(format="A4", unit="mm")
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    _font_setup(pdf)
 
-    # Right meta panel (Invoice #, Date, Terms, Due Date)
-    x0, y0 = 120, 12
-    pdf.set_xy(x0, y0)
-    _apply_font(pdf, bold=True, size=11); pdf.cell(0, 6, f"# : {_str(row.get('ach_id'))}", ln=1)
-    pdf.set_x(x0); _field(pdf, "Invoice Date :", datetime.now().strftime("%d/%m/%Y")); pdf.ln(6)
-    pdf.set_x(x0); _field(pdf, "Terms :", "Due on Receipt"); pdf.ln(6)
-    pdf.set_x(x0); _field(pdf, "Due Date :", datetime.now().strftime("%d/%m/%Y")); pdf.ln(8)
+    _header_block(pdf, "TAX INVOICE")
 
-    # Bill To
-    _apply_font(pdf, bold=True, size=11)
-    pdf.set_xy(10, 48)
-    pdf.cell(0, 6, "Bill To", ln=1)
-    _apply_font(pdf, size=10)
-    pdf.cell(0, 6, _str(row.get("client_name")), ln=1)
+    # Meta box (like Zoho top-right table)
+    top_y = pdf.get_y()
+    pdf.set_font(pdf.font_family, "", 10)
+    inv_no = _str(row.get("ach_id")) or f"INV-{datetime.now():%Y%m%d}"
+    inv_date = date.today()
+    due_date = inv_date  # Due on Receipt
+
+    # Left: Bill To
+    left_x = 10
+    pdf.set_xy(left_x, top_y + 2)
+    pdf.set_font(pdf.font_family, "B", 11); pdf.cell(0, 6, "Bill To:", ln=1)
+    pdf.set_font(pdf.font_family, "", 10)
+    _two_col_label(pdf, "Client", _str(row.get("client_name")))
+    _two_col_label(pdf, "Mobile", _str(row.get("client_mobile")))
+    travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
+    _two_col_label(pdf, "Travel", travel)
+    _two_col_label(pdf, "Route", _str(row.get("final_route")))
     pdf.ln(2)
+
+    # Right: Invoice meta table
+    right_x = 120
+    right_y = top_y + 2
+    pdf.set_xy(right_x, right_y)
+    pdf.set_font(pdf.font_family, "B", 10)
+    pdf.cell(80, 7, "Invoice Details", border=1, ln=1, align="C")
+    pdf.set_font(pdf.font_family, "", 10)
+    def rrow(lbl, val):
+        pdf.set_x(right_x)
+        pdf.cell(35, 7, lbl, border="L")
+        pdf.cell(45, 7, val, border="R", ln=1, align="R")
+    rrow("Invoice #", inv_no)
+    rrow("Invoice Date", inv_date.strftime("%d/%m/%Y"))
+    rrow("Terms", "Due on Receipt")
+    rrow("Due Date", due_date.strftime("%d/%m/%Y"))
+    pdf.set_x(right_x); pdf.cell(80, 0, "", border="T", ln=1)
+    pdf.ln(3)
 
     # Subject
-    _apply_font(pdf, bold=True, size=10)
-    pdf.cell(0, 6, "Subject :", ln=1)
-    _apply_font(pdf, size=10)
-    pdf.multi_cell(0, 6, subject)
-    pdf.ln(2)
+    pdf.set_font(pdf.font_family, "B", 11)
+    pdf.cell(0, 7, "Subject :", ln=1)
+    pdf.set_font(pdf.font_family, "", 11)
+    pdf.multi_cell(0, 7, subject)
+    pdf.ln(1)
 
-    # Items table header
-    _apply_font(pdf, bold=True, size=10)
-    pdf.set_fill_color(245,245,245)
-    pdf.cell(8,  8, "#", 1, 0, "C", True)
-    pdf.cell(102, 8, "Item & Description", 1, 0, "L", True)
-    pdf.cell(20, 8, "Qty", 1, 0, "C", True)
-    pdf.cell(30, 8, "Rate", 1, 0, "R", True)
-    pdf.cell(30, 8, "Amount", 1, 1, "R", True)
-
-    # Single line item derived from package
-    _apply_font(pdf, size=10)
-    desc = f"1. Sedan Car  2. Hotel Room at 3 Star Hotel\nRoute: {_str(row.get('final_route'))} • {_str(row.get('total_pax'))} pax • Travel: {_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
+    # Items grid (Description | Qty | Rate | Amount)
     base = int(row.get("base_amount", 0))
     disc = int(row.get("discount", 0))
     final = int(row.get("final_cost", 0))
+    qty = 1
 
-    y_before = pdf.get_y()
-    pdf.cell(8,  10, "1", 1, 0, "C")
-    # description cell (multi-line): draw a cell and write inside
-    x_desc = pdf.get_x(); y_desc = pdf.get_y()
-    pdf.multi_cell(102, 10, desc, border=1)
-    # go back to the right cells same row height
-    row_h = max(10, pdf.get_y() - y_before)
-    pdf.set_xy(x_desc+102, y_before)
-    pdf.cell(20, row_h, "1.00", 1, 0, "C")
-    pdf.cell(30, row_h, _fmt_money_inr(base, symbol=False), 1, 0, "R")
-    pdf.cell(30, row_h, _fmt_money_inr(base, symbol=False), 1, 1, "R")
+    # Header
+    pdf.set_font(pdf.font_family, "B", 10)
+    x0 = 10
+    col_w = [100, 20, 35, 35]
+    pdf.set_x(x0)
+    pdf.cell(col_w[0], 8, "Item & Description", border=1)
+    pdf.cell(col_w[1], 8, "Qty", border=1, align="R")
+    pdf.cell(col_w[2], 8, "Rate", border=1, align="R")
+    pdf.cell(col_w[3], 8, "Amount", border=1, ln=1, align="R")
 
-    # Totals block (right)
+    # Row 1
+    pdf.set_font(pdf.font_family, "", 10)
+    desc = f"Travel Package - {_str(row.get('final_route'))} ({_str(row.get('total_pax'))} pax)"
+    pdf.set_x(x0)
+    pdf.cell(col_w[0], 8, desc, border=1)
+    pdf.cell(col_w[1], 8, f"{qty:.2f}", border=1, align="R")
+    pdf.cell(col_w[2], 8, _fmt_money(base), border=1, align="R")
+    pdf.cell(col_w[3], 8, _fmt_money(base), border=1, ln=1, align="R")
+
+    # Totals box (Sub Total, Discount, Total, Payment Made, Balance Due)
+    pdf.ln(1)
+    box_w = col_w[1] + col_w[2] + col_w[3]
+    totals_x = x0 + col_w[0]
+    def trow(label, value, bold=False):
+        pdf.set_x(totals_x)
+        pdf.set_font(pdf.font_family, "B" if bold else "", 10)
+        pdf.cell(col_w[1] + col_w[2], 8, label, border=1)
+        pdf.cell(col_w[3], 8, value, border=1, ln=1, align="R")
+
+    trow("Sub Total", _fmt_money(base))
+    if disc > 0:
+        trow("Discount (-)", _fmt_money(disc))
+    trow("Total", _fmt_money(final), bold=True)
+    advance = int(row.get("advance_amount", 0))
+    if advance > 0:
+        trow("Payment Made (-)", _fmt_money(advance))
+    balance = max(final - advance, 0)
+    trow("Balance Due", _fmt_money(balance), bold=True)
+
+    # Total in words + Notes + Signature block
     pdf.ln(2)
-    x_tot = 120
-    pdf.set_xy(x_tot, pdf.get_y())
-
-    def _tot_row(label, val, bold=False):
-        _apply_font(pdf, bold=bold, size=10)
-        pdf.cell(40, 8, label, 1, 0, "R")
-        pdf.cell(30, 8, _fmt_money_inr(val), 1, 1, "R")
-
-    _tot_row("Sub Total", base)
-    _tot_row("Discount (-)", -disc)
-    _tot_row("Total", final, bold=True)
-    _tot_row("Payment Made (-)", -int(row.get("advance_amount", 0)))
-    bal = max(final - int(row.get("advance_amount", 0)), 0)
-    _tot_row("Balance Due", bal, bold=True)
-
-    # Amount in words
-    pdf.ln(2)
-    _apply_font(pdf, bold=True, size=10)
+    pdf.set_font(pdf.font_family, "B", 10)
     pdf.cell(0, 6, "Total In Words", ln=1)
-    _apply_font(pdf, size=10)
-    pdf.multi_cell(0, 6, f"Indian Rupee {inr_words(final)} Only")
+    pdf.set_font(pdf.font_family, "", 10)
+    pdf.multi_cell(0, 6, _amount_in_words(final))
+    pdf.ln(1)
 
-    # Notes
-    pdf.ln(2)
-    _apply_font(pdf, bold=True, size=10); pdf.cell(0,6,"Notes", ln=1)
-    _apply_font(pdf, size=9)
-    pdf.multi_cell(0,5,"Thanks for your business.")
-
-    # Signature
+    pdf.set_font(pdf.font_family, "B", 10)
+    pdf.cell(0, 6, "Notes", ln=1)
+    pdf.set_font(pdf.font_family, "", 10)
+    pdf.multi_cell(0, 6, BRAND["notes"])
     pdf.ln(6)
-    if _asset_exists(SIGN_PATH):
+
+    # Signature lane (right aligned)
+    sign_y_top = pdf.get_y()
+    if os.path.exists(BRAND["signature_path"]):
         try:
-            y_sig = pdf.get_y()
-            pdf.image(SIGN_PATH, x=150, y=y_sig, w=35)
-            pdf.set_y(y_sig + 22)
+            pdf.image(BRAND["signature_path"], x=130, y=sign_y_top, w=50)
+            pdf.set_y(sign_y_top + 22)
         except Exception:
             pass
-    _apply_font(pdf, size=10)
-    pdf.cell(0,6,"Authorized Signature", ln=1, align="R")
+    pdf.set_x(120)
+    pdf.cell(70, 0, "", border="T", ln=1)
+    pdf.set_x(120)
+    pdf.set_font(pdf.font_family, "", 10)
+    pdf.cell(70, 6, "Authorized Signature", ln=1, align="C")
 
     return _pdf_bytes(pdf)
 
 def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
-    pdf = TemplatePDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=18)
-    _register_fonts(pdf)
+    pdf = FPDF(format="A4", unit="mm")
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    _font_setup(pdf)
 
-    # Header right label
-    pdf.set_xy(120, 12)
-    _apply_font(pdf, bold=True, size=11); pdf.cell(0, 6, "PAYMENT SLIP", ln=1)
+    _header_block(pdf, "PAYMENT RECEIPT")
 
-    # Client block
-    _apply_font(pdf, bold=True, size=11)
-    pdf.set_xy(10, 48); pdf.cell(0, 6, "Client", ln=1)
-    _apply_font(pdf, size=10)
-    pdf.cell(0, 6, f"{_str(row.get('client_name'))}", ln=1)
-    pdf.cell(0, 6, f"Mobile: {_str(row.get('client_mobile'))}", ln=1)
-    pdf.cell(0, 6, f"Route: {_str(row.get('final_route'))}", ln=1)
-    pdf.cell(0, 6, f"Travel: {_str(row.get('start_date'))} to {_str(row.get('end_date'))}", ln=1)
+    inv_no = _str(row.get("ach_id")) or f"INV-{datetime.now():%Y%m%d}"
+    slip_date = payment_date or row.get("booking_date") or date.today()
+    if not isinstance(slip_date, date):
+        slip_date = _safe_date(slip_date) or date.today()
+
+    # Bill To + meta
+    pdf.set_font(pdf.font_family, "B", 11); pdf.cell(0, 6, "Bill To:", ln=1)
+    pdf.set_font(pdf.font_family, "", 10)
+    _two_col_label(pdf, "Client", _str(row.get("client_name")))
+    _two_col_label(pdf, "Mobile", _str(row.get("client_mobile")))
+    travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
+    _two_col_label(pdf, "Travel", travel)
+    _two_col_label(pdf, "Route", _str(row.get("final_route")))
     pdf.ln(2)
 
-    # Slip meta
-    slip_date = payment_date or row.get("booking_date")
-    slip_date_str = _str(slip_date)
-    _apply_font(pdf, size=10)
-    _field(pdf, "Slip Date :", slip_date_str); pdf.ln(6)
-    _field(pdf, "ACH ID :", _str(row.get("ach_id"))); pdf.ln(8)
+    pdf.set_font(pdf.font_family, "B", 10)
+    pdf.cell(0, 6, "Receipt Details", ln=1)
+    pdf.set_font(pdf.font_family, "", 10)
+    _two_col_label(pdf, "Invoice #", inv_no)
+    _two_col_label(pdf, "Slip Date", slip_date.strftime("%d/%m/%Y"))
+    pdf.ln(2)
 
-    # Table
-    _apply_font(pdf, bold=True, size=10)
-    pdf.set_fill_color(245,245,245)
-    pdf.cell(120, 8, "Item", 1, 0, "L", True)
-    pdf.cell(60, 8, "Amount", 1, 1, "R", True)
-    _apply_font(pdf, size=10)
-
-    adv = int(row.get("advance_amount", 0))
+    # Amount table: Paid, Total, Balance
+    base = int(row.get("base_amount", 0))
+    disc = int(row.get("discount", 0))
     final = int(row.get("final_cost", 0))
-    bal  = max(final - adv, 0)
+    advance = int(row.get("advance_amount", 0))
+    balance = max(final - advance, 0)
 
-    pdf.cell(120, 8, "Amount Paid (Advance)", 1)
-    pdf.cell(60, 8, _fmt_money_inr(adv), 1, 1, "R")
+    x0 = 10
+    col_w = [100, 55, 35]
+    pdf.set_font(pdf.font_family, "B", 10)
+    pdf.set_x(x0)
+    pdf.cell(col_w[0], 8, "Item", border=1)
+    pdf.cell(col_w[1], 8, "Description", border=1)
+    pdf.cell(col_w[2], 8, "Amount", border=1, ln=1, align="R")
 
-    pdf.cell(120, 8, "Total Package Value", 1)
-    pdf.cell(60, 8, _fmt_money_inr(final), 1, 1, "R")
+    pdf.set_font(pdf.font_family, "", 10)
+    pdf.set_x(x0)
+    pdf.cell(col_w[0], 8, "Amount Paid", border=1)
+    pdf.cell(col_w[1], 8, f"Advance paid on {slip_date.strftime('%d/%m/%Y')}", border=1)
+    pdf.cell(col_w[2], 8, _fmt_money(advance), border=1, ln=1, align="R")
 
-    _apply_font(pdf, bold=True, size=10)
-    pdf.cell(120, 8, "Balance Due", 1)
-    pdf.cell(60, 8, _fmt_money_inr(bal), 1, 1, "R")
+    pdf.set_x(x0)
+    pdf.cell(col_w[0], 8, "Total Package Value", border=1)
+    pdf.cell(col_w[1], 8, "After discount" if disc>0 else "Package price", border=1)
+    pdf.cell(col_w[2], 8, _fmt_money(final), border=1, ln=1, align="R")
 
-    # Note + signature
-    pdf.ln(6)
-    _apply_font(pdf, size=9)
-    pdf.multi_cell(0, 5, f"Payment received on: {slip_date_str}. This is a computer generated receipt.")
-    pdf.ln(6)
-    if _asset_exists(SIGN_PATH):
+    pdf.set_x(x0)
+    pdf.cell(col_w[0]+col_w[1], 8, "Balance Due", border=1)
+    pdf.cell(col_w[2], 8, _fmt_money(balance), border=1, ln=1, align="R")
+
+    pdf.ln(8)
+    # Signature lane
+    sign_y_top = pdf.get_y()
+    if os.path.exists(BRAND["signature_path"]):
         try:
-            y_sig = pdf.get_y()
-            pdf.image(SIGN_PATH, x=150, y=y_sig, w=35)
-            pdf.set_y(y_sig + 22)
+            pdf.image(BRAND["signature_path"], x=130, y=sign_y_top, w=50)
+            pdf.set_y(sign_y_top + 22)
         except Exception:
             pass
-    _apply_font(pdf, size=10)
-    pdf.cell(0,6,"Authorized Signature", ln=1, align="R")
+    pdf.set_x(120)
+    pdf.cell(70, 0, "", border="T", ln=1)
+    pdf.set_x(120)
+    pdf.set_font(pdf.font_family, "", 10)
+    pdf.cell(70, 6, "Authorized Signature", ln=1, align="C")
 
     return _pdf_bytes(pdf)
 
@@ -441,7 +468,7 @@ with right:
             view["client_name"].fillna("") + " | " +
             view["booking_date"].astype(str).fillna("") + " | " +
             view["itinerary_id"])
-    choice = st.selectbox("Choose", opts.tolist() if not opts.empty else [])
+    choice = st.selectbox("Choose", opts.tolist())
     chosen_id = choice.split(" | ")[-1] if choice else None
 
 st.divider()
@@ -451,7 +478,7 @@ if not chosen_id:
 row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
 
 st.subheader("🧾 Invoice")
-default_subject = f"2days {_str(row.get('final_route'))} tour package"
+default_subject = f"2days {_str(row.get('final_route'))} tour package"  # match subject style
 subject = st.text_input("Subject line for invoice", value=default_subject)
 
 c1, c2 = st.columns([1,1])
