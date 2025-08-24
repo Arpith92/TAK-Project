@@ -63,9 +63,9 @@ ORG = {
     "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com",
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
-# Put your files in .streamlit/ as you shared
-ORG_LOGO = ".streamlit/logo.png"
-ORG_SIGN = ".streamlit/signature.png"  # change to your actual signature file
+# Put your files in .streamlit/
+ORG_LOGO = ".streamlit/logo.jpg"
+ORG_SIGN = ".streamlit/signature.png"   # update to your file name if different
 
 # ================= Helpers =====================
 def _to_int(x, default=0):
@@ -89,7 +89,6 @@ def _fmt_money(n: int) -> str:
     return f"Rs {int(n):,}"
 
 def _nights_days(start: Optional[date], end: Optional[date]) -> str:
-    """Return 'X days Y nights' string; empty if dates missing."""
     if not start or not end:
         return ""
     try:
@@ -170,16 +169,16 @@ def _latin(s: str) -> str:
 
 class PDF(FPDF):
     def header(self):
-        # Outer border rectangle to mimic template
+        # Outer border rectangle
         self.set_draw_color(150,150,150)
-        self.rect(8, 8, 194, 281)  # A4 page border inside margins
+        self.rect(8, 8, 194, 281)
 
-        # Logo (if available)
+        # Logo (enlarged)
         x0 = 14
         try:
             if ORG_LOGO and os.path.exists(ORG_LOGO):
-                self.image(ORG_LOGO, x=x0, y=12, w=28)
-                x0 = 46
+                self.image(ORG_LOGO, x=x0, y=12, w=34)  # enlarged logo
+                x0 = 52
         except Exception:
             x0 = 14
 
@@ -190,13 +189,13 @@ class PDF(FPDF):
         self.set_font("Helvetica", "", 10)
         self.cell(0, 6, _latin(ORG["line1"]), ln=1, align="C")
         self.cell(0, 6, _latin(ORG["line2"]), ln=1, align="C")
-        # thin rule
         self.ln(2)
         self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
     def footer(self):
+        # rights line
         self.set_y(-22)
         self.set_font("Helvetica", "", 8)
         self.cell(0, 5, _latin(ORG["footer_rights"]), ln=1, align="C")
@@ -222,12 +221,13 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.set_x(left); pdf.cell(0, 6, _latin(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
     pdf.ln(2)
 
-    # Bill to
+    # Customer block (name line only on top; not repeated below)
     pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 6, _latin("Bill To:"), ln=1)
+    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, _latin(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
     pdf.set_x(left); pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _latin(f"Customer: {_str(row.get('client_name'))}"), ln=1)
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
+    pdf.cell(0, 6, _latin(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
     travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
     pdf.set_x(left); pdf.cell(0, 6, _latin(f"Travel: {travel}"), ln=1)
     pdf.set_x(left); pdf.cell(0, 6, _latin(f"Route: {_str(row.get('final_route'))}"), ln=1)
@@ -238,7 +238,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.multi_cell(0, 6, _latin(f"Subject: {subject}"))
     pdf.ln(1)
 
-    # Derive description string
+    # Description for line item
     days_nights = _nights_days(row.get("start_date"), row.get("end_date"))
     base  = int(row.get("base_amount", 0))
     disc  = int(row.get("discount", 0))
@@ -287,17 +287,18 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, _latin("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
 
-    # signature block (optional image)
+    # signature block (enlarged)
     pdf.ln(8)
     sig_y = pdf.get_y()
     if ORG_SIGN and os.path.exists(ORG_SIGN):
         try:
-            pdf.image(ORG_SIGN, x=left+120, y=sig_y-2, w=40)
+            pdf.image(ORG_SIGN, x=left+110, y=sig_y-4, w=55)  # enlarged signature
         except Exception:
             pass
-    pdf.set_y(sig_y + 18)
-    pdf.set_x(left+120)
-    pdf.cell(60, 6, _latin("Authorised Signatory"), ln=1, align="C")
+    pdf.set_y(sig_y + 20)
+    pdf.set_x(left+110)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(80, 6, _latin("Authorised Signatory"), ln=1, align="C")
     return _pdf_bytes(pdf)
 
 # ------------- payment slip builder -------------
@@ -318,9 +319,12 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     pdf.set_x(left); pdf.cell(0, 6, _latin(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
     pdf.ln(2)
 
+    # Customer block (name on top only)
     pdf.set_x(left); pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 6, _latin("Customer:"), ln=1)
+    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, _latin(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
     pdf.set_x(left); pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _latin(f"{_str(row.get('client_name'))}  |  Mobile: {_str(row.get('client_mobile'))}"), ln=1)
+    pdf.cell(0, 6, _latin(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
     travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
     pdf.set_x(left); pdf.cell(0, 6, _latin(f"Travel: {travel}  |  Route: {_str(row.get('final_route'))}"), ln=1)
     pdf.ln(2)
@@ -361,18 +365,18 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, _latin(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
 
-    # signature block
+    # signature block (enlarged)
     pdf.ln(8)
     sig_y = pdf.get_y()
     if ORG_SIGN and os.path.exists(ORG_SIGN):
         try:
-            pdf.image(ORG_SIGN, x=left+120, y=sig_y-2, w=40)
+            pdf.image(ORG_SIGN, x=left+110, y=sig_y-4, w=55)
         except Exception:
             pass
-    pdf.set_y(sig_y + 18)
-    pdf.set_x(left+120)
+    pdf.set_y(sig_y + 20)
+    pdf.set_x(left+110)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(60, 6, _latin("Authorised Signatory"), ln=1, align="C")
+    pdf.cell(80, 6, _latin("Authorised Signatory"), ln=1, align="C")
     return _pdf_bytes(pdf)
 
 # ================= UI ===========================
