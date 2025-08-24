@@ -85,7 +85,9 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
-audit_pageview(user, "05_Salary_Slips")
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), page="05_Salary_Slips")  # change per page
+
 # ----------------------------
 # Helpers
 # ----------------------------
