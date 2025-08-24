@@ -64,7 +64,7 @@ ORG = {
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
 # Put your files in .streamlit/ as you shared
-ORG_LOGO = ".streamlit/logo.jpg"
+ORG_LOGO = ".streamlit/logo.png"
 ORG_SIGN = ".streamlit/signature.png"  # change to your actual signature file
 
 # ================= Helpers =====================
