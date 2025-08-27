@@ -54,6 +54,18 @@ def _load_users() -> dict:
         pass
     return {}
 
+def audit_login(user: str):
+    now_utc = datetime.datetime.utcnow()
+    try:
+        cols["audit_logins"].insert_one({
+            "user": str(user),
+            "ts_utc": now_utc,
+            "ts_ist": now_utc.replace(tzinfo=datetime.timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "page": "App.py",
+        })
+    except Exception:
+        pass
+
 def _login() -> str | None:
     with st.sidebar:
         if st.session_state.get("user"):
@@ -73,6 +85,7 @@ def _login() -> str | None:
     c1, c2 = st.columns(2)
     with c1: name = st.selectbox("User", list(users_map.keys()), key="login_user")
     with c2: pin  = st.text_input("PIN", type="password", key="login_pin")
+
     if st.button("Sign in"):
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
@@ -106,34 +119,16 @@ def mongo_client():
     return client
 
 @st.cache_resource
-def get_collections():
+def get_cols():
     db = mongo_client()["TAK_DB"]
     return {
         "itineraries": db["itineraries"],
         "audit_logins": db["audit_logins"],
     }
 
-cols = get_collections()
-col_it = cols["itineraries"]
-col_audit = cols["audit_logins"]
+cols = get_cols()
 
-def audit_login(user: str):
-    now_utc = datetime.datetime.utcnow()
-    try:
-        col_audit.insert_one({
-            "user": str(user),
-            "ts_utc": now_utc,
-            "ts_ist": now_utc.replace(tzinfo=datetime.timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "page": "App.py",
-        })
-    except Exception:
-        pass
-
-user = _login()
-if not user:
-    st.stop()
-
-# ================= Helpers =================
+# ================= Helpers & masters =================
 @st.cache_data(ttl=900)
 def read_excel_from_url(url, sheet_name=None):
     r = requests.get(url, timeout=20)
@@ -160,23 +155,31 @@ def in_locale(n: int) -> str:
         return f"{int(n):,}"
 
 def ceil_to_999(n: float) -> int:
-    import math
     return (math.ceil(n/1000)*1000 - 1) if n > 0 else 0
 
-# ================= UI: shared header =================
+def _num(x):
+    try: return float(x)
+    except Exception: return 0.0
+
+# ================= Auth
+user = _login()
+if not user:
+    st.stop()
+
+# ================= Header
 st.markdown("### 1) Provide Input")
 mode = st.radio("Input Mode", ["Form Table (No Excel)", "Excel Upload"], horizontal=True, index=0)
 
 c0, c1, c2, c3 = st.columns([1.4, 1, 1, 1])
-with c0: sheet = st.text_input("Client Name*", placeholder="e.g., Mayur Gupta / Family")
+with c0: client_name = st.text_input("Client Name*", placeholder="e.g., Mayur Gupta / Family")
 with c1: client_mobile_raw = st.text_input("Client mobile (10 digits)*")
 with c2: rep = st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"])
 with c3: default_pax = st.number_input("Total Pax (default)", min_value=1, value=2, step=1)
 
-# Referral (from confirmed clients)
+# Referral dropdown (from confirmed clients)
 def _load_client_refs() -> list[str]:
     try:
-        cur = col_it.aggregate([
+        cur = cols["itineraries"].aggregate([
             {"$group": {"_id": {"name": "$client_name", "mobile": "$client_mobile"}}},
             {"$project": {"_id": 0, "name": "$_id.name", "mobile": "$_id.mobile"}}
         ])
@@ -184,19 +187,17 @@ def _load_client_refs() -> list[str]:
         for x in cur:
             n = (x.get("name") or "").strip()
             m = (x.get("mobile") or "").strip()
-            label = f"{n} — {m}" if n and m else n or m
-            if label: labels.append(label)
-        labels = sorted(set(labels), key=lambda s: s.lower())
-        return labels
+            if n or m: labels.append(f"{n} — {m}" if n and m else n or m)
+        return sorted(set(labels), key=lambda s: s.lower())
     except Exception:
         return []
 
 ref_labels = ["-- None --"] + _load_client_refs()
-referred_sel = st.selectbox("Referred By (10% discount applies)", ref_labels, index=0)
+referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels, index=0)
 has_ref = referred_sel != "-- None --"
 discount_pct = 10 if has_ref else 0
 
-# ====== Masters for dropdowns ======
+# ===== Dropdown option sources
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
 code_options = code_df["Code"].dropna().astype(str).unique().tolist() if not code_df.empty else []
 
@@ -210,12 +211,27 @@ hotel_options = [
     "4Star AC Hotel room",
     "5Star AC Hotel room",
 ]
-
 room_options = [f"{occ} occupancy {i} room" for occ in ["Double","Triple","Quad","Quint"] for i in range(1,5)]
 
-bhas_type_options = ["— None —","V-BH","P-BH","BH"]  # first option disables BH calc
+# ===== Bhasmarathi (OUTSIDE the table)
+bhc1, bhc2, bhc3 = st.columns(3)
+with bhc1:
+    bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], index=0)
+with bhc2:
+    bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], index=0, disabled=(bhas_required=="No"))
+with bhc3:
+    bhas_persons = st.number_input("Total persons for Bhasmarathi", min_value=0, value=0, step=1, disabled=(bhas_required=="No"))
 
-# ================= MODE A: Form Table =================
+bhc4, bhc5 = st.columns(2)
+with bhc4:
+    bhas_unit_pkg = st.number_input("Unit Package Cost (₹)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
+with bhc5:
+    bhas_unit_actual = st.number_input("Unit Actual Cost (₹)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
+
+bhas_pkg_total = (bhas_unit_pkg * bhas_persons) if bhas_required=="Yes" else 0
+bhas_actual_total = (bhas_unit_actual * bhas_persons) if bhas_required=="Yes" else 0
+
+# ===== MODE A: Form Table
 if mode == "Form Table (No Excel)":
     h1, h2 = st.columns(2)
     with h1:
@@ -223,7 +239,7 @@ if mode == "Form Table (No Excel)":
     with h2:
         days = st.number_input("No. of days", min_value=1, value=3, step=1)
 
-    # Create once and never rebuild unless Reset is clicked
+    # Create once; never rebuild during typing
     if "form_rows" not in st.session_state:
         dates = [start_date_input + datetime.timedelta(days=i) for i in range(days)]
         st.session_state.form_rows = pd.DataFrame({
@@ -234,37 +250,32 @@ if mode == "Form Table (No Excel)":
             "Hotel Type": [""] * days,
             "Stay City": [""] * days,
             "Room Type": [""] * days,
-            # --- finance columns exactly like your sheet ---
+            # FINANCE (row-level; BH outside)
             "Hotel Cost": [0.0] * days,
-            "Bhasmarathi Type": ["— None —"] * days,
-            "Bhasmarathi Unit Cost": [0.0] * days,
-            "Total Pax": [default_pax] * days,
             "Actual-Car Cost": [0.0] * days,
             "Actual-Hotel Cost": [0.0] * days,
-            "Actual-Bhasmarathi Cost": [0.0] * days,
             "Package Cost": [0.0] * days,
-            # Calculated columns (shown, but recalculated each run)
-            "Bhasmarathi Cost": [0.0] * days,
+            # derived (per-row)
             "Actual Cost": [0.0] * days,
             "Profit": [0.0] * days,
+            "Total Pax": [default_pax] * days,
         })
 
     def _reset_rows():
         dates = [start_date_input + datetime.timedelta(days=i) for i in range(days)]
         df_new = st.session_state.form_rows.copy()
-        needed = len(dates)
-        if len(df_new) < needed:
-            extra = needed - len(df_new)
+        need = len(dates)
+        if len(df_new) < need:
+            extra = need - len(df_new)
             add = pd.DataFrame({c: [df_new[c].iloc[0] if len(df_new) else 0] * extra for c in df_new.columns})
             add["Date"] = [dates[len(df_new) + i] for i in range(extra)]
             df_new = pd.concat([df_new, add], ignore_index=True)
-        df_new.loc[:needed-1, "Date"] = dates
-        df_new = df_new.iloc[:needed].reset_index(drop=True)
+        df_new.loc[:need-1, "Date"] = dates
+        df_new = df_new.iloc[:need].reset_index(drop=True)
         st.session_state.form_rows = df_new
 
     st.button("↻ Reset rows for new dates/days (optional)", on_click=_reset_rows)
 
-    # Configure editor (searchable dropdowns)
     col_cfg = {
         "Date": st.column_config.DateColumn("Date"),
         "Time": st.column_config.TextColumn("Time"),
@@ -274,67 +285,38 @@ if mode == "Form Table (No Excel)":
         "Stay City": st.column_config.SelectboxColumn("Stay City", options=stay_city_options),
         "Room Type": st.column_config.SelectboxColumn("Room Type", options=room_options),
         "Hotel Cost": st.column_config.NumberColumn("Hotel Cost", min_value=0.0, step=100.0),
-        "Bhasmarathi Type": st.column_config.SelectboxColumn("Bhasmarathi Type", options=bhas_type_options),
-        "Bhasmarathi Unit Cost": st.column_config.NumberColumn("Bhasmarathi Unit Cost", min_value=0.0, step=100.0),
-        "Total Pax": st.column_config.NumberColumn("Total Pax", min_value=1, step=1),
         "Actual-Car Cost": st.column_config.NumberColumn("Actual-Car Cost", min_value=0.0, step=100.0),
         "Actual-Hotel Cost": st.column_config.NumberColumn("Actual-Hotel Cost", min_value=0.0, step=100.0),
-        "Actual-Bhasmarathi Cost": st.column_config.NumberColumn("Actual-Bhasmarathi Cost", min_value=0.0, step=100.0),
         "Package Cost": st.column_config.NumberColumn("Package Cost", min_value=0.0, step=100.0),
-        # Calculated columns (read-only appearance)
-        "Bhasmarathi Cost": st.column_config.NumberColumn("Bhasmarathi Cost", disabled=True),
         "Actual Cost": st.column_config.NumberColumn("Actual Cost", disabled=True),
         "Profit": st.column_config.NumberColumn("Profit", disabled=True),
+        "Total Pax": st.column_config.NumberColumn("Total Pax", min_value=1, step=1),
     }
 
     edited_df = st.data_editor(
         st.session_state.form_rows,
-        num_rows="dynamic",         # you can add rows any time
+        num_rows="dynamic",
         use_container_width=True,
         column_config=col_cfg,
         hide_index=True,
         key="editor_main"
     )
 
-    # ---- Recalculate dependent columns (no data loss) ----
+    # Recalculate per-row derived fields WITHOUT changing length/index
     df = edited_df.copy()
-
-    # safe numeric helpers
-    def _num(s): 
-        try:
-            return float(s)
-        except Exception:
-            return 0.0
-
-    # compute per row
-    bh_cost = []
-    act_cost = []
-    profit = []
-    for i, r in df.iterrows():
-        pax = int(_num(r.get("Total Pax")))
-        unit = _num(r.get("Bhasmarathi Unit Cost"))
-        bh_type = str(r.get("Bhasmarathi Type") or "— None —").strip()
-        bh_total = unit * pax if bh_type != "— None —" else 0.0
-
-        ac_car = _num(r.get("Actual-Car Cost"))
-        ac_hot = _num(r.get("Actual-Hotel Cost"))
-        ac_bh  = _num(r.get("Actual-Bhasmarathi Cost"))
-        actual = ac_car + ac_hot + ac_bh
-
+    actual_list, profit_list = [], []
+    for _, r in df.iterrows():
+        ac = _num(r.get("Actual-Car Cost")) + _num(r.get("Actual-Hotel Cost"))
         pkg = _num(r.get("Package Cost"))
+        actual_list.append(ac)
+        profit_list.append(pkg - ac)
+    df["Actual Cost"] = actual_list
+    df["Profit"] = profit_list
 
-        bh_cost.append(bh_total)
-        act_cost.append(actual)
-        profit.append(pkg - actual)
-
-    df["Bhasmarathi Cost"] = bh_cost
-    df["Actual Cost"] = act_cost
-    df["Profit"] = profit
-
-    # persist back
+    # persist
     st.session_state.form_rows = df.copy()
 
-# ================= MODE B: Excel Upload =================
+# ===== MODE B: Excel Upload
 else:
     uploaded = st.file_uploader("Choose file (.xlsx)", type=["xlsx"])
     if not uploaded:
@@ -345,35 +327,27 @@ else:
     except Exception as e:
         st.error(f"Error reading uploaded file: {e}")
         st.stop()
-    if not sheet:
-        sheet = st.selectbox("Select client (sheet name)", xls.sheet_names, index=0)
+    if not client_name:
+        client_name = st.selectbox("Select client (sheet name)", xls.sheet_names, index=0)
     if rep == "-- Select --":
         rep = st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"])
 
-    if not (sheet and rep != "-- Select --"):
-        st.stop()
-
     try:
-        df = xls.parse(sheet)
+        df = xls.parse(client_name)
     except Exception as e:
         st.error(f"Error reading sheet: {e}")
         st.stop()
 
-    # add any missing columns used by our flow so you can edit them
     wanted = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
-              "Hotel Cost","Bhasmarathi Type","Bhasmarathi Unit Cost","Total Pax",
-              "Actual-Car Cost","Actual-Hotel Cost","Actual-Bhasmarathi Cost","Package Cost",
-              "Bhasmarathi Cost","Actual Cost","Profit"]
+              "Hotel Cost","Actual-Car Cost","Actual-Hotel Cost","Package Cost",
+              "Actual Cost","Profit","Total Pax"]
     for c in wanted:
         if c not in df.columns:
-            if c in ("Bhasmarathi Type",):
-                df[c] = "— None —"
-            elif c in ("Date",):
-                df[c] = pd.NaT
-            elif c in ("Time","Code","Car Type","Hotel Type","Stay City","Room Type"):
-                df[c] = ""
-            else:
-                df[c] = 0.0
+            if c == "Date": df[c] = pd.NaT
+            elif c in ("Time","Code","Car Type","Hotel Type","Stay City","Room Type"): df[c] = ""
+            elif c in ("Actual Cost","Profit"): df[c] = 0.0
+            elif c == "Total Pax": df[c] = default_pax
+            else: df[c] = 0.0
 
     col_cfg = {
         "Date": st.column_config.DateColumn("Date"),
@@ -384,16 +358,12 @@ else:
         "Stay City": st.column_config.SelectboxColumn("Stay City", options=stay_city_options),
         "Room Type": st.column_config.SelectboxColumn("Room Type", options=room_options),
         "Hotel Cost": st.column_config.NumberColumn("Hotel Cost", min_value=0.0, step=100.0),
-        "Bhasmarathi Type": st.column_config.SelectboxColumn("Bhasmarathi Type", options=bhas_type_options),
-        "Bhasmarathi Unit Cost": st.column_config.NumberColumn("Bhasmarathi Unit Cost", min_value=0.0, step=100.0),
-        "Total Pax": st.column_config.NumberColumn("Total Pax", min_value=1, step=1),
         "Actual-Car Cost": st.column_config.NumberColumn("Actual-Car Cost", min_value=0.0, step=100.0),
         "Actual-Hotel Cost": st.column_config.NumberColumn("Actual-Hotel Cost", min_value=0.0, step=100.0),
-        "Actual-Bhasmarathi Cost": st.column_config.NumberColumn("Actual-Bhasmarathi Cost", min_value=0.0, step=100.0),
         "Package Cost": st.column_config.NumberColumn("Package Cost", min_value=0.0, step=100.0),
-        "Bhasmarathi Cost": st.column_config.NumberColumn("Bhasmarathi Cost", disabled=True),
         "Actual Cost": st.column_config.NumberColumn("Actual Cost", disabled=True),
         "Profit": st.column_config.NumberColumn("Profit", disabled=True),
+        "Total Pax": st.column_config.NumberColumn("Total Pax", min_value=1, step=1),
     }
 
     edited_df = st.data_editor(
@@ -405,31 +375,19 @@ else:
         key="editor_excel"
     )
 
-    # recompute calculated columns
-    def _num(x):
-        try: return float(x)
-        except Exception: return 0.0
-
-    bh_cost, act_cost, profit = [], [], []
-    for _, r in edited_df.iterrows():
-        pax = int(_num(r.get("Total Pax")))
-        unit = _num(r.get("Bhasmarathi Unit Cost"))
-        bh_type = str(r.get("Bhasmarathi Type") or "— None —").strip()
-        bh_total = unit * pax if bh_type != "— None —" else 0.0
-        ac_car = _num(r.get("Actual-Car Cost"))
-        ac_hot = _num(r.get("Actual-Hotel Cost"))
-        ac_bh  = _num(r.get("Actual-Bhasmarathi Cost"))
-        actual = ac_car + ac_hot + ac_bh
-        pkg = _num(r.get("Package Cost"))
-        bh_cost.append(bh_total); act_cost.append(actual); profit.append(pkg - actual)
-
-    edited_df["Bhasmarathi Cost"] = bh_cost
-    edited_df["Actual Cost"] = act_cost
-    edited_df["Profit"] = profit
+    # Recompute derived
     df = edited_df.copy()
+    actual_list, profit_list = [], []
+    for _, r in df.iterrows():
+        ac = _num(r.get("Actual-Car Cost")) + _num(r.get("Actual-Hotel Cost"))
+        pkg = _num(r.get("Package Cost"))
+        actual_list.append(ac)
+        profit_list.append(pkg - ac)
+    df["Actual Cost"] = actual_list
+    df["Profit"] = profit_list
 
-# ================= Validations =================
-if not sheet:
+# ================= Validations
+if not client_name:
     st.warning("Enter **Client Name**."); st.stop()
 if not is_valid_mobile(client_mobile_raw):
     st.error("Enter a valid **10-digit** mobile. Package will not be created without it."); st.stop()
@@ -438,7 +396,7 @@ if rep == "-- Select --":
 
 client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
 
-# ================= Safe Code helpers =================
+# ================= Safe Code helpers
 def _code_to_desc(code) -> str:
     if code is None: return "No code provided"
     s = str(code).strip()
@@ -459,13 +417,14 @@ def _code_to_route(code) -> str | None:
     except Exception:
         return None
 
-# ================= Totals / badges =================
-sum_pkg = float(pd.to_numeric(df.get("Package Cost"), errors="coerce").fillna(0).sum())
-sum_actual = float(pd.to_numeric(df.get("Actual Cost"), errors="coerce").fillna(0).sum())
-total_package = ceil_to_999(sum_pkg)
-total_actual = sum_actual
-profit_total = int(total_package - total_actual)
-after_ref = int(round(total_package * (1 - discount_pct/100.0))) if has_ref else total_package
+# ================= Totals / badges (BH outside)
+sum_pkg_rows = float(pd.to_numeric(df.get("Package Cost"), errors="coerce").fillna(0).sum())
+sum_actual_rows = float(pd.to_numeric(df.get("Actual Cost"), errors="coerce").fillna(0).sum())
+
+total_package = ceil_to_999(sum_pkg_rows + (bhas_pkg_total if bhas_required=="Yes" else 0))
+total_actual   = sum_actual_rows + (bhas_actual_total if bhas_required=="Yes" else 0)
+profit_total   = int(total_package - total_actual)
+after_ref      = int(round(total_package * (1 - discount_pct/100.0))) if has_ref else total_package
 
 badge_color = "#16a34a" if profit_total >= 4000 else "#dc2626"
 hint = "" if profit_total >= 4000 else " • Keep profit margin ≥ ₹4,000"
@@ -488,23 +447,21 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ================= Build itinerary text =================
-dates = pd.to_datetime(df["Date"], errors="coerce")
-if dates.isna().all():
+# ================= Build itinerary text
+dates_series = pd.to_datetime(df["Date"], errors="coerce")
+if dates_series.isna().all():
     st.error("No valid dates found."); st.stop()
 
-start_date = dates.min().date()
-end_date = dates.max().date()
+start_date = dates_series.min().date()
+end_date   = dates_series.max().date()
 total_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1
 total_nights = max(total_days - 1, 0)
 
-# itinerary items from codes
+# Items & route
 items = []
 for _, r in df.iterrows():
-    desc = _code_to_desc(r.get("Code", ""))
-    items.append({"Date": r.get("Date",""), "Time": r.get("Time",""), "Description": desc})
+    items.append({"Date": r.get("Date",""), "Time": r.get("Time",""), "Description": _code_to_desc(r.get("Code",""))})
 
-# route from codes
 route_parts = []
 for c in df["Code"]:
     rt = _code_to_route(c)
@@ -513,26 +470,22 @@ route_raw = "-".join(route_parts).replace(" -","-").replace("- ","-")
 route_list = [x for x in route_raw.split("-") if x]
 final_route = "-".join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i-1]])
 
-# type strings
+# Type strings
 car_types = "-".join(pd.Series(df.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
 hotel_types = "-".join(pd.Series(df.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
 
-# BH description (aggregate: if any row has BH type, use first description)
+# Bhas desc
 bhas_desc_str = ""
-try:
-    first_bh = next((t for t in df["Bhasmarathi Type"].astype(str) if t not in ("— None —","", "None", "nan")), None)
-except Exception:
-    first_bh = None
-if first_bh:
-    m = bhas_df.loc[bhas_df["Bhasmarathi Type"].astype(str) == str(first_bh), "Description"]
-    if not m.empty: bhas_desc_str = str(m.iloc[0])
+if bhas_required == "Yes":
+    mm = bhas_df.loc[bhas_df["Bhasmarathi Type"].astype(str) == str(bhas_type), "Description"]
+    if not mm.empty: bhas_desc_str = str(mm.iloc[0])
 
-# text
+# Pax
 total_pax_any = int(pd.to_numeric(df["Total Pax"].dropna().iloc[0], errors="coerce")) if not df["Total Pax"].dropna().empty else default_pax
-night_txt = "Night" if total_nights == 1 else "Nights"
+night_txt  = "Night" if total_nights == 1 else "Nights"
 person_txt = "Person" if total_pax_any == 1 else "Persons"
 
-greet = f"Greetings from TravelAajkal,\n\n*Client Name: {sheet}*\n\n"
+greet = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
 plan  = f"*Plan:- {total_days}Days and {total_nights}{night_txt} {final_route} for {total_pax_any} {person_txt}*"
 
 grouped = {}
@@ -553,30 +506,18 @@ if has_ref:
     itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
 itinerary_text += f"{details_line}"
 
-# inclusions
+# Inclusions (brief)
 inc = []
 if car_types:
     inc += ["Entire travel as per itinerary by " + car_types + ".", "Toll, parking, and driver bata included.", "Pickup & drop included."]
 if bhas_desc_str:
     inc += [f"{bhas_desc_str} for {total_pax_any} {person_txt}.", "Bhasm-Aarti pickup & drop."]
-if "Stay City" in df.columns and "Room Type" in df.columns and not stay_city_df.empty:
-    stay_series = df["Stay City"].astype(str).fillna("")
-    city_nights = stay_series[stay_series != ""].value_counts().to_dict()
-    used = 0
-    for stay_city, nn in city_nights.items():
-        if used >= total_nights: break
-        match = stay_city_df[stay_city_df["Stay City"].astype(str) == str(stay_city)]
-        if not match.empty:
-            city_name = match["City"].iloc[0]
-            rt = df.loc[df["Stay City"].astype(str) == str(stay_city), "Room Type"].dropna().astype(str).unique()
-            inc.append(f"{min(nn, total_nights-used)}Night stay in {city_name} with {'/'.join(rt) or 'room'} in {hotel_types or 'hotel'}.")
-            used += nn
 if hotel_types:
     inc += ["*Standard check-in 12:00 PM, check-out 09:00 AM.*", "Early check-in/late check-out subject to availability."]
 if inc:
     itinerary_text += "\n\n*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i,x in enumerate(inc)])
 
-# exclusions, notes, cxl, pay, acct (unchanged)
+# Exclusions/Notes/Policy/Payment/Account
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified.",
     "2. Entry fees unless included.",
@@ -589,7 +530,7 @@ exclusions = "*Exclusions:-*\n" + "\n".join([
 notes = "\n*Important Notes:-*\n" + "\n".join([
     "1. Any attractions not in itinerary will be chargeable.",
     "2. Visits subject to traffic/temple rules; closures beyond control & non-refundable.",
-    "3. Bhasm-Aarti: tickets by us; arrival/seating beyond our control; at actuals; subject to availability/cancellations.",
+    "3. Bhasm-Aarti: tickets at actuals; subject to availability/cancellations.",
     "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
     "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
 ])
@@ -629,10 +570,20 @@ TravelAajKal® is a registered trademark of Achala Holidays Pvt Ltd.
 
 final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
-# ================= Save to DB =================
+# ================= Serialize rows for Mongo (fix: no datetime.date objects)
+rows_serialized = df.copy()
+if "Date" in rows_serialized.columns:
+    # convert to string yyyy-mm-dd; keep blanks as ""
+    try:
+        rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        rows_serialized["Date"] = rows_serialized["Date"].fillna("")
+    except Exception:
+        rows_serialized["Date"] = rows_serialized["Date"].astype(str)
+
+# ================= Save to DB
 key_filter = {"client_mobile": client_mobile, "start_date": str(start_date)}
 record = {
-    "client_name": sheet,
+    "client_name": client_name,
     "client_mobile": client_mobile,
     "representative": rep,
     "upload_date": datetime.datetime.utcnow(),
@@ -642,19 +593,30 @@ record = {
     "final_route": final_route,
     "car_types": "-".join(pd.Series(df.get("Car Type", [])).dropna().astype(str).unique().tolist()),
     "hotel_types": "-".join(pd.Series(df.get("Hotel Type", [])).dropna().astype(str).unique().tolist()),
+    # BH (outside table)
+    "bhasmarathi_required": (bhas_required=="Yes"),
+    "bhasmarathi_type": bhas_type if bhas_required=="Yes" else None,
+    "bhasmarathi_persons": int(bhas_persons) if bhas_required=="Yes" else 0,
+    "bhasmarathi_unit_pkg": int(bhas_unit_pkg) if bhas_required=="Yes" else 0,
+    "bhasmarathi_unit_actual": int(bhas_unit_actual) if bhas_required=="Yes" else 0,
+    "bhasmarathi_pkg_total": int(bhas_pkg_total) if bhas_required=="Yes" else 0,
+    "bhasmarathi_actual_total": int(bhas_actual_total) if bhas_required=="Yes" else 0,
+    # totals
     "package_total": int(total_package),
     "package_after_referral": int(after_ref),
     "actual_total": int(total_actual),
     "profit_total": int(profit_total),
     "referred_by": referred_sel if has_ref else None,
     "referral_discount_pct": discount_pct,
-    "rows": df.to_dict(orient="records"),
+    # rows
+    "rows": rows_serialized.to_dict(orient="records"),
     "itinerary_text": final_output
 }
+
 saved_key = f"{client_mobile}|{start_date}"
 already = st.session_state.get("_last_saved_key") == saved_key
 try:
-    res = col_it.update_one(key_filter, {"$set": record}, upsert=True)
+    res = cols["itineraries"].update_one(key_filter, {"$set": record}, upsert=True)
     st.session_state["_last_saved_key"] = saved_key
     if not already:
         if res.upserted_id:
@@ -664,7 +626,7 @@ try:
 except Exception as e:
     st.error(f"Could not save itinerary: {e}")
 
-# ================= Preview & Download =================
+# ================= Preview & Download
 st.markdown("### 2) Preview & Share")
 c1, c2 = st.columns(2)
 with c1:
@@ -673,7 +635,7 @@ with c2:
     st.download_button(
         label="⬇️ Download itinerary as .txt",
         data=final_output,
-        file_name=f"itinerary_{sheet}_{start_date}.txt",
+        file_name=f"itinerary_{client_name}_{start_date}.txt",
         mime="text/plain",
         use_container_width=True
     )
