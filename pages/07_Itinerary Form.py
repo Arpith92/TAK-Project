@@ -162,7 +162,7 @@ user = _login()
 if not user:
     st.stop()
 
-# ================= Header (Form Table only per your request)
+# ================= Header (Form Table only)
 st.markdown("### 1) Provide Input")
 
 c0, c1, c2, c3 = st.columns([1.6, 1, 1, 1])
@@ -241,7 +241,7 @@ def _ensure_rows():
             "Hotel Type": ["" for _ in dates],
             "Stay City": ["" for _ in dates],
             "Room Type": ["" for _ in dates],
-            # ---- PACKAGE then ACTUAL (your requested order) ----
+            # ---- PACKAGE then ACTUAL (requested order) ----
             "Pkg-Car Cost": [0.0 for _ in dates],
             "Pkg-Hotel Cost": [0.0 for _ in dates],
             "Act-Car Cost": [0.0 for _ in dates],
@@ -293,16 +293,21 @@ edited_df = st.data_editor(
     key="editor_main"
 )
 
-# ---------- Recalculate derived columns (Series-safe) ----------
+# ---------- Recalculate derived columns (KeyError-proof) ----------
 df = edited_df.copy()
+
+# Ensure required numeric columns exist (prevents KeyError after reloads)
+for col in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
+    if col not in df.columns:
+        df[col] = 0.0
 
 pkg_car   = pd.to_numeric(df["Pkg-Car Cost"], errors="coerce").fillna(0)
 pkg_hotel = pd.to_numeric(df["Pkg-Hotel Cost"], errors="coerce").fillna(0)
 act_car   = pd.to_numeric(df["Act-Car Cost"], errors="coerce").fillna(0)
 act_hotel = pd.to_numeric(df["Act-Hotel Cost"], errors="coerce").fillna(0)
 
-row_pkg_series = pkg_car + pkg_hotel
-row_act_series = act_car + act_hotel
+row_pkg_series    = pkg_car + pkg_hotel
+row_act_series    = act_car + act_hotel
 row_profit_series = row_pkg_series - row_act_series
 
 df["Package Cost"] = row_pkg_series
