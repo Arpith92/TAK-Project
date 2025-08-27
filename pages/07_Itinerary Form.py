@@ -121,10 +121,7 @@ def mongo_client():
 @st.cache_resource
 def get_cols():
     db = mongo_client()["TAK_DB"]
-    return {
-        "itineraries": db["itineraries"],
-        "audit_logins": db["audit_logins"],
-    }
+    return {"itineraries": db["itineraries"], "audit_logins": db["audit_logins"]}
 
 cols = get_cols()
 
@@ -162,7 +159,7 @@ user = _login()
 if not user:
     st.stop()
 
-# ================= Header (Form Table only)
+# ================= Header
 st.markdown("### 1) Provide Input")
 
 c0, c1, c2, c3 = st.columns([1.6, 1, 1, 1])
@@ -241,33 +238,34 @@ def _ensure_rows():
             "Hotel Type": ["" for _ in dates],
             "Stay City": ["" for _ in dates],
             "Room Type": ["" for _ in dates],
-            # ---- PACKAGE then ACTUAL (requested order) ----
+            # ---- ONLY FOUR COST COLUMNS ----
             "Pkg-Car Cost": [0.0 for _ in dates],
             "Pkg-Hotel Cost": [0.0 for _ in dates],
             "Act-Car Cost": [0.0 for _ in dates],
             "Act-Hotel Cost": [0.0 for _ in dates],
-            # calculated
-            "Package Cost": [0.0 for _ in dates],
-            "Actual Cost": [0.0 for _ in dates],
-            "Profit": [0.0 for _ in dates],
         })
     else:
-        df = st.session_state.form_rows.copy()
+        df0 = st.session_state.form_rows.copy()
         target = len(dates)
-        cur = len(df)
+        cur = len(df0)
         if target > cur:
-            add = pd.DataFrame({c: [df[c].iloc[-1] if cur>0 else (0.0 if "Cost" in c or c=="Profit" else "")] * (target-cur) for c in df.columns})
+            add = pd.DataFrame({c: [df0[c].iloc[-1] if cur>0 else (0.0 if "Cost" in c else "")] * (target-cur) for c in df0.columns})
             add["Date"] = dates[cur:]
-            df = pd.concat([df, add], ignore_index=True)
+            df0 = pd.concat([df0, add], ignore_index=True)
         elif target < cur:
-            df = df.iloc[:target].reset_index(drop=True)
-        df["Date"] = dates
-        st.session_state.form_rows = df
+            df0 = df0.iloc[:target].reset_index(drop=True)
+        df0["Date"] = dates
+        st.session_state.form_rows = df0
 
 _ensure_rows()
 
+EDITABLE_COLS = [
+    "Time","Code","Car Type","Hotel Type","Stay City","Room Type",
+    "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"
+]
+
 col_cfg = {
-    "Date": st.column_config.DateColumn("Date"),
+    "Date": st.column_config.DateColumn("Date", disabled=True),
     "Time": st.column_config.SelectboxColumn("Time", options=time_options, help="Select time"),
     "Code": st.column_config.SelectboxColumn("Code", options=code_options, help="Searchable"),
     "Car Type": st.column_config.SelectboxColumn("Car Type", options=car_options),
@@ -278,47 +276,23 @@ col_cfg = {
     "Pkg-Hotel Cost": st.column_config.NumberColumn("Pkg-Hotel Cost", min_value=0.0, step=100.0),
     "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
     "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
-    "Package Cost": st.column_config.NumberColumn("Package Cost", disabled=True),
-    "Actual Cost": st.column_config.NumberColumn("Actual Cost", disabled=True),
-    "Profit": st.column_config.NumberColumn("Profit", disabled=True),
 }
 
 st.markdown("### Fill Line Items")
 edited_df = st.data_editor(
     st.session_state.form_rows,
-    num_rows="fixed",                 # ← no row insertion/deletion
+    num_rows="fixed",                 # ← fixed to No. of days
     use_container_width=True,
     column_config=col_cfg,
     hide_index=True,
     key="editor_main"
 )
 
-# ---------- Recalculate derived columns (KeyError-proof) ----------
-df = edited_df.copy()
-
-# Ensure required numeric columns exist (prevents KeyError after reloads)
-for col in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
-    if col not in df.columns:
-        df[col] = 0.0
-
-pkg_car   = pd.to_numeric(df["Pkg-Car Cost"], errors="coerce").fillna(0)
-pkg_hotel = pd.to_numeric(df["Pkg-Hotel Cost"], errors="coerce").fillna(0)
-act_car   = pd.to_numeric(df["Act-Car Cost"], errors="coerce").fillna(0)
-act_hotel = pd.to_numeric(df["Act-Hotel Cost"], errors="coerce").fillna(0)
-
-row_pkg_series    = pkg_car + pkg_hotel
-row_act_series    = act_car + act_hotel
-row_profit_series = row_pkg_series - row_act_series
-
-df["Package Cost"] = row_pkg_series
-df["Actual Cost"]  = row_act_series
-df["Profit"]       = row_profit_series
-
-# enforce Date according to start_date + days
-df["Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
-
-# persist
-st.session_state.form_rows = df.copy()
+# ---------- STATE-SAFE MERGE ----------
+base = st.session_state.form_rows.copy()
+for col in EDITABLE_COLS:
+    if col in edited_df.columns:
+        base[col] = edited_df[col]
 
 # ================= Validations
 if not client_name:
@@ -351,14 +325,19 @@ def _code_to_route(code) -> str | None:
     except Exception:
         return None
 
-# ================= Totals / badges (Bhas outside)
-sum_row_pkg = float(row_pkg_series.sum())
-sum_row_act = float(row_act_series.sum())
+# ================= Totals / badges (Bhas outside; ONLY 4 cols)
+pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
+pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
+act_hotel = pd.to_numeric(base.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
 
-total_package = ceil_to_999(sum_row_pkg + (bhas_pkg_total if bhas_required=="Yes" else 0))
-total_actual   = sum_row_act + (bhas_actual_total if bhas_required=="Yes" else 0)
-profit_total   = int(total_package - total_actual)
-after_ref      = int(round(total_package * (1 - discount_pct/100.0))) if has_ref else total_package
+package_cost_rows = float(pkg_car + pkg_hotel)
+actual_cost_rows  = float(act_car + act_hotel)
+
+total_package = ceil_to_999(package_cost_rows + (bhas_unit_pkg * bhas_persons if bhas_required=="Yes" else 0))
+total_actual  = actual_cost_rows + (bhas_unit_actual * bhas_persons if bhas_required=="Yes" else 0)
+profit_total  = int(total_package - total_actual)
+after_ref     = int(round(total_package * (1 - discount_pct/100.0))) if has_ref else total_package
 
 badge_color = "#16a34a" if profit_total >= 4000 else "#dc2626"
 hint = "" if profit_total >= 4000 else " • Keep profit margin ≥ ₹4,000"
@@ -367,11 +346,11 @@ st.markdown(
     f"""
     <div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
       <div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">
-        Package Total: <b>₹{in_locale(total_package)}</b>
+        Package Cost: <b>₹{in_locale(total_package)}</b>
       </div>
       {('<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">After Referral (10%): <b>₹'+in_locale(after_ref)+'</b></div>') if has_ref else ''}
       <div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">
-        Actual Total: <b>₹{in_locale(total_actual)}</b>
+        Actual Cost: <b>₹{in_locale(total_actual)}</b>
       </div>
       <div style="padding:8px 12px; border-radius:8px; background:%s; color:white;">
         Profit: <b>₹%s</b>%s
@@ -382,24 +361,24 @@ st.markdown(
 )
 
 # ================= Build itinerary text
-dates_series = pd.to_datetime(df["Date"], errors="coerce")
+base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
+dates_series = pd.to_datetime(base["Date"], errors="coerce")
 start_date_calc = dates_series.min().date()
 end_date_calc   = dates_series.max().date()
 total_days_calc = (pd.to_datetime(end_date_calc) - pd.to_datetime(start_date_calc)).days + 1
 total_nights = max(total_days_calc - 1, 0)
 
-# items & route
-items = [{"Date": r["Date"], "Time": r.get("Time",""), "Code": r.get("Code","")} for _, r in df.iterrows()]
+items = [{"Date": r["Date"], "Time": r.get("Time",""), "Code": r.get("Code","")} for _, r in base.iterrows()]
 route_parts = []
-for r in df["Code"]:
+for r in base["Code"]:
     rt = _code_to_route(r)
     if rt: route_parts.append(rt)
 route_raw = "-".join(route_parts).replace(" -","-").replace("- ","-")
 route_list = [x for x in route_raw.split("-") if x]
 final_route = "-".join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i-1]])
 
-car_types = "-".join(pd.Series(df.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
-hotel_types = "-".join(pd.Series(df.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
+car_types = "-".join(pd.Series(base.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
+hotel_types = "-".join(pd.Series(base.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
 
 bhas_desc_str = ""
 if bhas_required == "Yes":
@@ -412,7 +391,6 @@ person_txt = "Person" if total_pax == 1 else "Persons"
 greet = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
 plan  = f"*Plan:- {total_days_calc}Days and {total_nights}{night_txt} {final_route} for {total_pax} {person_txt}*"
 
-# group by day with descriptions
 grouped = {}
 for it in items:
     dstr = pd.to_datetime(it["Date"]).strftime("%d-%b-%Y") if pd.notna(it["Date"]) and str(it["Date"]) else "N/A"
@@ -431,7 +409,7 @@ if has_ref:
     itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
 itinerary_text += f"{details_line}"
 
-# Inclusions
+# Inclusions (short)
 inc = []
 if car_types:
     inc += ["Entire travel as per itinerary by " + car_types + ".", "Toll, parking, and driver bata included.", "Pickup & drop included."]
@@ -442,7 +420,7 @@ if hotel_types:
 if inc:
     itinerary_text += "\n\n*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i,x in enumerate(inc)])
 
-# Exclusions / Notes / Policy / Payment / Account
+# Exclusions / Notes / Policy / Payment / Account (unchanged)
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified.",
     "2. Entry fees unless included.",
@@ -496,7 +474,7 @@ TravelAajKal® is a registered trademark of Achala Holidays Pvt Ltd.
 final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
 # ================= Serialize rows for Mongo (no datetime objects)
-rows_serialized = df.copy()
+rows_serialized = base.copy()
 if "Date" in rows_serialized.columns:
     try:
         rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -516,16 +494,16 @@ record = {
     "total_days": int(total_days_calc),
     "final_route": final_route,
     "total_pax": int(total_pax),
-    "car_types": "-".join(pd.Series(df.get("Car Type", [])).dropna().astype(str).unique().tolist()),
-    "hotel_types": "-".join(pd.Series(df.get("Hotel Type", [])).dropna().astype(str).unique().tolist()),
+    "car_types": "-".join(pd.Series(base.get("Car Type", [])).dropna().astype(str).unique().tolist()),
+    "hotel_types": "-".join(pd.Series(base.get("Hotel Type", [])).dropna().astype(str).unique().tolist()),
     # Bhasmarathi (outside)
     "bhasmarathi_required": (bhas_required=="Yes"),
     "bhasmarathi_type": bhas_type if bhas_required=="Yes" else None,
     "bhasmarathi_persons": int(bhas_persons) if bhas_required=="Yes" else 0,
     "bhasmarathi_unit_pkg": int(bhas_unit_pkg) if bhas_required=="Yes" else 0,
     "bhasmarathi_unit_actual": int(bhas_unit_actual) if bhas_required=="Yes" else 0,
-    "bhasmarathi_pkg_total": int(bhas_pkg_total) if bhas_required=="Yes" else 0,
-    "bhasmarathi_actual_total": int(bhas_actual_total) if bhas_required=="Yes" else 0,
+    "bhasmarathi_pkg_total": int(bhas_unit_pkg * bhas_persons) if bhas_required=="Yes" else 0,
+    "bhasmarathi_actual_total": int(bhas_unit_actual * bhas_persons) if bhas_required=="Yes" else 0,
     # totals
     "package_total": int(total_package),
     "package_after_referral": int(after_ref),
