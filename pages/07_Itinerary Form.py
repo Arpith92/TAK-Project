@@ -157,16 +157,12 @@ def in_locale(n: int) -> str:
 def ceil_to_999(n: float) -> int:
     return (math.ceil(n/1000)*1000 - 1) if n > 0 else 0
 
-def _num(x):
-    try: return float(x)
-    except Exception: return 0.0
-
 # ================= Auth
 user = _login()
 if not user:
     st.stop()
 
-# ================= Header (no Excel path requested now; we keep only Form Table)
+# ================= Header (Form Table only per your request)
 st.markdown("### 1) Provide Input")
 
 c0, c1, c2, c3 = st.columns([1.6, 1, 1, 1])
@@ -175,7 +171,7 @@ with c1: client_mobile_raw = st.text_input("Client mobile (10 digits)*")
 with c2: rep = st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"])
 with c3: total_pax = st.number_input("Total Pax*", min_value=1, value=2, step=1)
 
-# Referral dropdown (from confirmed clients)
+# Referral (10% discount)
 def _load_client_refs() -> list[str]:
     try:
         cur = cols["itineraries"].aggregate([
@@ -196,35 +192,23 @@ referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels, in
 has_ref = referred_sel != "-- None --"
 discount_pct = 10 if has_ref else 0
 
-# ===== Trip dates & rows =====
+# Trip dates & rows
 h1, h2 = st.columns(2)
 with h1: start_date = st.date_input("Start date", value=datetime.date.today())
 with h2: days = st.number_input("No. of days", min_value=1, value=2, step=1)
 
-# ===== Dropdown option sources
+# Dropdown sources
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
 code_options = code_df["Code"].dropna().astype(str).unique().tolist() if not code_df.empty else []
-
 base_cars = ["Sedan","Ertiga","Innova","Tempo Traveller"]
 car_options = [f"{ac} {c}" for c in base_cars for ac in ("AC","Non AC")]
-
-hotel_options = [
-    "AC Standard AC",
-    "Non-AC Standard AC",
-    "3Star AC Hotel room",
-    "4Star AC Hotel room",
-    "5Star AC Hotel room",
-]
+hotel_options = ["AC Standard AC","Non-AC Standard AC","3Star AC Hotel room","4Star AC Hotel room","5Star AC Hotel room"]
 room_options = [f"{occ} occupancy {i} room" for occ in ["Double","Triple","Quad","Quint"] for i in range(1,5)]
 
-# Time dropdown list (every 15 minutes)
+# Time dropdown (every 15 minutes)
 def _time_list(step_minutes=15):
     base = datetime.datetime(2000,1,1,0,0)
-    times = []
-    for i in range(0, 24*60, step_minutes):
-        t = (base + datetime.timedelta(minutes=i)).time()
-        times.append(t.strftime("%I:%M %p"))
-    return times
+    return [(base + datetime.timedelta(minutes=i)).time().strftime("%I:%M %p") for i in range(0, 24*60, step_minutes)]
 time_options = _time_list(15)
 
 # ===== Bhasmarathi (OUTSIDE the table)
@@ -234,7 +218,7 @@ with bhc1:
 with bhc2:
     bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], index=0, disabled=(bhas_required=="No"))
 with bhc3:
-    bhas_persons = st.number_input("Total persons for Bhasmarathi", min_value=0, value=0, step=1, disabled=(bhas_required=="No"))
+    bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, value=0, step=1, disabled=(bhas_required=="No"))
 
 bhc4, bhc5 = st.columns(2)
 with bhc4:
@@ -257,48 +241,46 @@ def _ensure_rows():
             "Hotel Type": ["" for _ in dates],
             "Stay City": ["" for _ in dates],
             "Room Type": ["" for _ in dates],
-            # --- package first, then actual ---
-            "Package-Car Cost": [0.0 for _ in dates],
-            "Package-Hotel Cost": [0.0 for _ in dates],
-            "Actual-Car Cost": [0.0 for _ in dates],
-            "Actual-Hotel Cost": [0.0 for _ in dates],
-            # derived per-row
-            "Row Package": [0.0 for _ in dates],
-            "Row Actual": [0.0 for _ in dates],
-            "Row Profit": [0.0 for _ in dates],
+            # ---- PACKAGE then ACTUAL (your requested order) ----
+            "Pkg-Car Cost": [0.0 for _ in dates],
+            "Pkg-Hotel Cost": [0.0 for _ in dates],
+            "Act-Car Cost": [0.0 for _ in dates],
+            "Act-Hotel Cost": [0.0 for _ in dates],
+            # calculated
+            "Package Cost": [0.0 for _ in dates],
+            "Actual Cost": [0.0 for _ in dates],
+            "Profit": [0.0 for _ in dates],
         })
     else:
         df = st.session_state.form_rows.copy()
-        # adjust size while preserving existing edits
-        current = len(df)
         target = len(dates)
-        if target > current:
-            add = pd.DataFrame({c: [df[c].iloc[-1] if current>0 else (0.0 if "Cost" in c or "Row" in c else "")] * (target-current) for c in df.columns})
-            add["Date"] = dates[current:]
+        cur = len(df)
+        if target > cur:
+            add = pd.DataFrame({c: [df[c].iloc[-1] if cur>0 else (0.0 if "Cost" in c or c=="Profit" else "")] * (target-cur) for c in df.columns})
+            add["Date"] = dates[cur:]
             df = pd.concat([df, add], ignore_index=True)
-        elif target < current:
+        elif target < cur:
             df = df.iloc[:target].reset_index(drop=True)
-        # always align Date to the computed schedule (non-editable)
         df["Date"] = dates
         st.session_state.form_rows = df
 
 _ensure_rows()
 
 col_cfg = {
-    "Date": st.column_config.DateColumn("Date"),  # we overwrite after edit to keep in sync
+    "Date": st.column_config.DateColumn("Date"),
     "Time": st.column_config.SelectboxColumn("Time", options=time_options, help="Select time"),
     "Code": st.column_config.SelectboxColumn("Code", options=code_options, help="Searchable"),
     "Car Type": st.column_config.SelectboxColumn("Car Type", options=car_options),
     "Hotel Type": st.column_config.SelectboxColumn("Hotel Type", options=hotel_options),
     "Stay City": st.column_config.SelectboxColumn("Stay City", options=stay_city_options),
     "Room Type": st.column_config.SelectboxColumn("Room Type", options=room_options),
-    "Package-Car Cost": st.column_config.NumberColumn("Package-Car Cost", min_value=0.0, step=100.0),
-    "Package-Hotel Cost": st.column_config.NumberColumn("Package-Hotel Cost", min_value=0.0, step=100.0),
-    "Actual-Car Cost": st.column_config.NumberColumn("Actual-Car Cost", min_value=0.0, step=100.0),
-    "Actual-Hotel Cost": st.column_config.NumberColumn("Actual-Hotel Cost", min_value=0.0, step=100.0),
-    "Row Package": st.column_config.NumberColumn("Row Package", disabled=True),
-    "Row Actual": st.column_config.NumberColumn("Row Actual", disabled=True),
-    "Row Profit": st.column_config.NumberColumn("Row Profit", disabled=True),
+    "Pkg-Car Cost": st.column_config.NumberColumn("Pkg-Car Cost", min_value=0.0, step=100.0),
+    "Pkg-Hotel Cost": st.column_config.NumberColumn("Pkg-Hotel Cost", min_value=0.0, step=100.0),
+    "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
+    "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
+    "Package Cost": st.column_config.NumberColumn("Package Cost", disabled=True),
+    "Actual Cost": st.column_config.NumberColumn("Actual Cost", disabled=True),
+    "Profit": st.column_config.NumberColumn("Profit", disabled=True),
 }
 
 st.markdown("### Fill Line Items")
@@ -311,21 +293,26 @@ edited_df = st.data_editor(
     key="editor_main"
 )
 
-# ---------- Recalculate derived columns (no reinit) ----------
+# ---------- Recalculate derived columns (Series-safe) ----------
 df = edited_df.copy()
 
-row_pkg = (_num(df["Package-Car Cost"]) + _num(df["Package-Hotel Cost"])).tolist()
-row_act = (_num(df["Actual-Car Cost"]) + _num(df["Actual-Hotel Cost"])).tolist()
-row_profit = [row_pkg[i] - row_act[i] for i in range(len(df))]
+pkg_car   = pd.to_numeric(df["Pkg-Car Cost"], errors="coerce").fillna(0)
+pkg_hotel = pd.to_numeric(df["Pkg-Hotel Cost"], errors="coerce").fillna(0)
+act_car   = pd.to_numeric(df["Act-Car Cost"], errors="coerce").fillna(0)
+act_hotel = pd.to_numeric(df["Act-Hotel Cost"], errors="coerce").fillna(0)
 
-df["Row Package"] = row_pkg
-df["Row Actual"] = row_act
-df["Row Profit"] = row_profit
+row_pkg_series = pkg_car + pkg_hotel
+row_act_series = act_car + act_hotel
+row_profit_series = row_pkg_series - row_act_series
 
-# enforce Date according to start_date + days (prevents accidental changes)
+df["Package Cost"] = row_pkg_series
+df["Actual Cost"]  = row_act_series
+df["Profit"]       = row_profit_series
+
+# enforce Date according to start_date + days
 df["Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
 
-# persist back to session (stable)
+# persist
 st.session_state.form_rows = df.copy()
 
 # ================= Validations
@@ -338,7 +325,7 @@ if rep == "-- Select --":
 
 client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
 
-# ================= Safe Code helpers
+# ================= Code helpers
 def _code_to_desc(code) -> str:
     if code is None: return "No code provided"
     s = str(code).strip()
@@ -359,9 +346,9 @@ def _code_to_route(code) -> str | None:
     except Exception:
         return None
 
-# ================= Totals / badges (Bhasmarathi outside)
-sum_row_pkg = float(pd.to_numeric(df["Row Package"], errors="coerce").fillna(0).sum())
-sum_row_act = float(pd.to_numeric(df["Row Actual"], errors="coerce").fillna(0).sum())
+# ================= Totals / badges (Bhas outside)
+sum_row_pkg = float(row_pkg_series.sum())
+sum_row_act = float(row_act_series.sum())
 
 total_package = ceil_to_999(sum_row_pkg + (bhas_pkg_total if bhas_required=="Yes" else 0))
 total_actual   = sum_row_act + (bhas_actual_total if bhas_required=="Yes" else 0)
@@ -450,7 +437,7 @@ if hotel_types:
 if inc:
     itinerary_text += "\n\n*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i,x in enumerate(inc)])
 
-# Exclusions / Notes / Policy / Payment / Account (same as before)
+# Exclusions / Notes / Policy / Payment / Account
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified.",
     "2. Entry fees unless included.",
