@@ -219,9 +219,9 @@ with bhc3:
 
 bhc4, bhc5 = st.columns(2)
 with bhc4:
-    bhas_unit_pkg = st.number_input("Unit Package Cost (₹)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
+    bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
 with bhc5:
-    bhas_unit_actual = st.number_input("Unit Actual Cost (₹)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
+    bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
 
 bhas_pkg_total = (bhas_unit_pkg * bhas_persons) if bhas_required=="Yes" else 0
 bhas_actual_total = (bhas_unit_actual * bhas_persons) if bhas_required=="Yes" else 0
