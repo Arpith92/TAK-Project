@@ -14,7 +14,7 @@ except Exception:
     import streamlit as st  # ensure st is available
 
 # ----------------- Imports -----------------
-import io, math, locale, datetime, os
+import io, math, datetime, os
 from collections.abc import Mapping
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -42,7 +42,7 @@ def _load_users() -> dict:
         pass
     try:
         try:
-            import tomllib
+            import tomllib  # py311+
         except Exception:
             import tomli as tomllib
         with open(".streamlit/secrets.toml", "rb") as f:
@@ -145,11 +145,8 @@ def is_valid_mobile(num: str) -> bool:
     return len(digits) == 10
 
 def in_locale(n: int) -> str:
-    try:
-        locale.setlocale(locale.LC_ALL, 'en_IN')
-        return locale.format_string("%d", int(n), grouping=True)
-    except Exception:
-        return f"{int(n):,}"
+    """Simple, safe formatting (no locale/percent formatting)."""
+    return f"{int(n):,}"
 
 def ceil_to_999(n: float) -> int:
     return (math.ceil(n/1000)*1000 - 1) if n > 0 else 0
@@ -341,22 +338,19 @@ after_ref     = int(round(total_package * (1 - discount_pct/100.0))) if has_ref 
 badge_color = "#16a34a" if profit_total >= 4000 else "#dc2626"
 hint = "" if profit_total >= 4000 else " • Keep profit margin ≥ ₹4,000"
 
+# Pure f-strings (no % formatting anywhere)
 ref_html = f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">After Referral (10%): <b>₹{in_locale(after_ref)}</b></div>' if has_ref else ""
-
-badge_html = f"""
-<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
-  <div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">
-    Package Cost: <b>₹{in_locale(total_package)}</b>
-  </div>
-  {ref_html}
-  <div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">
-    Actual Cost: <b>₹{in_locale(total_actual)}</b>
-  </div>
-  <div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">
-    Profit: <b>₹{in_locale(profit_total)}</b>{hint}
-  </div>
-</div>
-"""
+badge_html = (
+    '<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">'
+    f'<div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">'
+    f'Package Cost: <b>₹{in_locale(total_package)}</b></div>'
+    f'{ref_html}'
+    f'<div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">'
+    f'Actual Cost: <b>₹{in_locale(total_actual)}</b></div>'
+    f'<div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">'
+    f'Profit: <b>₹{in_locale(profit_total)}</b>{hint}</div>'
+    '</div>'
+)
 st.markdown(badge_html, unsafe_allow_html=True)
 
 # ================= Build itinerary text
@@ -419,7 +413,7 @@ if hotel_types:
 if inc:
     itinerary_text += "\n\n*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i,x in enumerate(inc)])
 
-# Exclusions / Notes / Policy / Payment / Account (unchanged)
+# Exclusions / Notes / Policy / Payment / Account
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified.",
     "2. Entry fees unless included.",
