@@ -201,24 +201,30 @@ st.markdown("### 🔎 Search / Edit existing package")
 q = st.text_input("Search by client name or mobile", placeholder="e.g., Gaurav or 9576226271", key="search_q")
 
 def _client_suggestions(prefix: str) -> list[str]:
-    if not prefix: return []
+    if not prefix:
+        return []
     try:
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
-    {"$match": {"$or":[
-        {"client_name":{"$regex":rx,"$options":"i"}},
-        {"client_mobile":{"$regex":rx}}
-    ]}}},
-    {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
-    {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
-    {"$limit":50}
-])
+            {
+                "$match": {
+                    "$or": [
+                        {"client_name":  {"$regex": rx, "$options": "i"}},
+                        {"client_mobile": {"$regex": rx}}
+                    ]
+                }
+            },
+            {"$group":  {"_id": {"n": "$client_name", "m": "$client_mobile"}}},
+            {"$project": {"_id": 0, "name": "$_id.n", "mobile": "$_id.m"}},
+            {"$limit": 50}
+        ])
         res = []
         for x in cur:
             n = (x.get("name") or "").strip()
             m = (x.get("mobile") or "").strip()
-            if n or m: res.append(f"{n} — {m}" if n and m else n or m)
-        return sorted(set(res), key=lambda s:s.lower())
+            if n or m:
+                res.append(f"{n} — {m}" if n and m else (n or m))
+        return sorted(set(res), key=lambda s: s.lower())
     except Exception:
         return []
 
