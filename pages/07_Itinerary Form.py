@@ -208,7 +208,7 @@ def _time_list(step_minutes=15):
     return [(base + datetime.timedelta(minutes=i)).time().strftime("%I:%M %p") for i in range(0, 24*60, step_minutes)]
 time_options = _time_list(15)
 
-# ===== Bhasmarathi (OUTSIDE the table)
+# ===== Bhasmarathi (OUTSIDE the table) — renamed labels
 bhc1, bhc2, bhc3 = st.columns(3)
 with bhc1:
     bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], index=0)
@@ -246,8 +246,7 @@ def _ensure_rows():
         })
     else:
         df0 = st.session_state.form_rows.copy()
-        target = len(dates)
-        cur = len(df0)
+        target = len(dates); cur = len(df0)
         if target > cur:
             add = pd.DataFrame({c: [df0[c].iloc[-1] if cur>0 else (0.0 if "Cost" in c else "")] * (target-cur) for c in df0.columns})
             add["Date"] = dates[cur:]
@@ -281,7 +280,7 @@ col_cfg = {
 st.markdown("### Fill Line Items")
 edited_df = st.data_editor(
     st.session_state.form_rows,
-    num_rows="fixed",                 # ← fixed to No. of days
+    num_rows="fixed",
     use_container_width=True,
     column_config=col_cfg,
     hide_index=True,
@@ -342,23 +341,23 @@ after_ref     = int(round(total_package * (1 - discount_pct/100.0))) if has_ref 
 badge_color = "#16a34a" if profit_total >= 4000 else "#dc2626"
 hint = "" if profit_total >= 4000 else " • Keep profit margin ≥ ₹4,000"
 
-st.markdown(
-    f"""
-    <div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
-      <div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">
-        Package Cost: <b>₹{in_locale(total_package)}</b>
-      </div>
-      {('<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">After Referral (10%): <b>₹'+in_locale(after_ref)+'</b></div>') if has_ref else ''}
-      <div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">
-        Actual Cost: <b>₹{in_locale(total_actual)}</b>
-      </div>
-      <div style="padding:8px 12px; border-radius:8px; background:%s; color:white;">
-        Profit: <b>₹%s</b>%s
-      </div>
-    </div>
-    """ % (badge_color, in_locale(profit_total), hint),
-    unsafe_allow_html=True
-)
+ref_html = f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">After Referral (10%): <b>₹{in_locale(after_ref)}</b></div>' if has_ref else ""
+
+badge_html = f"""
+<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
+  <div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">
+    Package Cost: <b>₹{in_locale(total_package)}</b>
+  </div>
+  {ref_html}
+  <div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">
+    Actual Cost: <b>₹{in_locale(total_actual)}</b>
+  </div>
+  <div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">
+    Profit: <b>₹{in_locale(profit_total)}</b>{hint}
+  </div>
+</div>
+"""
+st.markdown(badge_html, unsafe_allow_html=True)
 
 # ================= Build itinerary text
 base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
