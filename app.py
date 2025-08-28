@@ -256,36 +256,43 @@ with bhc4:
 with bhc5:
     bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, value=0, step=100, disabled=(bhas_required=="No"))
 
-# ---- Initialize editor rows in session (fixed rows = days)
-def _ensure_rows():
-    dates = [start_date + datetime.timedelta(days=i) for i in range(days)]
-    if "form_rows" not in st.session_state:
-        st.session_state.form_rows = pd.DataFrame({
-            "Date": dates,
-            "Time": ["" for _ in dates],
-            "Code": ["" for _ in dates],
-            "Car Type": ["" for _ in dates],
-            "Hotel Type": ["" for _ in dates],
-            "Stay City": ["" for _ in dates],
-            "Room Type": ["" for _ in dates],
-            "Pkg-Car Cost": [0.0 for _ in dates],
-            "Pkg-Hotel Cost": [0.0 for _ in dates],
-            "Act-Car Cost": [0.0 for _ in dates],
-            "Act-Hotel Cost": [0.0 for _ in dates],
-        })
-    else:
-        df0 = st.session_state.form_rows.copy()
-        target = len(dates); cur = len(df0)
-        if target > cur:
-            add = pd.DataFrame({c: [df0[c].iloc[-1] if cur>0 else (0.0 if "Cost" in c else "")] * (target-cur) for c in df0.columns})
-            add["Date"] = dates[cur:]
-            df0 = pd.concat([df0, add], ignore_index=True)
-        elif target < cur:
-            df0 = df0.iloc[:target].reset_index(drop=True)
-        df0["Date"] = dates
-        st.session_state.form_rows = df0
+# ============ STABLE ROW INITIALIZER (no wiping on first edit) ============
+def _blank_df(n_rows: int, start: datetime.date) -> pd.DataFrame:
+    return pd.DataFrame({
+        "Date": [start + datetime.timedelta(days=i) for i in range(n_rows)],
+        "Time": ["" for _ in range(n_rows)],
+        "Code": ["" for _ in range(n_rows)],
+        "Car Type": ["" for _ in range(n_rows)],
+        "Hotel Type": ["" for _ in range(n_rows)],
+        "Stay City": ["" for _ in range(n_rows)],
+        "Room Type": ["" for _ in range(n_rows)],
+        "Pkg-Car Cost": [0.0 for _ in range(n_rows)],
+        "Pkg-Hotel Cost": [0.0 for _ in range(n_rows)],
+        "Act-Car Cost": [0.0 for _ in range(n_rows)],
+        "Act-Hotel Cost": [0.0 for _ in range(n_rows)],
+    })
 
-_ensure_rows()
+def _ensure_rows(days: int, start_date: datetime.date):
+    """Create rows once; only add/remove rows when 'days' changes. Never overwrite user edits."""
+    if "form_rows" not in st.session_state:
+        st.session_state.form_rows = _blank_df(days, start_date)
+        st.session_state._days = days
+    else:
+        df = st.session_state.form_rows
+        prev_days = st.session_state.get("_days", len(df))
+        if days > prev_days:
+            # append true blanks for new days
+            add = _blank_df(days - prev_days, start_date + datetime.timedelta(days=prev_days))
+            st.session_state.form_rows = pd.concat([df, add], ignore_index=True)
+            st.session_state._days = days
+        elif days < prev_days:
+            st.session_state.form_rows = df.iloc[:days].reset_index(drop=True)
+            st.session_state._days = days
+
+    # Always (and only) recompute the Date column; do not touch any other columns
+    st.session_state.form_rows.loc[:, "Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
+
+_ensure_rows(days, start_date)
 
 EDITABLE_COLS = [
     "Time","Code","Car Type","Hotel Type","Stay City","Room Type",
@@ -309,21 +316,22 @@ col_cfg = {
 st.markdown("### Fill Line Items")
 edited_df = st.data_editor(
     st.session_state.form_rows,
-    num_rows="fixed",
+    num_rows="fixed",               # fixed by 'days'
     use_container_width=True,
     column_config=col_cfg,
     hide_index=True,
     key="editor_main"
 )
 
-# ---- Merge only editable columns back to authoritative DF
+# ---- Merge ONLY editable columns back; never recreate the DF here
 base = st.session_state.form_rows.copy()
 for col in EDITABLE_COLS:
     if col in edited_df.columns:
         base[col] = edited_df[col]
 st.session_state.form_rows = base
+base = st.session_state.form_rows  # authoritative
 
-# ---- Validations (strict 10-digit; representative)
+# ---- Validations
 if not client_name:
     st.warning("Enter **Client Name**."); st.stop()
 if not is_valid_mobile(client_mobile_raw):
@@ -353,7 +361,7 @@ def _code_to_route(code) -> str | None:
     except Exception:
         return None
 
-# ---- Totals (only 4 columns) + Bhasmarathi + Referral
+# ---- Totals (4 columns) + Bhasmarathi + Referral
 pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
 pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
 act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
