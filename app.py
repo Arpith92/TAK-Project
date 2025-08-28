@@ -200,7 +200,7 @@ def _client_suggestions(prefix: str) -> list[str]:
         return []
 
 suggestions = _client_suggestions(q.strip())
-sel_client = st.selectbox("Suggestions (pick a client)", ["--"] + suggestions, index=0)
+sel_client = st.selectbox("Suggestions (pick a client)", ["--"] + suggestions, index=0, key="k_pick_client")
 picked_client_name = None
 picked_client_mobile = None
 if sel_client != "--":
@@ -222,49 +222,74 @@ if picked_client_mobile:
     try:
         docs = list(col_it.find(
             {"client_mobile": picked_client_mobile},
-            {"itinerary_text":0}  # keep rows!
+            {"itinerary_text":0}
         ).sort([("start_date", -1), ("revision_num",-1), ("upload_date",-1)]))
     except Exception:
         docs = []
     if docs:
-        labels = [f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0))} • id:{str(d.get('_id'))[:8]}" for d in docs]
+        labels = [f"{picked_client_name or d.get('client_name','')} — {picked_client_mobile} • start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0))}" for d in docs]
         pick_idx = st.selectbox("Pick a start date & revision", list(range(len(labels))), format_func=lambda i: labels[i] if docs else "", key="rev_pick")
-        if st.button("Load this package", use_container_width=False):
+        if st.button("Load this package", use_container_width=False, key="btn_load_pkg"):
             loaded_doc = docs[pick_idx]
-            st.session_state["loaded_doc"] = loaded_doc
-            st.session_state["prefill"] = {
-                "client_name": loaded_doc.get("client_name",""),
-                "client_mobile_raw": loaded_doc.get("client_mobile",""),
-                "rep": loaded_doc.get("representative","-- Select --"),
-                "total_pax": int(loaded_doc.get("total_pax",1) or 1),
-                "start_date": datetime.date.fromisoformat(loaded_doc.get("start_date")),
-                "days": int(loaded_doc.get("total_days", len(loaded_doc.get("rows",[])) or 1)),
-                "referred_sel": loaded_doc.get("referred_by","-- None --") or "-- None --",
-                # Bhasmarathi
-                "bhas_required": "Yes" if loaded_doc.get("bhasmarathi_required") else "No",
-                "bhas_type": loaded_doc.get("bhasmarathi_type","V-BH"),
-                "bhas_persons": int(loaded_doc.get("bhasmarathi_persons",0) or 0),
-                "bhas_unit_pkg": int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0),
-                "bhas_unit_actual": int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0),
-                # rows (raw)
-                "rows": loaded_doc.get("rows",[])
-            }
+            # ---- Set widget state directly so UI reflects immediately
+            st.session_state["k_client_name"] = loaded_doc.get("client_name","")
+            st.session_state["k_mobile"]      = loaded_doc.get("client_mobile","")
+            st.session_state["k_rep"]         = loaded_doc.get("representative","-- Select --")
+            st.session_state["k_total_pax"]   = int(loaded_doc.get("total_pax",1) or 1)
+
+            # dates / days
+            try:
+                st.session_state["k_start"] = datetime.date.fromisoformat(str(loaded_doc.get("start_date")))
+            except Exception:
+                st.session_state["k_start"] = datetime.date.today()
+            n_rows = int(loaded_doc.get("total_days", len(loaded_doc.get("rows",[])) or 1))
+            st.session_state["k_days"] = n_rows
+
+            # referral
+            st.session_state["k_ref_sel"] = loaded_doc.get("referred_by","-- None --") or "-- None --"
+
+            # bhasmarathi
+            st.session_state["k_bhas_req"]  = "Yes" if loaded_doc.get("bhasmarathi_required") else "No"
+            st.session_state["k_bhas_type"] = loaded_doc.get("bhasmarathi_type","V-BH") or "V-BH"
+            st.session_state["k_bhas_pax"]  = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
+            st.session_state["k_bhas_pkg"]  = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
+            st.session_state["k_bhas_act"]  = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
+
+            # rows
+            st.session_state["prefill_rows_raw"] = loaded_doc.get("rows",[])
+            # force rows length to override days on first rebuild
+            st.session_state["_force_days_from_rows"] = len(st.session_state["prefill_rows_raw"]) or n_rows
+
+            # clear any prior form_rows so we rebuild
+            if "form_rows" in st.session_state: st.session_state.pop("form_rows")
             st.success("Previous package loaded below. You can make changes; saving will create a new revision.")
             st.rerun()
 
 # ============================
-#        FORM UI
+#        FORM UI (KEYED)
 # ============================
 
 st.markdown("### 1) Provide Input")
-pf = st.session_state.get("prefill", {}) if "prefill" in st.session_state else {}
+
+# default seed values if keys are missing
+st.session_state.setdefault("k_client_name", "")
+st.session_state.setdefault("k_mobile", "")
+st.session_state.setdefault("k_rep", "-- Select --")
+st.session_state.setdefault("k_total_pax", 2)
+st.session_state.setdefault("k_start", datetime.date.today())
+st.session_state.setdefault("k_days", 2)
+st.session_state.setdefault("k_ref_sel", "-- None --")
+st.session_state.setdefault("k_bhas_req", "No")
+st.session_state.setdefault("k_bhas_type", "V-BH")
+st.session_state.setdefault("k_bhas_pax", 0)
+st.session_state.setdefault("k_bhas_pkg", 0)
+st.session_state.setdefault("k_bhas_act", 0)
 
 c0, c1, c2, c3 = st.columns([1.6, 1, 1, 1])
-with c0: client_name = st.text_input("Client Name*", value=pf.get("client_name",""))
-with c1: client_mobile_raw = st.text_input("Client mobile (10 digits)*", value=pf.get("client_mobile_raw",""))
-with c2: rep = st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"],
-                            index=["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(pf.get("rep","-- Select --")) if pf else 0)
-with c3: total_pax = st.number_input("Total Pax*", min_value=1, value=pf.get("total_pax",2), step=1)
+with c0: client_name = st.text_input("Client Name*", key="k_client_name")
+with c1: client_mobile_raw = st.text_input("Client mobile (10 digits)*", key="k_mobile")
+with c2: rep = st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"], key="k_rep")
+with c3: total_pax = st.number_input("Total Pax*", min_value=1, step=1, key="k_total_pax")
 
 # Referral choices
 def _load_client_refs() -> list[str]:
@@ -281,15 +306,14 @@ def _load_client_refs() -> list[str]:
     except Exception:
         return []
 ref_labels = ["-- None --"] + _load_client_refs()
-referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels,
-                            index= ref_labels.index(pf.get("referred_sel","-- None --")) if pf and pf.get("referred_sel","-- None --") in ref_labels else 0)
+referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels, key="k_ref_sel")
 has_ref = referred_sel != "-- None --"
 discount_pct = 10 if has_ref else 0
 
 # Dates / rows
 h1, h2 = st.columns(2)
-with h1: start_date = st.date_input("Start date", value=pf.get("start_date", datetime.date.today()))
-with h2: days = st.number_input("No. of days", min_value=1, value=pf.get("days",2), step=1)
+with h1: start_date = st.date_input("Start date", key="k_start")
+with h2: days = st.number_input("No. of days", min_value=1, step=1, key="k_days")
 
 # Dropdown options
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -307,20 +331,19 @@ time_options = _time_list(15)
 # Bhasmarathi (outside table)
 bhc1, bhc2, bhc3 = st.columns(3)
 with bhc1:
-    bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], index= 1 if pf.get("bhas_required","No")=="Yes" else 0)
+    bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], key="k_bhas_req")
 with bhc2:
-    bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], index= ["V-BH","P-BH","BH"].index(pf.get("bhas_type","V-BH")))
+    bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], key="k_bhas_type")
 with bhc3:
-    bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, value=pf.get("bhas_persons",0), step=1, disabled=(bhas_required=="No"))
+    bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, step=1, key="k_bhas_pax", disabled=(st.session_state["k_bhas_req"]=="No"))
 bhc4, bhc5 = st.columns(2)
 with bhc4:
-    bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, value=pf.get("bhas_unit_pkg",0), step=100, disabled=(bhas_required=="No"))
+    bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, key="k_bhas_pkg", disabled=(st.session_state["k_bhas_req"]=="No"))
 with bhc5:
-    bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, value=pf.get("bhas_unit_actual",0), step=100, disabled=(bhas_required=="No"))
+    bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
 # ===== Legacy rows normalization =====
 LEGACY_MAP = {
-    # common dash/space variants -> normalized
     "package-car cost": "Pkg-Car Cost",
     "package car cost": "Pkg-Car Cost",
     "package–car cost": "Pkg-Car Cost",
@@ -334,12 +357,10 @@ LEGACY_MAP = {
     "actual hotel cost": "Act-Hotel Cost",
     "actual–hotel cost": "Act-Hotel Cost",
 }
-
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
 def _normalize_row_columns(rows: list[dict]) -> list[dict]:
-    """Map legacy keys to current keys for each row dict."""
     out = []
     for r in rows or []:
         nr = {}
@@ -349,7 +370,6 @@ def _normalize_row_columns(rows: list[dict]) -> list[dict]:
         out.append(nr)
     return out
 
-# ===== Stable rows (prefill if loaded) =====
 def _blank_df(n_rows: int, start: datetime.date) -> pd.DataFrame:
     return pd.DataFrame({
         "Date": [start + datetime.timedelta(days=i) for i in range(n_rows)],
@@ -369,49 +389,34 @@ def _prefill_rows(raw_rows: list, n_rows: int, start: datetime.date) -> pd.DataF
     rows = _normalize_row_columns(raw_rows)
     if not rows:
         return _blank_df(n_rows, start)
-
     df = pd.DataFrame(rows)
-
-    # Ensure all target columns exist
     for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0 if "Cost" in c else ""
-
-    # Coerce types
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-
-    # Dates
     try:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     except Exception:
         df["Date"] = df["Date"].astype(str)
-
-    # If stored rows count differs from n_rows, expand/truncate to n_rows but
-    # NEVER drop real content: we only truncate if rows > n_rows AND we also
-    # increase the external 'days' to match so user sees all content.
     if len(df) != n_rows:
         st.session_state["_force_days_from_rows"] = len(df)
         n_rows = len(df)
-
-    # Fill missing rows if any (unlikely)
     if len(df) < n_rows:
         add = _blank_df(n_rows - len(df), start + datetime.timedelta(days=len(df)))
         df = pd.concat([df, add], ignore_index=True)
-
-    # Re-calc Date column sequentially from chosen start
     df = df.reset_index(drop=True)
     df["Date"] = [start + datetime.timedelta(days=i) for i in range(len(df))]
     return df[TARGET_COLS]
 
 def _ensure_rows(days: int, start: datetime.date):
-    # If we loaded rows with different length, override days once
     if "_force_days_from_rows" in st.session_state:
         days = int(st.session_state.pop("_force_days_from_rows") or days)
-
+        st.session_state["k_days"] = days
     if "form_rows" not in st.session_state:
-        if pf.get("rows"):
-            st.session_state.form_rows = _prefill_rows(pf["rows"], days, start)
+        raw = st.session_state.get("prefill_rows_raw") or []
+        if raw:
+            st.session_state.form_rows = _prefill_rows(raw, days, start)
         else:
             st.session_state.form_rows = _blank_df(days, start)
         st.session_state._days = len(st.session_state.form_rows)
@@ -424,7 +429,6 @@ def _ensure_rows(days: int, start: datetime.date):
         elif days < prev:
             st.session_state.form_rows = df.iloc[:days].reset_index(drop=True)
         st.session_state._days = len(st.session_state.form_rows)
-
     st.session_state.form_rows.loc[:, "Date"] = [start + datetime.timedelta(days=i) for i in range(st.session_state.form_rows.shape[0])]
 
 _ensure_rows(days, start_date)
@@ -508,7 +512,7 @@ totals_html = (
 )
 st.markdown(totals_html, unsafe_allow_html=True)
 
-# ---- Build itinerary text
+# ---- Build itinerary text (reflects current table & costs)
 base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(base.shape[0])]
 dates_series   = pd.to_datetime(base["Date"], errors="coerce")
 start_date_calc = dates_series.min().date()
@@ -611,7 +615,7 @@ if "Date" in rows_serialized.columns:
         rows_serialized["Date"] = rows_serialized["Date"].astype(str)
 
 # ================= Save (revision-aware) =================
-loaded_doc = st.session_state.get("loaded_doc")
+loaded_doc = st.session_state.get("loaded_doc")  # not used after key-setting but kept
 
 def _latest_rev_for_key(mobile: str, start_str: str) -> int:
     try:
@@ -669,28 +673,27 @@ record = {
 
 if st.button("💾 Save / Create revision", use_container_width=False):
     try:
-        if loaded_doc:
-            if _normalize_for_compare(loaded_doc) == _normalize_for_compare(record):
+        # find latest for this key; decide if revision is needed
+        base_rev = _latest_rev_for_key(client_mobile, key_start)
+        record["revision_num"] = (base_rev + 1) if base_rev >= 0 else 0
+        record["is_revision"] = record["revision_num"] > 0
+        record["revision_of"] = None
+        record["revision_notes"] = "initial" if record["revision_num"] == 0 else "auto: new version"
+
+        # compare with last one (if exists)
+        if base_rev >= 0:
+            last = col_it.find_one(
+                {"client_mobile": client_mobile, "start_date": key_start, "revision_num": base_rev},
+                {"_id":0}
+            )
+            if last and _normalize_for_compare(last) == _normalize_for_compare(record):
                 st.info("No changes detected. Not creating a new revision.")
             else:
-                base_rev = _latest_rev_for_key(client_mobile, key_start)
-                new_rev = (base_rev + 1) if base_rev >= 0 else 1
-                record["is_revision"] = True
-                record["revision_of"] = str(loaded_doc.get("_id"))
-                record["revision_num"] = new_rev
-                record["revision_notes"] = "auto: fields changed"
                 col_it.insert_one(record)
-                st.success(f"✅ Saved as revision #{new_rev}.")
-                st.session_state.pop("loaded_doc", None)
+                st.success(f"✅ Saved as revision #{record['revision_num']}.")
         else:
-            base_rev = _latest_rev_for_key(client_mobile, key_start)
-            new_rev = (base_rev + 1) if base_rev >= 0 else 0
-            record["is_revision"] = (new_rev > 0)
-            record["revision_of"] = None
-            record["revision_num"] = new_rev
-            record["revision_notes"] = "initial" if new_rev == 0 else "auto: new version"
             col_it.insert_one(record)
-            st.success(f"✅ Saved (rev {new_rev}).")
+            st.success("✅ Saved (rev 0).")
     except Exception as e:
         st.error(f"Could not save itinerary: {e}")
 
