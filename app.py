@@ -438,7 +438,8 @@ if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
     st.session_state["_rows_store"] = buf
     st.session_state["_rows_start"] = start_ref
 
-# ---- Render editor (NO widget key)
+# ---- Render editor INSIDE A FORM (prevents first-edit loss)
+st.markdown("### Fill line items")
 table_df = _df_from_store(st.session_state["_rows_store"])
 
 col_cfg = {
@@ -455,16 +456,19 @@ col_cfg = {
     "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
 }
 
-st.markdown("### Fill line items")
-edited_df = st.data_editor(
-    table_df,
-    num_rows="fixed",
-    use_container_width=True,
-    column_config=col_cfg,
-    hide_index=True
-)
-# Persist back to store (first edit is kept)
-st.session_state["_rows_store"] = _store_from_df(edited_df.copy())
+with st.form("rows_form", clear_on_submit=False):
+    edited_df = st.data_editor(
+        table_df,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config=col_cfg,
+        hide_index=True
+    )
+    applied = st.form_submit_button("✅ Apply table changes")
+if applied:
+    # Persist only after user submits -> no first-edit loss
+    st.session_state["_rows_store"] = _store_from_df(edited_df.copy())
+    st.success("Table changes applied.")
 
 # ---- Code helpers
 def _code_to_desc(code) -> str:
