@@ -1,7 +1,7 @@
 # pages/01_Dashboard.py
 from __future__ import annotations
 
-import io, csv, os
+import io, csv, os, re
 from datetime import datetime, date, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import Tuple, Optional
@@ -21,8 +21,7 @@ st.set_page_config(page_title="TAK Dashboard", layout="wide")
 st.markdown("## 📊 TAK – Operations Dashboard")
 
 from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")   # change name per page
-
+audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")
 
 # Optional calendar
 CALENDAR_AVAILABLE = True
@@ -69,7 +68,7 @@ def _find_uri() -> Optional[str]:
 
 @st.cache_resource
 def get_client() -> MongoClient:
-    uri = _find_uri() or st.secrets["mongo_uri"]  # will raise if missing
+    uri = _find_uri() or st.secrets["mongo_uri"]
     return MongoClient(
         uri,
         appName="TAK_Dashboard",
@@ -105,8 +104,9 @@ def _to_int(x, default=0) -> int:
 
 def _norm_date(x):
     try:
-        if x is None or pd.isna(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
             return None
+        # Handles datetime, timestamp, ISO string, etc.
         return pd.to_datetime(x).date()
     except Exception:
         return None
@@ -139,27 +139,80 @@ def _fmt_ist(dt: datetime | None) -> str:
 # =========================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_itineraries_df() -> pd.DataFrame:
+    # Pull the essential fields including new schema columns
     docs = list(col_it.find(
         {},
         {
             "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
             "representative": 1, "final_route": 1, "total_pax": 1,
             "upload_date": 1, "start_date": 1, "end_date": 1,
-            "package_cost": 1, "discount": 1
+            # new totals
+            "package_total": 1, "package_after_referral": 1,
+            "actual_total": 1, "profit_total": 1,
+            "referred_by": 1, "referral_discount_pct": 1,
+            # keep legacy if present
+            "package_cost": 1, "discount": 1,
+            # revision metadata
+            "revision_num": 1
         }
     ))
     if not docs:
         return pd.DataFrame()
+
+    # Keep only latest revision per (client_mobile, start_date)
+    # Highest revision_num wins, tie-break by upload_date (latest)
+    # If revision_num missing, treat as 0.
+    # Build a map of best doc per key.
+    best = {}
     for r in docs:
-        r["itinerary_id"] = str(r["_id"])
-        r["upload_date"] = _norm_date(r.get("upload_date"))
-        r["start_date"] = _norm_date(r.get("start_date"))
-        r["end_date"] = _norm_date(r.get("end_date"))
-        r["total_pax"] = _to_int(r.get("total_pax", 0))
-        r["created_utc"] = _created_utc_from_oid(r["itinerary_id"])
-        r["created_ist"] = _fmt_ist(r["created_utc"])
-        r["_id"] = None
-    return pd.DataFrame(docs)
+        key = (str(r.get("client_mobile","")), str(r.get("start_date","")))
+        rev = _to_int(r.get("revision_num", 0))
+        up  = r.get("upload_date")
+        cur = best.get(key)
+        if cur is None:
+            best[key] = (rev, up, r)
+        else:
+            prev_rev, prev_up, prev_doc = cur
+            if rev > prev_rev:
+                best[key] = (rev, up, r)
+            elif rev == prev_rev:
+                # later upload_date wins
+                try:
+                    if pd.to_datetime(up) > pd.to_datetime(prev_up):
+                        best[key] = (rev, up, r)
+                except Exception:
+                    pass
+    docs = [v[2] for v in best.values()]
+
+    out = []
+    for r in docs:
+        rec = dict(r)
+        rec["itinerary_id"] = str(r["_id"])
+        rec["_id"] = None
+
+        rec["upload_date"] = _norm_date(rec.get("upload_date"))
+        rec["start_date"]  = _norm_date(rec.get("start_date"))
+        rec["end_date"]    = _norm_date(rec.get("end_date"))
+        rec["total_pax"]   = _to_int(rec.get("total_pax", 0))
+        rec["created_utc"] = _created_utc_from_oid(rec["itinerary_id"])
+        rec["created_ist"] = _fmt_ist(rec["created_utc"])
+
+        # Back-compat: expose legacy names expected by dashboard code
+        pkg_total = _to_int(rec.get("package_total", rec.get("package_cost", 0)))
+        pkg_after = _to_int(rec.get("package_after_referral", 0))
+        # If package_after_referral missing, compute from referral fields if present
+        if pkg_after == 0 and _to_int(rec.get("referral_discount_pct", 0)) > 0:
+            try:
+                pct = _to_int(rec.get("referral_discount_pct", 0))
+                pkg_after = max(pkg_total - int(round(pkg_total * pct / 100.0)), 0)
+            except Exception:
+                pkg_after = 0
+        # dashboard expects 'package_cost' (base) and 'discount'
+        rec["package_cost"] = pkg_total
+        rec["discount"]     = max(pkg_total - pkg_after, 0)
+
+        out.append(rec)
+    return pd.DataFrame(out)
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_updates_df() -> pd.DataFrame:
@@ -211,7 +264,7 @@ def load_followups_for_ids(iids: list[str]) -> pd.DataFrame:
 # =========================
 df_it = load_itineraries_df()
 if df_it.empty:
-    st.info("No data yet. Upload packages in the main app.")
+    st.info("No data yet. Create packages in the main app.")
     st.stop()
 
 df_up = load_updates_df()
@@ -227,17 +280,15 @@ for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
         df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
 
 # compute final cost efficiently (no row-wise DB hits)
-final_cost = df_all["final_package_cost"].fillna(0).astype(int)
+final_cost = pd.to_numeric(df_all["final_package_cost"], errors="coerce").fillna(0).astype(int)
+
+# If not present in expenses, compute from itinerary base & discount
 fallback_need = final_cost.eq(0)
 if fallback_need.any():
-    base = pd.to_numeric(df_all["base_package_cost"], errors="coerce").fillna(0).astype(int)
+    base = pd.to_numeric(df_all["package_cost"], errors="coerce").fillna(0).astype(int)
     disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
     comp = (base - disc).clip(lower=0)
-    # if still 0, fallback to itinerary package_cost - discount if available
-    it_base = pd.to_numeric(df_all["package_cost"], errors="coerce").fillna(0).astype(int)
-    it_disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
-    comp2 = (it_base - it_disc).clip(lower=0)
-    final_cost = final_cost.mask(final_cost.eq(0), comp).mask(final_cost.eq(0), comp2)
+    final_cost = final_cost.mask(final_cost.eq(0), comp)
 
 df_all["final_cost"] = final_cost.astype(int)
 
@@ -335,7 +386,7 @@ st.dataframe(mix, use_container_width=True, hide_index=True)
 st.divider()
 
 # =========================
-# 📈 Daily trends (Confirmed vs Enquiries) — light
+# 📈 Daily trends (Confirmed vs Enquiries)
 # =========================
 st.subheader("📈 Daily trends (Confirmed vs Enquiries)")
 df_c = df_all.copy()
@@ -357,11 +408,10 @@ st.line_chart(trend.set_index("date"))
 st.divider()
 
 # =========================
-# 💰 Financials — Structured (No interactive chart)
+# 💰 Financials — Structured
 # =========================
 st.subheader("💰 Revenue snapshot (confirmed in range)")
 
-# Only final packages (confirmed) in table — no trail
 conf_in_range = df[df["status"].eq("confirmed")].copy()
 
 # Totals for the selected range
@@ -412,7 +462,7 @@ else:
 st.divider()
 
 # =========================
-# Top routes (bar-lite) & Pax distribution
+# Top routes & Pax distribution
 # =========================
 cA, cB = st.columns(2)
 with cA:
@@ -545,7 +595,7 @@ if sel_id:
 st.divider()
 
 # =========================
-# 📞 Follow-ups by package (uses current filtered df)
+# 📞 Follow-ups by package
 # =========================
 st.subheader("📞 Follow-ups by package")
 iids = df["itinerary_id"].astype(str).unique().tolist()
@@ -599,8 +649,6 @@ st.divider()
 st.subheader("📞 Follow-up activity (range overview)")
 start_dt = datetime.combine(start, dtime.min)
 end_dt   = datetime.combine(end, dtime.max)
-df_fu_range = load_followups_for_ids([])  # init empty
-# light query for the range (not cached, depends on range)
 logs = list(col_fu.find({"created_at": {"$gte": start_dt, "$lte": end_dt}}, {"_id":0}))
 df_fu_range = pd.DataFrame(logs)
 
@@ -673,6 +721,8 @@ st.divider()
 # =========================
 st.subheader("⬇️ Export filtered data")
 def export_filtered_bytes() -> bytes | None:
+    start_dt = datetime.combine(start, dtime.min)
+    end_dt   = datetime.combine(end, dtime.max)
     fu_rng = list(col_fu.find({"created_at": {"$gte": start_dt, "$lte": end_dt}}, {"_id":0}))
     df_fu_rng = pd.DataFrame(fu_rng)
     iids = df["itinerary_id"].astype(str).unique().tolist()
