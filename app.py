@@ -266,7 +266,7 @@ if picked_client_mobile:
                 "mobile": loaded_doc.get("client_mobile",""),
                 "start":  str(loaded_doc.get("start_date","")),
             }
-            # ---- Set widget state
+            # ---- Seed top fields
             st.session_state["k_client_name"] = loaded_doc.get("client_name","")
             st.session_state["k_mobile"]      = loaded_doc.get("client_mobile","")
             st.session_state["k_rep"]         = loaded_doc.get("representative","-- Select --")
@@ -285,10 +285,10 @@ if picked_client_mobile:
             st.session_state["k_bhas_pax"]  = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
             st.session_state["k_bhas_pkg"]  = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
             st.session_state["k_bhas_act"]  = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
-            # rows
-            st.session_state["prefill_rows_raw"] = loaded_doc.get("rows",[])
-            st.session_state["_force_days_from_rows"] = len(st.session_state["prefill_rows_raw"]) or n_rows
-            if "form_rows" in st.session_state: st.session_state.pop("form_rows")
+            # rows → prime the store buffer
+            st.session_state["_rows_store"] = loaded_doc.get("rows",[])
+            st.session_state["_rows_days"]  = len(st.session_state["_rows_store"])
+            st.session_state["_rows_start"] = st.session_state["k_start"]
             st.success("Previous package loaded below. Make edits and click **Update itinerary & save** to create a new revision.")
             st.rerun()
 
@@ -364,105 +364,87 @@ with bhc4:
 with bhc5:
     bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
-# ===== Legacy rows normalization =====
-LEGACY_MAP = {
-    "package-car cost": "Pkg-Car Cost",
-    "package car cost": "Pkg-Car Cost",
-    "package–car cost": "Pkg-Car Cost",
-    "package-hotel cost": "Pkg-Hotel Cost",
-    "package hotel cost": "Pkg-Hotel Cost",
-    "package–hotel cost": "Pkg-Hotel Cost",
-    "actual-car cost": "Act-Car Cost",
-    "actual car cost": "Act-Car Cost",
-    "actual–car cost": "Act-Car Cost",
-    "actual-hotel cost": "Act-Hotel Cost",
-    "actual hotel cost": "Act-Hotel Cost",
-    "actual–hotel cost": "Act-Hotel Cost",
-}
+# ===== Table storage buffer (prevents first-edit vanish) =====
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
-def _normalize_row_columns(rows: list[dict]) -> list[dict]:
-    out = []
-    for r in rows or []:
-        nr = {}
-        for k, v in dict(r).items():
-            key_norm = LEGACY_MAP.get(str(k).strip().lower(), None)
-            nr[key_norm if key_norm else k] = v
-        out.append(nr)
-    return out
+def _blank_rows(n_rows: int, start: datetime.date) -> list[dict]:
+    return [{
+        "Date": (start + datetime.timedelta(days=i)).strftime("%Y-%m-%d"),
+        "Time": "",
+        "Code": "",
+        "Car Type": "",
+        "Hotel Type": "",
+        "Stay City": "",
+        "Room Type": "",
+        "Pkg-Car Cost": 0.0,
+        "Pkg-Hotel Cost": 0.0,
+        "Act-Car Cost": 0.0,
+        "Act-Hotel Cost": 0.0,
+    } for i in range(n_rows)]
 
-def _blank_df(n_rows: int, start: datetime.date) -> pd.DataFrame:
-    return pd.DataFrame({
-        "Date": [start + datetime.timedelta(days=i) for i in range(n_rows)],
-        "Time": ["" for _ in range(n_rows)],
-        "Code": ["" for _ in range(n_rows)],
-        "Car Type": ["" for _ in range(n_rows)],
-        "Hotel Type": ["" for _ in range(n_rows)],
-        "Stay City": ["" for _ in range(n_rows)],
-        "Room Type": ["" for _ in range(n_rows)],
-        "Pkg-Car Cost": [0.0 for _ in range(n_rows)],
-        "Pkg-Hotel Cost": [0.0 for _ in range(n_rows)],
-        "Act-Car Cost": [0.0 for _ in range(n_rows)],
-        "Act-Hotel Cost": [0.0 for _ in range(n_rows)],
-    })
-
-def _prefill_rows(raw_rows: list, n_rows: int, start: datetime.date) -> pd.DataFrame:
-    rows = _normalize_row_columns(raw_rows)
-    if not rows:
-        return _blank_df(n_rows, start)
-    df = pd.DataFrame(rows)
+def _df_from_store(store: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(store or [])
     for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0 if "Cost" in c else ""
+    # normalize dtypes
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    try:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-    except Exception:
-        df["Date"] = df["Date"].astype(str)
-    if len(df) != n_rows:
-        st.session_state["_force_days_from_rows"] = len(df)
-        n_rows = len(df)
-    if len(df) < n_rows:
-        add = _blank_df(n_rows - len(df), start + datetime.timedelta(days=len(df)))
-        df = pd.concat([df, add], ignore_index=True)
-    df = df.reset_index(drop=True)
-    df["Date"] = [start + datetime.timedelta(days=i) for i in range(len(df))]
+    # enforce order
     return df[TARGET_COLS]
 
-def _ensure_rows(days: int, start: datetime.date) -> int:
-    """Ensure st.session_state.form_rows exists with the right length & dates."""
-    days_eff = days
-    if "_force_days_from_rows" in st.session_state:
-        days_eff = int(st.session_state.pop("_force_days_from_rows") or days)
+def _store_from_df(df: pd.DataFrame) -> list[dict]:
+    out = []
+    for _, r in df.iterrows():
+        row = {k: r.get(k, "") for k in TARGET_COLS}
+        # serialize date
+        try:
+            row["Date"] = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
+        except Exception:
+            row["Date"] = str(row["Date"])
+        # ensure primitives
+        for k in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
+            try:
+                row[k] = float(row.get(k, 0) or 0)
+            except Exception:
+                row[k] = 0.0
+        out.append(row)
+    return out
 
-    if "form_rows" not in st.session_state:
-        raw = st.session_state.get("prefill_rows_raw") or []
-        if raw:
-            st.session_state.form_rows = _prefill_rows(raw, days_eff, start)
-        else:
-            st.session_state.form_rows = _blank_df(days_eff, start)
-        st.session_state._days = len(st.session_state.form_rows)
-    else:
-        df = st.session_state.form_rows
-        prev = st.session_state.get("_days", len(df))
-        if days_eff > prev:
-            add = _blank_df(days_eff - prev, start + datetime.timedelta(days=prev))
-            st.session_state.form_rows = pd.concat([df, add], ignore_index=True)
-        elif days_eff < prev:
-            st.session_state.form_rows = df.iloc[:days_eff].reset_index(drop=True)
-        st.session_state._days = len(st.session_state.form_rows)
+# initialize store if missing
+if "_rows_store" not in st.session_state:
+    st.session_state["_rows_store"] = _blank_rows(int(st.session_state.get("k_days", 2)), st.session_state.get("k_start", datetime.date.today()))
+    st.session_state["_rows_days"]  = int(st.session_state.get("k_days", 2))
+    st.session_state["_rows_start"] = st.session_state.get("k_start", datetime.date.today())
 
-    st.session_state.form_rows.loc[:, "Date"] = [
-        start + datetime.timedelta(days=i)
-        for i in range(st.session_state.form_rows.shape[0])
-    ]
-    return days_eff
+# adjust on day-count change (add/remove only; never erase edited cells)
+if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_days", 2)):
+    old = st.session_state["_rows_store"]
+    old_n = len(old)
+    new_n = int(st.session_state["k_days"])
+    start_ref = st.session_state.get("k_start", datetime.date.today())
+    if new_n > old_n:
+        old += _blank_rows(new_n - old_n, start_ref + datetime.timedelta(days=old_n))
+    elif new_n < old_n:
+        old = old[:new_n]
+    # refresh Date sequence
+    for i in range(len(old)):
+        old[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+    st.session_state["_rows_store"] = old
+    st.session_state["_rows_days"]  = new_n
 
-_ensure_rows(days, start_date)
+# adjust Dates if start date changed
+if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
+    start_ref = st.session_state["k_start"]
+    buf = st.session_state["_rows_store"]
+    for i in range(len(buf)):
+        buf[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+    st.session_state["_rows_store"] = buf
+    st.session_state["_rows_start"] = start_ref
 
-EDITABLE_COLS = ["Time","Code","Car Type","Hotel Type","Stay City","Room Type","Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
+# ---- Editor
+table_df = _df_from_store(st.session_state["_rows_store"])
 col_cfg = {
     "Date": st.column_config.DateColumn("Date", disabled=True),
     "Time": st.column_config.SelectboxColumn("Time", options=time_options),
@@ -478,18 +460,17 @@ col_cfg = {
 }
 st.markdown("### Fill line items")
 edited_df = st.data_editor(
-    st.session_state.form_rows,
+    table_df,
     num_rows="fixed",
     use_container_width=True,
     column_config=col_cfg,
     hide_index=True,
     key="editor_main"
 )
-# <<< IMPORTANT: write the edit back immediately (prevents first-edit "vanish")
-st.session_state.form_rows = edited_df.copy()
-base = st.session_state.form_rows
+# Persist immediately to buffer (prevents first-edit vanish)
+st.session_state["_rows_store"] = _store_from_df(edited_df)
 
-# ---- Code helpers
+# ---- Helpers for codes
 def _code_to_desc(code) -> str:
     if code is None: return "No code provided"
     s = str(code).strip()
@@ -511,10 +492,11 @@ def _code_to_route(code) -> str | None:
         return None
 
 # ---- Totals
-pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
-pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
-act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
-act_hotel = pd.to_numeric(base.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+df_calc = _df_from_store(st.session_state["_rows_store"])
+pkg_car   = pd.to_numeric(df_calc.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
+pkg_hotel = pd.to_numeric(df_calc.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+act_car   = pd.to_numeric(df_calc.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
+act_hotel = pd.to_numeric(df_calc.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
 
 bhas_required = st.session_state.get("k_bhas_req", "No")
 bhas_type     = st.session_state.get("k_bhas_type", "V-BH")
@@ -548,25 +530,26 @@ totals_html = (
 )
 st.markdown(totals_html, unsafe_allow_html=True)
 
-# ---- Build itinerary text (preview)
+# ---- Build itinerary text (preview only; DB writes happen on buttons)
 start_date = st.session_state.get("k_start", datetime.date.today())
-base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(base.shape[0])]
-dates_series   = pd.to_datetime(base["Date"], errors="coerce")
-start_date_calc = dates_series.min().date()
-end_date_calc   = dates_series.max().date()
-total_days_calc = base.shape[0]
+dates_list = [start_date + datetime.timedelta(days=i) for i in range(len(df_calc))]
+df_calc["Date"] = [d.strftime("%Y-%m-%d") for d in dates_list]
+dates_series   = pd.to_datetime(df_calc["Date"], errors="coerce")
+start_date_calc = dates_series.min().date() if not dates_series.isna().all() else start_date
+end_date_calc   = dates_series.max().date() if not dates_series.isna().all() else start_date
+total_days_calc = len(df_calc)
 total_pax       = int(st.session_state.get("k_total_pax", 2) or 2)
 
 route_parts = []
-for r in base["Code"]:
+for r in df_calc["Code"]:
     rt = _code_to_route(r)
     if rt: route_parts.append(rt)
 route_raw  = "-".join(route_parts).replace(" -","-").replace("- ","-")
 route_list = [x for x in route_raw.split("-") if x]
 final_route = "-".join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i-1]])
 
-car_types   = "-".join(pd.Series(base.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
-hotel_types = "-".join(pd.Series(base.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
+car_types   = "-".join(pd.Series(df_calc.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
+hotel_types = "-".join(pd.Series(df_calc.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
 
 bhas_desc_str = ""
 if bhas_required == "Yes":
@@ -580,7 +563,7 @@ greet = f"Greetings from TravelAajkal,\n\n*Client Name: {st.session_state.get('k
 plan  = f"*Plan:- {total_days_calc}Days and {max(total_days_calc - 1, 0)}{night_txt} {final_route} for {total_pax} {person_txt}*"
 
 grouped = {}
-for _, it in base.iterrows():
+for _, it in df_calc.iterrows():
     dstr = pd.to_datetime(it["Date"]).strftime("%d-%b-%Y") if pd.notna(it["Date"]) and str(it["Date"]) else "N/A"
     tp = f"{str(it.get('Time','')).strip()}: " if str(it.get('Time','')).strip() else ""
     grouped.setdefault(dstr, []).append(f"{tp}{_code_to_desc(it.get('Code',''))}")
@@ -641,14 +624,8 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
 
 final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
-# ================= Serialize rows for Mongo (no datetime objects)
-rows_serialized = base.copy()
-if "Date" in rows_serialized.columns:
-    try:
-        rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        rows_serialized["Date"] = rows_serialized["Date"].fillna("")
-    except Exception:
-        rows_serialized["Date"] = rows_serialized["Date"].astype(str)
+# ================= Serialize rows for Mongo
+rows_serialized = st.session_state["_rows_store"]  # already primitives & iso dates
 
 # ================= Helpers for saving =================
 def _latest_rev_for_key(mobile: str, start_str: str) -> int:
@@ -660,14 +637,6 @@ def _latest_rev_for_key(mobile: str, start_str: str) -> int:
         return mx
     except Exception:
         return -1
-
-def _normalize_for_compare(d: dict) -> dict:
-    drop = {"_id","upload_date","package_after_referral","profit_total","revision_num","revision_of",
-            "is_revision","revision_notes","referred_by","referral_discount_pct"}
-    out = {k:v for k,v in d.items() if k not in drop}
-    try: out["rows"] = json.dumps(d.get("rows",[]), sort_keys=True)
-    except Exception: pass
-    return out
 
 def _common_record_dict():
     client_mobile = "".join(ch for ch in st.session_state.get("k_mobile","") if ch.isdigit())
@@ -682,7 +651,7 @@ def _common_record_dict():
         "upload_date": datetime.datetime.utcnow(),
         "start_date": str(start_date),
         "end_date": str(end_date_calc),
-        "total_days": int(base.shape[0]),
+        "total_days": int(len(rows_serialized)),
         "total_pax": int(st.session_state.get("k_total_pax", 2) or 2),
         "final_route": final_route,
         "car_types": car_types,
@@ -703,14 +672,14 @@ def _common_record_dict():
         "referred_by": referred_sel if has_ref else None,
         "referral_discount_pct": discount_pct,
         # rows + legacy
-        "rows": rows_serialized.to_dict(orient="records"),
+        "rows": rows_serialized,
         "package_cost": int(total_package),
         "bhasmarathi_types": bhas_desc_str,
         # text
         "itinerary_text": final_output
     }
 
-# ================= Action buttons =================
+# ================= Action buttons (DB writes only here) =================
 st.markdown("### 2) Preview & Save")
 c1, c2 = st.columns(2)
 with c1:
@@ -725,30 +694,39 @@ with c2:
     )
 
 btn_col1, btn_col2, btn_col3 = st.columns([1.2,1.6,1])
-editing_ctx = st.session_state.get("editing_ctx")  # if set => we loaded an existing package
+editing_ctx = st.session_state.get("editing_ctx")  # if set => loaded existing package
 
 with btn_col1:
     if st.button("🗑️ Clear & start new", use_container_width=True):
         for k in list(st.session_state.keys()):
-            if k.startswith("k_") or k in ("form_rows","prefill_rows_raw","_force_days_from_rows","editing_ctx"):
+            if k.startswith("k_") or k in ("_rows_store","_rows_days","_rows_start","editing_ctx","editor_main"):
                 st.session_state.pop(k, None)
         st.rerun()
 
+def _validate_before_save() -> tuple[bool, str]:
+    name_ok = bool(st.session_state.get("k_client_name","").strip())
+    mob_raw  = st.session_state.get("k_mobile","")
+    rep_ok  = st.session_state.get("k_rep","-- Select --") != "-- Select --"
+    if not name_ok:
+        return False, "Please fill **Client Name**."
+    if not is_valid_mobile(mob_raw):
+        return False, "Please enter a valid **10-digit Mobile**."
+    if not rep_ok:
+        return False, "Please select **Representative**."
+    return True, ""
+
 with btn_col2:
     if editing_ctx:
-        # UPDATE flow (create next revision)
+        # UPDATE flow
         if st.button("✅ Update itinerary & save (new revision)", use_container_width=True):
-            # Validate only on save
-            name_ok = bool(st.session_state.get("k_client_name","").strip())
-            mob_raw  = st.session_state.get("k_mobile","")
-            rep_ok  = st.session_state.get("k_rep","-- Select --") != "-- Select --"
-            if not (name_ok and is_valid_mobile(mob_raw) and rep_ok):
-                st.error("Please fill Client Name, a valid 10-digit Mobile, and Representative before saving.")
+            ok, msg = _validate_before_save()
+            if not ok:
+                st.error(msg)
             else:
-                client_mobile = "".join(ch for ch in mob_raw if ch.isdigit())
+                client_mobile = "".join(ch for ch in st.session_state.get("k_mobile","") if ch.isdigit())
                 base_rev = _latest_rev_for_key(client_mobile, str(start_date))
                 record = _common_record_dict()
-                next_rev = base_rev + 1 if base_rev >= 1 else 2  # ensure revisions after initial rev1
+                next_rev = base_rev + 1 if base_rev >= 1 else 2
                 record["revision_num"] = next_rev
                 record["is_revision"] = True
                 record["revision_notes"] = f"auto: revision {next_rev}"
@@ -758,24 +736,20 @@ with btn_col2:
                 except Exception as e:
                     st.error(f"Could not save update: {e}")
     else:
-        # NEW flow (first official save for this key)
+        # NEW flow (first official save)
         if st.button("🟢 Generate itinerary & save (rev 1)", use_container_width=True):
-            name_ok = bool(st.session_state.get("k_client_name","").strip())
-            mob_raw  = st.session_state.get("k_mobile","")
-            rep_ok  = st.session_state.get("k_rep","-- Select --") != "-- Select --"
-            if not (name_ok and is_valid_mobile(mob_raw) and rep_ok):
-                st.error("Please fill Client Name, a valid 10-digit Mobile, and Representative before saving.")
+            ok, msg = _validate_before_save()
+            if not ok:
+                st.error(msg)
             else:
-                client_mobile = "".join(ch for ch in mob_raw if ch.isdigit())
+                client_mobile = "".join(ch for ch in st.session_state.get("k_mobile","") if ch.isdigit())
                 base_rev = _latest_rev_for_key(client_mobile, str(start_date))
                 record = _common_record_dict()
                 if base_rev <= 0:
-                    # brand-new: start at rev1
                     record["revision_num"] = 1
                     record["is_revision"] = False
                     record["revision_notes"] = "initial"
                 else:
-                    # already exists for same key → still respect next revision
                     record["revision_num"] = base_rev + 1
                     record["is_revision"] = True
                     record["revision_notes"] = f"auto: revision {base_rev+1}"
