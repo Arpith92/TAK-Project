@@ -205,14 +205,14 @@ def _client_suggestions(prefix: str) -> list[str]:
     try:
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
-            {"$match": {"$or":[
-                {"client_name":{"$regex":rx,"$options":"i"}},
-                {"client_mobile":{"$regex":rx}}
-            ]}}},
-            {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
-            {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
-            {"$limit":50}
-        ])
+    {"$match": {"$or":[
+        {"client_name":{"$regex":rx,"$options":"i"}},
+        {"client_mobile":{"$regex":rx}}
+    ]}}},
+    {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
+    {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
+    {"$limit":50}
+])
         res = []
         for x in cur:
             n = (x.get("name") or "").strip()
