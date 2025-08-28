@@ -14,7 +14,7 @@ except Exception:
     import streamlit as st  # ensure st is available
 
 # ----------------- Imports -----------------
-import io, math, datetime, os, re, copy, json
+import io, math, datetime, os, re, json
 from collections.abc import Mapping
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -175,13 +175,11 @@ if not user: st.stop()
 # =========================================================
 st.markdown("### 🔎 Retrieve old package")
 
-# Suggestions as you type (prefix on name or mobile)
 q = st.text_input("Type client name or mobile", placeholder="e.g., Gaurav or 9576226271", key="search_q")
 
 def _client_suggestions(prefix: str) -> list[str]:
     if not prefix: return []
     try:
-        # prefix match (case-insensitive on name; raw on mobile)
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
             {"$match": {"$or":[
@@ -210,7 +208,6 @@ if sel_client != "--":
     if len(parts)==2:
         picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
     else:
-        # If only one side present, probe DB to resolve
         if parts and parts[0].isdigit():
             picked_client_mobile = parts[0]
             doc1 = col_it.find_one({"client_mobile": picked_client_mobile}, {"client_name":1})
@@ -220,13 +217,12 @@ if sel_client != "--":
             doc1 = col_it.find_one({"client_name": {"$regex": f"^{re.escape(picked_client_name)}$", "$options":"i"}}, {"client_mobile":1})
             picked_client_mobile = (doc1 or {}).get("client_mobile","")
 
-# If a client is chosen, show all start_date+revision options for that client
 loaded_doc = None
 if picked_client_mobile:
     try:
         docs = list(col_it.find(
             {"client_mobile": picked_client_mobile},
-            {"itinerary_text":0}
+            {"itinerary_text":0}  # keep rows!
         ).sort([("start_date", -1), ("revision_num",-1), ("upload_date",-1)]))
     except Exception:
         docs = []
@@ -236,7 +232,6 @@ if picked_client_mobile:
         if st.button("Load this package", use_container_width=False):
             loaded_doc = docs[pick_idx]
             st.session_state["loaded_doc"] = loaded_doc
-            # Prefill payload for form
             st.session_state["prefill"] = {
                 "client_name": loaded_doc.get("client_name",""),
                 "client_mobile_raw": loaded_doc.get("client_mobile",""),
@@ -251,18 +246,17 @@ if picked_client_mobile:
                 "bhas_persons": int(loaded_doc.get("bhasmarathi_persons",0) or 0),
                 "bhas_unit_pkg": int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0),
                 "bhas_unit_actual": int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0),
-                # rows
+                # rows (raw)
                 "rows": loaded_doc.get("rows",[])
             }
             st.success("Previous package loaded below. You can make changes; saving will create a new revision.")
-            st.rerun()  # <— fix: use st.rerun(), not experimental_rerun
+            st.rerun()
 
 # ============================
 #        FORM UI
 # ============================
 
 st.markdown("### 1) Provide Input")
-
 pf = st.session_state.get("prefill", {}) if "prefill" in st.session_state else {}
 
 c0, c1, c2, c3 = st.columns([1.6, 1, 1, 1])
@@ -324,6 +318,37 @@ with bhc4:
 with bhc5:
     bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, value=pf.get("bhas_unit_actual",0), step=100, disabled=(bhas_required=="No"))
 
+# ===== Legacy rows normalization =====
+LEGACY_MAP = {
+    # common dash/space variants -> normalized
+    "package-car cost": "Pkg-Car Cost",
+    "package car cost": "Pkg-Car Cost",
+    "package–car cost": "Pkg-Car Cost",
+    "package-hotel cost": "Pkg-Hotel Cost",
+    "package hotel cost": "Pkg-Hotel Cost",
+    "package–hotel cost": "Pkg-Hotel Cost",
+    "actual-car cost": "Act-Car Cost",
+    "actual car cost": "Act-Car Cost",
+    "actual–car cost": "Act-Car Cost",
+    "actual-hotel cost": "Act-Hotel Cost",
+    "actual hotel cost": "Act-Hotel Cost",
+    "actual–hotel cost": "Act-Hotel Cost",
+}
+
+TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
+               "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
+
+def _normalize_row_columns(rows: list[dict]) -> list[dict]:
+    """Map legacy keys to current keys for each row dict."""
+    out = []
+    for r in rows or []:
+        nr = {}
+        for k, v in dict(r).items():
+            key_norm = LEGACY_MAP.get(str(k).strip().lower(), None)
+            nr[key_norm if key_norm else k] = v
+        out.append(nr)
+    return out
+
 # ===== Stable rows (prefill if loaded) =====
 def _blank_df(n_rows: int, start: datetime.date) -> pd.DataFrame:
     return pd.DataFrame({
@@ -340,44 +365,67 @@ def _blank_df(n_rows: int, start: datetime.date) -> pd.DataFrame:
         "Act-Hotel Cost": [0.0 for _ in range(n_rows)],
     })
 
-def _prefill_rows(rows: list, n_rows: int, start: datetime.date) -> pd.DataFrame:
-    if not rows: return _blank_df(n_rows, start)
+def _prefill_rows(raw_rows: list, n_rows: int, start: datetime.date) -> pd.DataFrame:
+    rows = _normalize_row_columns(raw_rows)
+    if not rows:
+        return _blank_df(n_rows, start)
+
     df = pd.DataFrame(rows)
-    need = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type","Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
-    for c in need:
+
+    # Ensure all target columns exist
+    for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0 if "Cost" in c else ""
+
+    # Coerce types
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    if "Date" in df.columns:
-        try: df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-        except Exception: pass
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    # Dates
+    try:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    except Exception:
+        df["Date"] = df["Date"].astype(str)
+
+    # If stored rows count differs from n_rows, expand/truncate to n_rows but
+    # NEVER drop real content: we only truncate if rows > n_rows AND we also
+    # increase the external 'days' to match so user sees all content.
+    if len(df) != n_rows:
+        st.session_state["_force_days_from_rows"] = len(df)
+        n_rows = len(df)
+
+    # Fill missing rows if any (unlikely)
     if len(df) < n_rows:
         add = _blank_df(n_rows - len(df), start + datetime.timedelta(days=len(df)))
         df = pd.concat([df, add], ignore_index=True)
-    elif len(df) > n_rows:
-        df = df.iloc[:n_rows].reset_index(drop=True)
-    df["Date"] = [start + datetime.timedelta(days=i) for i in range(n_rows)]
-    return df
+
+    # Re-calc Date column sequentially from chosen start
+    df = df.reset_index(drop=True)
+    df["Date"] = [start + datetime.timedelta(days=i) for i in range(len(df))]
+    return df[TARGET_COLS]
 
 def _ensure_rows(days: int, start: datetime.date):
+    # If we loaded rows with different length, override days once
+    if "_force_days_from_rows" in st.session_state:
+        days = int(st.session_state.pop("_force_days_from_rows") or days)
+
     if "form_rows" not in st.session_state:
         if pf.get("rows"):
             st.session_state.form_rows = _prefill_rows(pf["rows"], days, start)
         else:
             st.session_state.form_rows = _blank_df(days, start)
-        st.session_state._days = days
+        st.session_state._days = len(st.session_state.form_rows)
     else:
         df = st.session_state.form_rows
         prev = st.session_state.get("_days", len(df))
         if days > prev:
             add = _blank_df(days - prev, start + datetime.timedelta(days=prev))
             st.session_state.form_rows = pd.concat([df, add], ignore_index=True)
-            st.session_state._days = days
         elif days < prev:
             st.session_state.form_rows = df.iloc[:days].reset_index(drop=True)
-            st.session_state._days = days
-    st.session_state.form_rows.loc[:, "Date"] = [start + datetime.timedelta(days=i) for i in range(days)]
+        st.session_state._days = len(st.session_state.form_rows)
+
+    st.session_state.form_rows.loc[:, "Date"] = [start + datetime.timedelta(days=i) for i in range(st.session_state.form_rows.shape[0])]
 
 _ensure_rows(days, start_date)
 
@@ -461,11 +509,11 @@ totals_html = (
 st.markdown(totals_html, unsafe_allow_html=True)
 
 # ---- Build itinerary text
-base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(days)]
+base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(base.shape[0])]
 dates_series   = pd.to_datetime(base["Date"], errors="coerce")
 start_date_calc = dates_series.min().date()
 end_date_calc   = dates_series.max().date()
-total_days_calc = (pd.to_datetime(end_date_calc) - pd.to_datetime(start_date_calc)).days + 1
+total_days_calc = base.shape[0]
 total_nights    = max(total_days_calc - 1, 0)
 
 items = [{"Date": r["Date"], "Time": r.get("Time",""), "Code": r.get("Code","")} for _, r in base.iterrows()]
@@ -509,7 +557,7 @@ if has_ref:
     itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
 itinerary_text += f"{details_line}"
 
-# Boilerplate (trimmed)
+# Boilerplate
 exclusions = "*Exclusions:-*\n" + "\n".join([
     "1. Any meals/beverages not specified.",
     "2. Entry fees unless included.",
@@ -576,19 +624,14 @@ def _latest_rev_for_key(mobile: str, start_str: str) -> int:
         return -1
 
 def _normalize_for_compare(d: dict) -> dict:
-    """Remove volatile fields and sort rows for stable compare."""
     drop = {"_id","upload_date","package_after_referral","profit_total","revision_num","revision_of",
             "is_revision","revision_notes","referred_by","referral_discount_pct"}
     out = {k:v for k,v in d.items() if k not in drop}
-    # rows as json string for stable compare
-    try:
-        out["rows"] = json.dumps(d.get("rows",[]), sort_keys=True)
-    except Exception:
-        pass
+    try: out["rows"] = json.dumps(d.get("rows",[]), sort_keys=True)
+    except Exception: pass
     return out
 
-# Build record payload
-key_start = str(start_date_calc)
+key_start = str(start_date)
 record = {
     "client_name": client_name,
     "client_mobile": client_mobile,
@@ -596,7 +639,7 @@ record = {
     "upload_date": datetime.datetime.utcnow(),
     "start_date": key_start,
     "end_date": str(end_date_calc),
-    "total_days": int(total_days_calc),
+    "total_days": int(base.shape[0]),
     "total_pax": int(total_pax),
     "final_route": final_route,
     "car_types": car_types,
@@ -624,11 +667,9 @@ record = {
     "itinerary_text": final_output
 }
 
-# Save button
 if st.button("💾 Save / Create revision", use_container_width=False):
     try:
         if loaded_doc:
-            # Compare to avoid empty revision
             if _normalize_for_compare(loaded_doc) == _normalize_for_compare(record):
                 st.info("No changes detected. Not creating a new revision.")
             else:
@@ -642,7 +683,6 @@ if st.button("💾 Save / Create revision", use_container_width=False):
                 st.success(f"✅ Saved as revision #{new_rev}.")
                 st.session_state.pop("loaded_doc", None)
         else:
-            # first creation or manual edit without loading – still revisioned
             base_rev = _latest_rev_for_key(client_mobile, key_start)
             new_rev = (base_rev + 1) if base_rev >= 0 else 0
             record["is_revision"] = (new_rev > 0)
@@ -663,7 +703,7 @@ with c2:
     st.download_button(
         label="⬇️ Download itinerary as .txt",
         data=final_output,
-        file_name=f"itinerary_{client_name}_{start_date_calc}.txt",
+        file_name=f"itinerary_{client_name}_{start_date}.txt",
         mime="text/plain",
         use_container_width=True
     )
