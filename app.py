@@ -261,7 +261,6 @@ if picked_client_mobile:
         pick_idx = st.selectbox("Pick a start date & revision", list(range(len(labels))), format_func=lambda i: labels[i] if docs else "", key="rev_pick")
         if st.button("📦 Load this package", use_container_width=False, key="btn_load_pkg"):
             loaded_doc = docs[pick_idx]
-            # mark editing context
             st.session_state["editing_ctx"] = {
                 "mobile": loaded_doc.get("client_mobile",""),
                 "start":  str(loaded_doc.get("start_date","")),
@@ -285,11 +284,12 @@ if picked_client_mobile:
             st.session_state["k_bhas_pax"]  = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
             st.session_state["k_bhas_pkg"]  = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
             st.session_state["k_bhas_act"]  = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
-            # rows → prime the store buffer
+            # rows buffer + bind to editor state
             st.session_state["_rows_store"] = loaded_doc.get("rows",[])
             st.session_state["_rows_days"]  = len(st.session_state["_rows_store"])
             st.session_state["_rows_start"] = st.session_state["k_start"]
-            st.success("Previous package loaded below. Make edits and click **Update itinerary & save** to create a new revision.")
+            st.session_state["editor_main"] = pd.DataFrame(st.session_state["_rows_store"])
+            st.success("Previous package loaded below. Make edits and click **Update itinerary & save** for a new revision.")
             st.rerun()
 
 # ============================
@@ -364,7 +364,7 @@ with bhc4:
 with bhc5:
     bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
-# ===== Table storage buffer (prevents first-edit vanish) =====
+# ===== Table storage & binding (fixes first-edit vanish) =====
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
@@ -388,22 +388,18 @@ def _df_from_store(store: list[dict]) -> pd.DataFrame:
     for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0 if "Cost" in c else ""
-    # normalize dtypes
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    # enforce order
     return df[TARGET_COLS]
 
 def _store_from_df(df: pd.DataFrame) -> list[dict]:
     out = []
     for _, r in df.iterrows():
         row = {k: r.get(k, "") for k in TARGET_COLS}
-        # serialize date
         try:
             row["Date"] = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
         except Exception:
             row["Date"] = str(row["Date"])
-        # ensure primitives
         for k in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
             try:
                 row[k] = float(row.get(k, 0) or 0)
@@ -412,13 +408,13 @@ def _store_from_df(df: pd.DataFrame) -> list[dict]:
         out.append(row)
     return out
 
-# initialize store if missing
+# Initialize row store once
 if "_rows_store" not in st.session_state:
     st.session_state["_rows_store"] = _blank_rows(int(st.session_state.get("k_days", 2)), st.session_state.get("k_start", datetime.date.today()))
     st.session_state["_rows_days"]  = int(st.session_state.get("k_days", 2))
     st.session_state["_rows_start"] = st.session_state.get("k_start", datetime.date.today())
 
-# adjust on day-count change (add/remove only; never erase edited cells)
+# On day-count change, adjust store (add/remove rows), but DO NOT touch existing cells
 if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_days", 2)):
     old = st.session_state["_rows_store"]
     old_n = len(old)
@@ -428,13 +424,14 @@ if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_day
         old += _blank_rows(new_n - old_n, start_ref + datetime.timedelta(days=old_n))
     elif new_n < old_n:
         old = old[:new_n]
-    # refresh Date sequence
     for i in range(len(old)):
         old[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
     st.session_state["_rows_store"] = old
     st.session_state["_rows_days"]  = new_n
+    # ensure editor reflects new length immediately
+    st.session_state["editor_main"] = _df_from_store(old)
 
-# adjust Dates if start date changed
+# If start date changed, shift the dates only (keep rest)
 if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
     start_ref = st.session_state["k_start"]
     buf = st.session_state["_rows_store"]
@@ -442,9 +439,14 @@ if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
         buf[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
     st.session_state["_rows_store"] = buf
     st.session_state["_rows_start"] = start_ref
+    st.session_state["editor_main"] = _df_from_store(buf)
 
-# ---- Editor
-table_df = _df_from_store(st.session_state["_rows_store"])
+# Seed editor_main once (critical to avoid first-edit vanish)
+if "editor_main" not in st.session_state:
+    st.session_state["editor_main"] = _df_from_store(st.session_state["_rows_store"])
+
+table_df = st.session_state["editor_main"]
+
 col_cfg = {
     "Date": st.column_config.DateColumn("Date", disabled=True),
     "Time": st.column_config.SelectboxColumn("Time", options=time_options),
@@ -458,8 +460,10 @@ col_cfg = {
     "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
     "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
 }
+
 st.markdown("### Fill line items")
-edited_df = st.data_editor(
+# IMPORTANT: bind editor directly to session-state key; do NOT capture return value
+st.data_editor(
     table_df,
     num_rows="fixed",
     use_container_width=True,
@@ -467,8 +471,8 @@ edited_df = st.data_editor(
     hide_index=True,
     key="editor_main"
 )
-# Persist immediately to buffer (prevents first-edit vanish)
-st.session_state["_rows_store"] = _store_from_df(edited_df)
+# Persist to buffer from the bound state (works on first edit)
+st.session_state["_rows_store"] = _store_from_df(st.session_state["editor_main"])
 
 # ---- Helpers for codes
 def _code_to_desc(code) -> str:
@@ -513,9 +517,8 @@ total_package = ceil_to_999(package_cost_rows + bhas_pkg_total)
 total_actual  = actual_cost_rows + bhas_actual_total
 profit_total  = int(total_package - total_actual)
 
-referred_sel = st.session_state.get("k_ref_sel", "-- None --")
-has_ref = referred_sel != "-- None --"
-after_ref     = int(round(total_package * 0.9)) if has_ref else total_package
+has_ref = (st.session_state.get("k_ref_sel","-- None --") != "-- None --")
+after_ref = int(round(total_package * 0.9)) if has_ref else total_package
 
 badge_color = "#16a34a" if profit_total >= 4000 else "#dc2626"
 hint = "" if profit_total >= 4000 else " • Keep profit margin ≥ ₹4,000"
@@ -625,7 +628,7 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
 final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
 # ================= Serialize rows for Mongo
-rows_serialized = st.session_state["_rows_store"]  # already primitives & iso dates
+rows_serialized = st.session_state["_rows_store"]  # primitives & iso dates
 
 # ================= Helpers for saving =================
 def _latest_rev_for_key(mobile: str, start_str: str) -> int:
@@ -679,6 +682,18 @@ def _common_record_dict():
         "itinerary_text": final_output
     }
 
+def _validate_before_save() -> tuple[bool, str]:
+    name_ok = bool(st.session_state.get("k_client_name","").strip())
+    mob_raw  = st.session_state.get("k_mobile","")
+    rep_ok  = st.session_state.get("k_rep","-- Select --") != "-- Select --"
+    if not name_ok:
+        return False, "Please fill **Client Name**."
+    if not is_valid_mobile(mob_raw):
+        return False, "Please enter a valid **10-digit Mobile**."
+    if not rep_ok:
+        return False, "Please select **Representative**."
+    return True, ""
+
 # ================= Action buttons (DB writes only here) =================
 st.markdown("### 2) Preview & Save")
 c1, c2 = st.columns(2)
@@ -694,7 +709,7 @@ with c2:
     )
 
 btn_col1, btn_col2, btn_col3 = st.columns([1.2,1.6,1])
-editing_ctx = st.session_state.get("editing_ctx")  # if set => loaded existing package
+editing_ctx = st.session_state.get("editing_ctx")
 
 with btn_col1:
     if st.button("🗑️ Clear & start new", use_container_width=True):
@@ -702,18 +717,6 @@ with btn_col1:
             if k.startswith("k_") or k in ("_rows_store","_rows_days","_rows_start","editing_ctx","editor_main"):
                 st.session_state.pop(k, None)
         st.rerun()
-
-def _validate_before_save() -> tuple[bool, str]:
-    name_ok = bool(st.session_state.get("k_client_name","").strip())
-    mob_raw  = st.session_state.get("k_mobile","")
-    rep_ok  = st.session_state.get("k_rep","-- Select --") != "-- Select --"
-    if not name_ok:
-        return False, "Please fill **Client Name**."
-    if not is_valid_mobile(mob_raw):
-        return False, "Please enter a valid **10-digit Mobile**."
-    if not rep_ok:
-        return False, "Please select **Representative**."
-    return True, ""
 
 with btn_col2:
     if editing_ctx:
