@@ -161,7 +161,10 @@ def is_valid_mobile(num: str) -> bool:
     return len(digits) == 10
 
 def in_locale(n: int) -> str:
-    return f"{int(n):,}"
+    try:
+        return f"{int(n):,}"
+    except Exception:
+        return str(n)
 
 def ceil_to_999(n: float) -> int:
     return (math.ceil(n/1000)*1000 - 1) if n > 0 else 0
@@ -206,25 +209,20 @@ def _client_suggestions(prefix: str) -> list[str]:
     try:
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
-            {
-                "$match": {
-                    "$or": [
-                        {"client_name":  {"$regex": rx, "$options": "i"}},
-                        {"client_mobile": {"$regex": rx}}
-                    ]
-                }
-            },
-            {"$group":  {"_id": {"n": "$client_name", "m": "$client_mobile"}}},
-            {"$project": {"_id": 0, "name": "$_id.n", "mobile": "$_id.m"}},
-            {"$limit": 50}
+            {"$match": {"$or":[
+                {"client_name":{"$regex":rx,"$options":"i"}},
+                {"client_mobile":{"$regex":rx}}
+            ]}},
+            {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
+            {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
+            {"$limit":50}
         ])
         res = []
         for x in cur:
             n = (x.get("name") or "").strip()
             m = (x.get("mobile") or "").strip()
-            if n or m:
-                res.append(f"{n} — {m}" if n and m else (n or m))
-        return sorted(set(res), key=lambda s: s.lower())
+            if n or m: res.append(f"{n} — {m}" if n and m else n or m)
+        return sorted(set(res), key=lambda s:s.lower())
     except Exception:
         return []
 
@@ -284,11 +282,10 @@ if picked_client_mobile:
             st.session_state["k_bhas_pax"]  = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
             st.session_state["k_bhas_pkg"]  = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
             st.session_state["k_bhas_act"]  = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
-            # rows buffer + bind to editor state
+            # rows buffer (do NOT touch widget key)
             st.session_state["_rows_store"] = loaded_doc.get("rows",[])
             st.session_state["_rows_days"]  = len(st.session_state["_rows_store"])
             st.session_state["_rows_start"] = st.session_state["k_start"]
-            st.session_state["editor_main"] = pd.DataFrame(st.session_state["_rows_store"])
             st.success("Previous package loaded below. Make edits and click **Update itinerary & save** for a new revision.")
             st.rerun()
 
@@ -364,7 +361,7 @@ with bhc4:
 with bhc5:
     bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
-# ===== Table storage & binding (fixes first-edit vanish) =====
+# ===== Table storage — keep separate from widget key =====
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
@@ -390,6 +387,11 @@ def _df_from_store(store: list[dict]) -> pd.DataFrame:
             df[c] = 0 if "Cost" in c else ""
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    # Date to date dtype for DateColumn
+    try:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    except Exception:
+        pass
     return df[TARGET_COLS]
 
 def _store_from_df(df: pd.DataFrame) -> list[dict]:
@@ -408,13 +410,13 @@ def _store_from_df(df: pd.DataFrame) -> list[dict]:
         out.append(row)
     return out
 
-# Initialize row store once
+# Initialize _rows_store only once
 if "_rows_store" not in st.session_state:
     st.session_state["_rows_store"] = _blank_rows(int(st.session_state.get("k_days", 2)), st.session_state.get("k_start", datetime.date.today()))
     st.session_state["_rows_days"]  = int(st.session_state.get("k_days", 2))
     st.session_state["_rows_start"] = st.session_state.get("k_start", datetime.date.today())
 
-# On day-count change, adjust store (add/remove rows), but DO NOT touch existing cells
+# React to days change (adjust rows but keep existing values)
 if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_days", 2)):
     old = st.session_state["_rows_store"]
     old_n = len(old)
@@ -428,10 +430,8 @@ if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_day
         old[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
     st.session_state["_rows_store"] = old
     st.session_state["_rows_days"]  = new_n
-    # ensure editor reflects new length immediately
-    st.session_state["editor_main"] = _df_from_store(old)
 
-# If start date changed, shift the dates only (keep rest)
+# React to start date change (shift only Date)
 if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
     start_ref = st.session_state["k_start"]
     buf = st.session_state["_rows_store"]
@@ -439,13 +439,9 @@ if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
         buf[i]["Date"] = (start_ref + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
     st.session_state["_rows_store"] = buf
     st.session_state["_rows_start"] = start_ref
-    st.session_state["editor_main"] = _df_from_store(buf)
 
-# Seed editor_main once (critical to avoid first-edit vanish)
-if "editor_main" not in st.session_state:
-    st.session_state["editor_main"] = _df_from_store(st.session_state["_rows_store"])
-
-table_df = st.session_state["editor_main"]
+# ---- Render editor from _rows_store (source of truth)
+table_df = _df_from_store(st.session_state["_rows_store"])
 
 col_cfg = {
     "Date": st.column_config.DateColumn("Date", disabled=True),
@@ -462,8 +458,8 @@ col_cfg = {
 }
 
 st.markdown("### Fill line items")
-# IMPORTANT: bind editor directly to session-state key; do NOT capture return value
-st.data_editor(
+# Capture return value; do not write to the widget key programmatically
+edited_df = st.data_editor(
     table_df,
     num_rows="fixed",
     use_container_width=True,
@@ -471,10 +467,10 @@ st.data_editor(
     hide_index=True,
     key="editor_main"
 )
-# Persist to buffer from the bound state (works on first edit)
-st.session_state["_rows_store"] = _store_from_df(st.session_state["editor_main"])
+# Persist back to store (enables first-edit persistence)
+st.session_state["_rows_store"] = _store_from_df(edited_df)
 
-# ---- Helpers for codes
+# ---- Code helpers
 def _code_to_desc(code) -> str:
     if code is None: return "No code provided"
     s = str(code).strip()
