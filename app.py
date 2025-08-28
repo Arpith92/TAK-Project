@@ -282,7 +282,7 @@ if picked_client_mobile:
             st.session_state["k_bhas_pax"]  = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
             st.session_state["k_bhas_pkg"]  = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
             st.session_state["k_bhas_act"]  = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
-            # rows buffer (do NOT touch widget key)
+            # rows buffer (do NOT touch any widget key)
             st.session_state["_rows_store"] = loaded_doc.get("rows",[])
             st.session_state["_rows_days"]  = len(st.session_state["_rows_store"])
             st.session_state["_rows_start"] = st.session_state["k_start"]
@@ -331,7 +331,6 @@ def _load_client_refs() -> list[str]:
 ref_labels = ["-- None --"] + _load_client_refs()
 referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels, key="k_ref_sel")
 has_ref = referred_sel != "-- None --"
-discount_pct = 10 if has_ref else 0
 
 # Dates / rows
 h1, h2 = st.columns(2)
@@ -387,7 +386,6 @@ def _df_from_store(store: list[dict]) -> pd.DataFrame:
             df[c] = 0 if "Cost" in c else ""
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    # Date to date dtype for DateColumn
     try:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     except Exception:
@@ -416,7 +414,7 @@ if "_rows_store" not in st.session_state:
     st.session_state["_rows_days"]  = int(st.session_state.get("k_days", 2))
     st.session_state["_rows_start"] = st.session_state.get("k_start", datetime.date.today())
 
-# React to days change (adjust rows but keep existing values)
+# React to days change
 if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_days", 2)):
     old = st.session_state["_rows_store"]
     old_n = len(old)
@@ -431,7 +429,7 @@ if int(st.session_state.get("k_days", 2)) != int(st.session_state.get("_rows_day
     st.session_state["_rows_store"] = old
     st.session_state["_rows_days"]  = new_n
 
-# React to start date change (shift only Date)
+# React to start date change
 if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
     start_ref = st.session_state["k_start"]
     buf = st.session_state["_rows_store"]
@@ -440,7 +438,7 @@ if st.session_state.get("k_start") != st.session_state.get("_rows_start"):
     st.session_state["_rows_store"] = buf
     st.session_state["_rows_start"] = start_ref
 
-# ---- Render editor from _rows_store (source of truth)
+# ---- Render editor (NO widget key)
 table_df = _df_from_store(st.session_state["_rows_store"])
 
 col_cfg = {
@@ -458,17 +456,15 @@ col_cfg = {
 }
 
 st.markdown("### Fill line items")
-# Capture return value; do not write to the widget key programmatically
 edited_df = st.data_editor(
     table_df,
     num_rows="fixed",
     use_container_width=True,
     column_config=col_cfg,
-    hide_index=True,
-    key="editor_main"
+    hide_index=True
 )
-# Persist back to store (enables first-edit persistence)
-st.session_state["_rows_store"] = _store_from_df(edited_df)
+# Persist back to store (first edit is kept)
+st.session_state["_rows_store"] = _store_from_df(edited_df.copy())
 
 # ---- Code helpers
 def _code_to_desc(code) -> str:
@@ -624,7 +620,7 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
 final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
 # ================= Serialize rows for Mongo
-rows_serialized = st.session_state["_rows_store"]  # primitives & iso dates
+rows_serialized = st.session_state["_rows_store"]
 
 # ================= Helpers for saving =================
 def _latest_rev_for_key(mobile: str, start_str: str) -> int:
@@ -642,7 +638,6 @@ def _common_record_dict():
     referred_sel = st.session_state.get("k_ref_sel","-- None --")
     has_ref = referred_sel != "-- None --"
     discount_pct = 10 if has_ref else 0
-
     return {
         "client_name": st.session_state.get("k_client_name",""),
         "client_mobile": client_mobile,
@@ -690,7 +685,7 @@ def _validate_before_save() -> tuple[bool, str]:
         return False, "Please select **Representative**."
     return True, ""
 
-# ================= Action buttons (DB writes only here) =================
+# ================= Preview & Save =================
 st.markdown("### 2) Preview & Save")
 c1, c2 = st.columns(2)
 with c1:
@@ -710,13 +705,12 @@ editing_ctx = st.session_state.get("editing_ctx")
 with btn_col1:
     if st.button("🗑️ Clear & start new", use_container_width=True):
         for k in list(st.session_state.keys()):
-            if k.startswith("k_") or k in ("_rows_store","_rows_days","_rows_start","editing_ctx","editor_main"):
+            if k.startswith("k_") or k in ("_rows_store","_rows_days","_rows_start","editing_ctx"):
                 st.session_state.pop(k, None)
         st.rerun()
 
 with btn_col2:
     if editing_ctx:
-        # UPDATE flow
         if st.button("✅ Update itinerary & save (new revision)", use_container_width=True):
             ok, msg = _validate_before_save()
             if not ok:
@@ -735,7 +729,6 @@ with btn_col2:
                 except Exception as e:
                     st.error(f"Could not save update: {e}")
     else:
-        # NEW flow (first official save)
         if st.button("🟢 Generate itinerary & save (rev 1)", use_container_width=True):
             ok, msg = _validate_before_save()
             if not ok:
