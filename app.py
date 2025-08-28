@@ -409,34 +409,42 @@ def _prefill_rows(raw_rows: list, n_rows: int, start: datetime.date) -> pd.DataF
     df["Date"] = [start + datetime.timedelta(days=i) for i in range(len(df))]
     return df[TARGET_COLS]
 
-def _ensure_rows(days: int, start: datetime.date):
+def _ensure_rows(days: int, start: datetime.date) -> int:
+    """Ensure st.session_state.form_rows exists with the right length & dates.
+    Returns the effective number of days used to build the table."""
+    days_eff = days
     if "_force_days_from_rows" in st.session_state:
-        days = int(st.session_state.pop("_force_days_from_rows") or days)
-        st.session_state["k_days"] = days
+        days_eff = int(st.session_state.pop("_force_days_from_rows") or days)
+
     if "form_rows" not in st.session_state:
         raw = st.session_state.get("prefill_rows_raw") or []
         if raw:
-            st.session_state.form_rows = _prefill_rows(raw, days, start)
+            st.session_state.form_rows = _prefill_rows(raw, days_eff, start)
         else:
-            st.session_state.form_rows = _blank_df(days, start)
+            st.session_state.form_rows = _blank_df(days_eff, start)
         st.session_state._days = len(st.session_state.form_rows)
     else:
         df = st.session_state.form_rows
         prev = st.session_state.get("_days", len(df))
-        if days > prev:
-            add = _blank_df(days - prev, start + datetime.timedelta(days=prev))
+        if days_eff > prev:
+            add = _blank_df(days_eff - prev, start + datetime.timedelta(days=prev))
             st.session_state.form_rows = pd.concat([df, add], ignore_index=True)
-        elif days < prev:
-            st.session_state.form_rows = df.iloc[:days].reset_index(drop=True)
+        elif days_eff < prev:
+            st.session_state.form_rows = df.iloc[:days_eff].reset_index(drop=True)
         st.session_state._days = len(st.session_state.form_rows)
-    st.session_state.form_rows.loc[:, "Date"] = [start + datetime.timedelta(days=i) for i in range(st.session_state.form_rows.shape[0])]
 
-_ensure_rows(days, start_date)
+    st.session_state.form_rows.loc[:, "Date"] = [
+        start + datetime.timedelta(days=i)
+        for i in range(st.session_state.form_rows.shape[0])
+    ]
+    return days_eff
+
+effective_days = _ensure_rows(days, start_date)
 
 EDITABLE_COLS = ["Time","Code","Car Type","Hotel Type","Stay City","Room Type","Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 col_cfg = {
     "Date": st.column_config.DateColumn("Date", disabled=True),
-    "Time": st.column_config.SelectboxColumn("Time", options=time_options),
+    "Time": st.column_config.SelectboxColumn("Time", options=_time_list(15)),
     "Code": st.column_config.SelectboxColumn("Code", options=code_options),
     "Car Type": st.column_config.SelectboxColumn("Car Type", options=car_options),
     "Hotel Type": st.column_config.SelectboxColumn("Hotel Type", options=hotel_options),
@@ -512,7 +520,7 @@ totals_html = (
 )
 st.markdown(totals_html, unsafe_allow_html=True)
 
-# ---- Build itinerary text (reflects current table & costs)
+# ---- Build itinerary text
 base["Date"] = [start_date + datetime.timedelta(days=i) for i in range(base.shape[0])]
 dates_series   = pd.to_datetime(base["Date"], errors="coerce")
 start_date_calc = dates_series.min().date()
@@ -615,8 +623,6 @@ if "Date" in rows_serialized.columns:
         rows_serialized["Date"] = rows_serialized["Date"].astype(str)
 
 # ================= Save (revision-aware) =================
-loaded_doc = st.session_state.get("loaded_doc")  # not used after key-setting but kept
-
 def _latest_rev_for_key(mobile: str, start_str: str) -> int:
     try:
         cur = col_it.find({"client_mobile": mobile, "start_date": start_str}, {"revision_num":1})
@@ -673,14 +679,12 @@ record = {
 
 if st.button("💾 Save / Create revision", use_container_width=False):
     try:
-        # find latest for this key; decide if revision is needed
         base_rev = _latest_rev_for_key(client_mobile, key_start)
         record["revision_num"] = (base_rev + 1) if base_rev >= 0 else 0
         record["is_revision"] = record["revision_num"] > 0
         record["revision_of"] = None
         record["revision_notes"] = "initial" if record["revision_num"] == 0 else "auto: new version"
 
-        # compare with last one (if exists)
         if base_rev >= 0:
             last = col_it.find_one(
                 {"client_mobile": client_mobile, "start_date": key_start, "revision_num": base_rev},
