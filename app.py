@@ -386,7 +386,7 @@ def _apply_dates_days(n_rows: int, start: _date):
     st.session_state[_MODEL_KEY] = df
 
 def _editor_sync():
-    """Robust sync for st.data_editor."""
+    """Robust sync for st.data_editor – persists edits on first attempt."""
     raw = st.session_state.get(_EDITOR_KEY, None)
     if raw is None:
         return
@@ -401,21 +401,17 @@ def _editor_sync():
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
         return df[TARGET_COLS].copy()
 
-    # 1) Full DataFrame payload
+    # ✅ always coerce and store immediately regardless of payload shape
     if isinstance(raw, pd.DataFrame):
         st.session_state[_MODEL_KEY] = _coerce(raw.copy())
         return
 
-    # 2) {"data":[...]} payload
     if isinstance(raw, dict) and isinstance(raw.get("data"), list):
         st.session_state[_MODEL_KEY] = _coerce(pd.DataFrame(raw["data"]))
         return
 
-    # 3) Diff-style payload
     if isinstance(raw, dict) and ("edited_rows" in raw or "added_rows" in raw or "deleted_rows" in raw):
-        base = st.session_state.get(_MODEL_KEY)
-        if base is None or not isinstance(base, pd.DataFrame) or base.empty:
-            return
+        base = st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS))
         df = base.copy()
         edited = raw.get("edited_rows", {}) or {}
         for idx_str, changes in edited.items():
@@ -430,10 +426,8 @@ def _editor_sync():
         st.session_state[_MODEL_KEY] = _coerce(df)
         return
 
-    # 4) Unknown shape
-    if _MODEL_KEY in st.session_state and isinstance(st.session_state[_MODEL_KEY], pd.DataFrame) and not st.session_state[_MODEL_KEY].empty:
-        return
-    st.session_state[_MODEL_KEY] = _coerce(pd.DataFrame(columns=TARGET_COLS))
+    if _MODEL_KEY not in st.session_state:
+        st.session_state[_MODEL_KEY] = _coerce(pd.DataFrame(columns=TARGET_COLS))
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -847,31 +841,26 @@ if mode == "Create new itinerary":
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
-# --- build 'record' dict above this line ---
+        # --- build 'record' dict above this line ---
 
-try:
-    res = col_it.insert_one(record)   # INSERT
-    new_id = str(res.inserted_id)
+        try:
+            res = col_it.insert_one(record)   # INSERT
+            new_id = str(res.inserted_id)
 
-    # (optional) stash for navigation or follow-up pages
-    st.session_state["last_saved_itinerary_id"] = new_id
+            # (optional) stash for navigation or follow-up pages
+            st.session_state["last_saved_itinerary_id"] = new_id
 
-    st.success(f"Package saved with ID: {new_id}")
+            # ⬇️ Immediately reflect assignment & cost for visibility in other pages
+            upsert_update_from_rep(new_id, rep, actor_user=user)
+            sync_initial_cost_to_expenses_and_updates(new_id, total_package)
 
-except Exception as e:
-    st.error(f"Error saving package: {e}")
-    st.stop()
+            st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
+            st.session_state["last_preview_text"] = final_output
+            st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
 
-
-    # ⬇️ Immediately reflect assignment & cost for visibility in other pages
-    upsert_update_from_rep(inserted_id, rep, actor_user=user)
-    sync_initial_cost_to_expenses_and_updates(inserted_id, total_package)
-
-    st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
-    st.session_state["last_preview_text"] = final_output
-    st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
-except Exception as e:
-    st.error(f"Could not save itinerary: {e}")
+        except Exception as e:
+            st.error(f"Could not save itinerary: {e}")
+            st.stop()
 
     st.divider()
     st.caption("Tip: Click “Apply dates & days” before editing the table. Your first edits will persist.")
@@ -1228,17 +1217,22 @@ else:
                 "is_revision": True,
                 "revision_notes": "edit from search",
             }
-           res = col_it.insert_one(record)
-inserted_id = str(res.inserted_id)
 
-# Keep assignment aligned to representative edits (if any)
-upsert_update_from_rep(inserted_id, rep_new, actor_user=user)
-# Mirror latest quoted package total to expenses/updates
-sync_initial_cost_to_expenses_and_updates(inserted_id, total_package)
+            try:
+                res = col_it.insert_one(record)
+                inserted_id = str(res.inserted_id)
 
-st.success(f"✅ Updated & saved as **rev {next_rev}**")
-st.session_state["last_preview_text"] = final_output
-st.session_state["last_generated_meta"] = {"client": client_name_new, "mobile": client_mobile, "rev": next_rev}
+                # Keep assignment aligned to representative edits (if any)
+                upsert_update_from_rep(inserted_id, rep_new, actor_user=user)
+                # Mirror latest quoted package total to expenses/updates
+                sync_initial_cost_to_expenses_and_updates(inserted_id, total_package)
+
+                st.success(f"✅ Updated & saved as **rev {next_rev}**")
+                st.session_state["last_preview_text"] = final_output
+                st.session_state["last_generated_meta"] = {"client": client_name_new, "mobile": client_mobile, "rev": next_rev}
+            except Exception as e:
+                st.error(f"Could not save itinerary: {e}")
+                st.stop()
 
 
 # ============= Shared: show preview & download if available =============
