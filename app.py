@@ -9,7 +9,8 @@ try:
     if Version(st.__version__) < Version("1.42.0") and Version(rich.__version__) >= Version("14.0.0"):
         subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
         st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
-        st.experimental_rerun()
+        st.rerun()
+
 except Exception:
     import streamlit as st  # ensure st is available
 
@@ -711,7 +712,7 @@ else:
                 if st.button("Load this package", use_container_width=False):
                     st.session_state[_SEARCH_DOC_KEY] = docs[pick_idx]
                     loaded_doc = docs[pick_idx]
-                    st.experimental_rerun()
+                    st.rerun()
 
     if loaded_doc:
         # Prefill header from loaded doc
