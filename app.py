@@ -701,18 +701,39 @@ else:
             else:
                 picked_client_name = parts[0]
 
-        if picked_client_mobile:
-            docs = list(col_it.find(
-                {"client_mobile": picked_client_mobile},
-                {}
-            ).sort([("start_date", -1), ("revision_num",-1), ("upload_date",-1)]))
-            if docs:
-                labels = [f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0))}" for d in docs]
-                pick_idx = st.selectbox("Pick a start date & revision", list(range(len(labels))), format_func=lambda i: labels[i], key="rev_pick")
-                if st.button("Load this package", use_container_width=False):
-                    st.session_state[_SEARCH_DOC_KEY] = docs[pick_idx]
-                    loaded_doc = docs[pick_idx]
-                    st.rerun()
+if picked_client_mobile:
+    docs = list(
+        col_it.find({"client_mobile": picked_client_mobile}, {})
+        .sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
+    )
+
+    if docs:
+        labels = [
+            f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • "
+            f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
+            for d in docs
+        ]
+
+        # key is tied to the mobile so it resets when you pick a different suggestion
+        rev_key = f"rev_pick_{picked_client_mobile}"
+
+        selected_idx = st.selectbox(
+            "Pick a start date & revision",
+            options=list(range(len(labels))),
+            format_func=lambda i: labels[i],
+            index=0,                # safe default
+            key=rev_key,
+        )
+
+        # extra guard in case state gets out of sync
+        if not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(docs):
+            selected_idx = 0
+
+        if st.button("Load this package", use_container_width=False, key=f"load_{picked_client_mobile}"):
+            loaded_doc = docs[selected_idx]
+            st.rerun()
+    else:
+        st.info("No itineraries found for this number yet.")
 
     if loaded_doc:
         # Prefill header from loaded doc
