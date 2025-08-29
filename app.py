@@ -162,13 +162,22 @@ def get_collections():
     }
 
 cols = get_collections()
-_db = mongo_client()["TAK_DB"]  # fallback source of truth
+_db = mongo_client()["TAK_DB"]  # fallback handle
 
-# Use .get(...) with guaranteed fallback to avoid KeyError if a stale cached dict is ever returned.
-col_it        = cols.get("itineraries")     or _db["itineraries"]
-col_updates   = cols.get("package_updates") or _db["package_updates"]
-col_followups = cols.get("followups")       or _db["followups"]
-col_expenses  = cols.get("expenses")        or _db["expenses"]
+def _col(cols_dict: dict, key: str):
+    # Avoid truthiness on PyMongo collections; only check for None / missing
+    val = cols_dict.get(key, None)
+    return val if val is not None else _db[key]
+
+col_it        = _col(cols, "itineraries")
+col_updates   = _col(cols, "package_updates")
+col_followups = _col(cols, "followups")
+col_expenses  = _col(cols, "expenses")
+
+for _k in ("itineraries", "audit_logins", "package_updates", "followups", "expenses"):
+    if _k not in cols or cols[_k] is None:
+        cols[_k] = _db[_k]
+
 
 
 from datetime import datetime as _dt, time as _time
