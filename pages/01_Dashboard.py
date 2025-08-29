@@ -14,14 +14,22 @@ from pymongo import MongoClient
 # =========================
 # Guard & Page config
 # =========================
+# If user not set, default to Unknown (prevents KeyError on direct page open)
+st.session_state.setdefault("user", "Unknown")
+
+# Restrict certain users (as in your original)
 if st.session_state.get("user") in ("Teena", "Kuldeep"):
     st.stop()
 
 st.set_page_config(page_title="TAK Dashboard", layout="wide")
 st.markdown("## 📊 TAK – Operations Dashboard")
 
-from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")
+# Optional pageview audit (kept as-is; safely import)
+try:
+    from tak_audit import audit_pageview
+    audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")
+except Exception:
+    pass
 
 # Optional calendar
 CALENDAR_AVAILABLE = True
@@ -31,7 +39,7 @@ except Exception:
     CALENDAR_AVAILABLE = False
 
 # =========================
-# Admin gate (consistent)
+# Admin gate (consistent with app)
 # =========================
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
@@ -106,7 +114,6 @@ def _norm_date(x):
     try:
         if x is None or (isinstance(x, float) and pd.isna(x)):
             return None
-        # Handles datetime, timestamp, ISO string, etc.
         return pd.to_datetime(x).date()
     except Exception:
         return None
@@ -126,20 +133,26 @@ def _created_utc_from_oid(iid: str):
     except Exception:
         return None
 
-def _fmt_ist(dt: datetime | None) -> str:
-    if not dt:
+def _fmt_ist(dt_: datetime | None) -> str:
+    if not dt_:
         return ""
     try:
-        return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M %Z")
+        return dt_.astimezone(IST).strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
-        return dt.strftime("%Y-%m-%d %H:%M UTC")
+        return dt_.strftime("%Y-%m-%d %H:%M UTC")
+
+def _ensure_cols(df: pd.DataFrame, cols: list[str], fill=None) -> pd.DataFrame:
+    for c in cols:
+        if c not in df.columns:
+            df[c] = fill
+    return df
 
 # =========================
 # Fast cached readers
 # =========================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_itineraries_df() -> pd.DataFrame:
-    # Pull the essential fields including new schema columns
+    # Pull essential fields incl. new schema columns (from updated app.py)
     docs = list(col_it.find(
         {},
         {
@@ -150,7 +163,7 @@ def load_itineraries_df() -> pd.DataFrame:
             "package_total": 1, "package_after_referral": 1,
             "actual_total": 1, "profit_total": 1,
             "referred_by": 1, "referral_discount_pct": 1,
-            # keep legacy if present
+            # legacy
             "package_cost": 1, "discount": 1,
             # revision metadata
             "revision_num": 1
@@ -160,10 +173,7 @@ def load_itineraries_df() -> pd.DataFrame:
         return pd.DataFrame()
 
     # Keep only latest revision per (client_mobile, start_date)
-    # Highest revision_num wins, tie-break by upload_date (latest)
-    # If revision_num missing, treat as 0.
-    # Build a map of best doc per key.
-    best = {}
+    best: dict[tuple[str, str], tuple[int, datetime, dict]] = {}
     for r in docs:
         key = (str(r.get("client_mobile","")), str(r.get("start_date","")))
         rev = _to_int(r.get("revision_num", 0))
@@ -176,7 +186,6 @@ def load_itineraries_df() -> pd.DataFrame:
             if rev > prev_rev:
                 best[key] = (rev, up, r)
             elif rev == prev_rev:
-                # later upload_date wins
                 try:
                     if pd.to_datetime(up) > pd.to_datetime(prev_up):
                         best[key] = (rev, up, r)
@@ -197,22 +206,30 @@ def load_itineraries_df() -> pd.DataFrame:
         rec["created_utc"] = _created_utc_from_oid(rec["itinerary_id"])
         rec["created_ist"] = _fmt_ist(rec["created_utc"])
 
-        # Back-compat: expose legacy names expected by dashboard code
+        # Back-compat for dashboard calculations:
+        # Prefer new fields from app.py, fallback to legacy if needed
         pkg_total = _to_int(rec.get("package_total", rec.get("package_cost", 0)))
         pkg_after = _to_int(rec.get("package_after_referral", 0))
-        # If package_after_referral missing, compute from referral fields if present
         if pkg_after == 0 and _to_int(rec.get("referral_discount_pct", 0)) > 0:
             try:
                 pct = _to_int(rec.get("referral_discount_pct", 0))
                 pkg_after = max(pkg_total - int(round(pkg_total * pct / 100.0)), 0)
             except Exception:
                 pkg_after = 0
-        # dashboard expects 'package_cost' (base) and 'discount'
+
         rec["package_cost"] = pkg_total
         rec["discount"]     = max(pkg_total - pkg_after, 0)
 
+        # Expose profit/actual if needed elsewhere
+        rec["actual_total"] = _to_int(rec.get("actual_total", 0))
+        rec["profit_total"] = _to_int(rec.get("profit_total", 0))
+
         out.append(rec)
-    return pd.DataFrame(out)
+
+    df = pd.DataFrame(out)
+    # Ensure optional columns exist
+    df = _ensure_cols(df, ["ach_id", "representative"], "")
+    return df
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_updates_df() -> pd.DataFrame:
@@ -273,20 +290,20 @@ df_ex = load_expenses_df()
 df_all = df_it.merge(df_up, on="itinerary_id", how="left")
 df_all = df_all.merge(df_ex, on="itinerary_id", how="left", suffixes=("", "_ex"))
 
-# defaults
+# defaults & types
 df_all["status"] = df_all["status"].fillna("pending")
 for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
     if c in df_all.columns:
         df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
 
 # compute final cost efficiently (no row-wise DB hits)
-final_cost = pd.to_numeric(df_all["final_package_cost"], errors="coerce").fillna(0).astype(int)
+final_cost = pd.to_numeric(df_all.get("final_package_cost", 0), errors="coerce").fillna(0).astype(int)
 
 # If not present in expenses, compute from itinerary base & discount
 fallback_need = final_cost.eq(0)
 if fallback_need.any():
-    base = pd.to_numeric(df_all["package_cost"], errors="coerce").fillna(0).astype(int)
-    disc = pd.to_numeric(df_all["discount"], errors="coerce").fillna(0).astype(int)
+    base = pd.to_numeric(df_all.get("package_cost", 0), errors="coerce").fillna(0).astype(int)
+    disc = pd.to_numeric(df_all.get("discount", 0), errors="coerce").fillna(0).astype(int)
     comp = (base - disc).clip(lower=0)
     final_cost = final_cost.mask(final_cost.eq(0), comp)
 
@@ -328,7 +345,7 @@ with flt4:
     if isinstance(dr, tuple) and len(dr) == 2:
         start, end = dr
 with flt5:
-    reps = sorted([r for r in df_all["representative"].dropna().unique().tolist() if r]) or []
+    reps = sorted([r for r in df_all.get("representative", pd.Series(dtype=str)).dropna().unique().tolist() if r]) or []
     rep_filter = st.multiselect("Representative", reps, default=reps)
 
 date_col = {"Upload date":"upload_date", "Booking date":"booking_date", "Travel start date":"start_date"}[basis]
@@ -339,10 +356,12 @@ if rep_filter:
     df = df[df["representative"].isin(rep_filter)]
 if (search_txt or "").strip():
     s = search_txt.strip().lower()
+    # Ensure columns exist for robust search
+    df = _ensure_cols(df, ["ach_id","client_name","client_mobile"], "")
     df = df[
-        df["client_name"].astype(str).str.lower().str.contains(s) |
-        df["client_mobile"].astype(str).str.lower().str.contains(s) |
-        df["ach_id"].astype(str).str.lower().str.contains(s)
+        df["client_name"].astype(str).str.lower().str.contains(s, na=False) |
+        df["client_mobile"].astype(str).str.lower().str.contains(s, na=False) |
+        df["ach_id"].astype(str).str.lower().str.contains(s, na=False)
     ]
 
 # unique by mobile if enabled (latest by created_utc)
@@ -448,8 +467,9 @@ c7.metric("Total Profit (₹) — this month", f"{total_profit_month:,}")
 
 # Table: who confirmed & at what final cost (confirmed in current filter range)
 if not conf_in_range.empty:
+    df_tmp = _ensure_cols(conf_in_range.copy(), ["ach_id","rep_name"], "")
     view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date","final_cost","profit","itinerary_id"]
-    table_fin = conf_in_range[view_cols].copy()
+    table_fin = df_tmp[view_cols].copy()
     table_fin.rename(columns={
         "rep_name": "Confirmed by",
         "final_cost": "Final package (₹)"
@@ -518,6 +538,7 @@ st.divider()
 # =========================
 st.subheader("🧭 Client explorer")
 opt_df = df_all.copy()
+opt_df = _ensure_cols(opt_df, ["ach_id","client_name","client_mobile","created_ist"], "")
 opt_df["label"] = (
     opt_df["ach_id"].fillna("") + " | " +
     opt_df["client_name"].fillna("") + " | " +
@@ -618,9 +639,9 @@ else:
     if sfu.strip():
         ss = sfu.strip().lower()
         view = view[
-            view["client_name"].astype(str).str.lower().str.contains(ss) |
-            view["client_mobile"].astype(str).str.lower().str.contains(ss) |
-            view["ach_id"].astype(str).str.lower().str.contains(ss)
+            view["client_name"].astype(str).str.lower().str.contains(ss, na=False) |
+            view["client_mobile"].astype(str).str.lower().str.contains(ss, na=False) |
+            view["ach_id"].astype(str).str.lower().str.contains(ss, na=False)
         ]
     show_cols = ["ach_id","client_name","client_mobile","representative","followup_attempts","confirmed_from_followup"]
     st.dataframe(view[show_cols].sort_values(["confirmed_from_followup","followup_attempts"], ascending=[False, False]),
