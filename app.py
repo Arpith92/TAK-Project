@@ -475,13 +475,14 @@ if mode == "Create new itinerary":
             "6. Natural events/roadblocks/personal itinerary changes.",
             "7. Extra sightseeing not listed."
         ])
-        notes = "\n*Important Notes:-*\n" + "\n.join([
-            "1. Any attractions not in itinerary will be chargeable.",
-            "2. Visits subject to traffic/temple rules; closures beyond control & non-refundable.",
-            "3. Bhasm-Aarti: tickets at actuals; subject to availability/cancellations.",
-            "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
-            "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
-        ])
+        notes = "\n*Important Notes:-*\n" + "\n".join([
+    "1. Any attractions not in itinerary will be chargeable.",
+    "2. Visits subject to traffic/temple rules; closures beyond control & non-refundable.",
+    "3. Bhasm-Aarti: tickets at actuals; subject to availability/cancellations.",
+    "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
+    "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
+])
+
         cxl = """
 *Cancellation Policy:-*
 1. 30+ days → 20% of advance deducted.
