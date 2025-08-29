@@ -89,7 +89,7 @@ ORG = {
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
 # Put your files in .streamlit/
-ORG_LOGO = ".streamlit/logo.jpg"
+ORG_LOGO = ".streamlit/logo.png"
 ORG_SIGN = ".streamlit/signature.png"   # update to your file name if different
 
 # ================= Helpers =====================
