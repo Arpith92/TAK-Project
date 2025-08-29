@@ -216,8 +216,16 @@ def fetch_itineraries_df() -> pd.DataFrame:
         for k in ("start_date","end_date","upload_date"):
             v = rec.get(k)
             rec[k] = pd.to_datetime(v).to_pydatetime() if v else None
-        rec["package_cost_num"] = _to_int(rec.get("package_total", rec.get("package_cost", 0)))
-        rec["discount"] = _to_int(rec.get("discount", rec.get("package_total", 0) - rec.get("package_after_referral", rec.get("package_total", 0))))
+        # prefer new totals from app.py
+        pkg_total = _to_int(rec.get("package_total", rec.get("package_cost", 0)))
+        pkg_after = _to_int(rec.get("package_after_referral", 0))
+        if pkg_after == 0 and _to_int(rec.get("discount", 0)) > 0:
+            pkg_after = max(pkg_total - _to_int(rec.get("discount", 0)), 0)
+        rec["package_cost_num"] = pkg_total
+        # compute discount if absent
+        if "discount" not in rec or rec["discount"] is None:
+            rec["discount"] = max(pkg_total - pkg_after, 0)
+        rec["discount"] = _to_int(rec.get("discount", 0))
         rec["revision_num"] = _to_int(rec.get("revision_num", 0))
         out.append(rec)
     df = pd.DataFrame(out)
@@ -263,7 +271,6 @@ def fetch_expenses_df() -> pd.DataFrame:
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_vendorpay_df() -> pd.DataFrame:
     docs = list(col_vendorpay.find({}, {"_id":0}))
-    # Flatten items rows
     rows = []
     for d in docs:
         iid = str(d.get("itinerary_id"))
@@ -289,21 +296,16 @@ def fetch_vendorpay_df() -> pd.DataFrame:
 # Dedupe logic & revision view
 # ------------------------------------------------------------------
 def group_latest_by_mobile(df_all: pd.DataFrame) -> pd.DataFrame:
-    """Latest by (mobile, start_date) considering highest revision_num, latest upload_date tie-break;
-       then latest package per mobile."""
     if df_all.empty:
         return df_all
     df_all = df_all.copy()
-    # Resolve to latest by (mobile, start_date)
     df_all["upload_date"] = pd.to_datetime(df_all["upload_date"])
     df_all["revision_num"] = pd.to_numeric(df_all["revision_num"], errors="coerce").fillna(0).astype(int)
     df_all.sort_values(["client_mobile", "start_date", "revision_num", "upload_date"],
                        ascending=[True, True, False, False], inplace=True)
     latest_per_pkg = df_all.groupby(["client_mobile","start_date"], as_index=False).first()
-    # Now latest per mobile
     latest_per_pkg.sort_values(["client_mobile","upload_date"], ascending=[True, False], inplace=True)
     latest_by_mobile = latest_per_pkg.groupby("client_mobile", as_index=False).first()
-    # Attach history of (other itinerary_ids) for this mobile
     hist_map: Dict[str, List[str]] = {}
     for mob, grp in latest_per_pkg.groupby("client_mobile"):
         ids = grp["itinerary_id"].tolist()
@@ -312,7 +314,6 @@ def group_latest_by_mobile(df_all: pd.DataFrame) -> pd.DataFrame:
     return latest_by_mobile
 
 def build_revision_table(df_all: pd.DataFrame, mobile: str) -> pd.DataFrame:
-    """Return a table with rows per (start_date, revision_num) to show revision history."""
     sub = df_all[df_all["client_mobile"] == mobile].copy()
     if sub.empty:
         return pd.DataFrame()
@@ -353,6 +354,9 @@ df = df.merge(
     on="itinerary_id", how="left"
 )
 
+# ---- SAFETY: ensure required numeric columns exist before using them ----
+df = _ensure_cols(df, ["base_package_cost","discount","final_package_cost","package_cost_num"], 0)
+
 # compute final cost (prefer explicit final, else compute from base-discount, else from itinerary)
 df["final_cost"] = pd.to_numeric(df["final_package_cost"], errors="coerce").fillna(0).astype(int)
 need_comp = df["final_cost"].eq(0)
@@ -365,8 +369,9 @@ if need_comp.any():
     comp2 = (it_base - it_disc).clip(lower=0)
     df["final_cost"] = df["final_cost"].mask(df["final_cost"].eq(0), comp).mask(df["final_cost"].eq(0), comp2)
 
-df["total_expenses"] = pd.to_numeric(df["total_expenses"], errors="coerce").fillna(0).astype(int)
-df["profit"] = pd.to_numeric(df["profit"], errors="coerce").fillna(df["final_cost"] - df["total_expenses"]).astype(int)
+df["total_expenses"] = pd.to_numeric(df.get("total_expenses", 0), errors="coerce").fillna(0).astype(int)
+df["profit"] = pd.to_numeric(df.get("profit", df["final_cost"] - df["total_expenses"]), errors="coerce") \
+                  .fillna(df["final_cost"] - df["total_expenses"]).astype(int)
 
 # ------------------------------------------------------------------
 # Sidebar: option
@@ -406,7 +411,6 @@ followup_count          = int((df_for_counts["status"] == "followup").sum())
 cancelled_count         = int((df_for_counts["status"] == "cancelled").sum())
 confirmed_count         = int((df_for_counts["status"] == "confirmed").sum())
 
-# Confirmed – expense pending
 have_expense_ids = set(df_exp["itinerary_id"]) if not df_exp.empty else set()
 confirmed_latest = df_for_counts[df_for_counts["status"] == "confirmed"].copy()
 confirmed_expense_pending = confirmed_latest[~confirmed_latest["itinerary_id"].isin(have_expense_ids)].shape[0]
@@ -673,7 +677,6 @@ confirmed = df_now[df_now["status"] == "confirmed"].copy()
 if confirmed.empty:
     st.info("No confirmed packages yet.")
 else:
-    # bring in computed final_cost & totals from df
     fin_map = df.set_index("itinerary_id")["final_cost"].to_dict()
     exp_map = df.set_index("itinerary_id")[["total_expenses","profit"]].to_dict(orient="index")
     confirmed["final_cost"] = confirmed["itinerary_id"].map(fin_map).fillna(0).astype(int)
@@ -714,7 +717,6 @@ else:
         discount: int,
         notes: str = ""
     ):
-        # compute vendor expenses from vendor_payments (fallback logic same as before)
         vp_doc = col_vendorpay.find_one({"itinerary_id": str(itinerary_id)}) or {}
         items = vp_doc.get("items", [])
         total_expenses = 0
@@ -753,6 +755,12 @@ else:
         return vdf[vdf["itinerary_id"] == itinerary_id].copy() if not vdf.empty else pd.DataFrame()
 
     def save_vendor_rows(itinerary_id: str, rows_df: pd.DataFrame, final_done: bool):
+        rows_df = rows_df.copy()
+        # ensure expected cols
+        need_cols = ["category","vendor","finalization_cost","adv1_amt","adv1_date","adv2_amt","adv2_date","final_amt","final_date","balance"]
+        for c in need_cols:
+            if c not in rows_df.columns:
+                rows_df[c] = 0 if c not in ("category","vendor","adv1_date","adv2_date","final_date") else ""
         items = []
         for _, r in rows_df.iterrows():
             items.append({
@@ -810,7 +818,7 @@ else:
                 except Exception as e:
                     st.error(f"Could not push back: {e}")
 
-        # ---- Final Package Summary (single place to set final cost) ----
+        # ---- Final Package Summary ----
         st.markdown("#### Final Package Summary")
         exp_row = df_exp[df_exp["itinerary_id"] == chosen_id].head(1)
         base_default = int(exp_row["base_package_cost"].iat[0]) if not exp_row.empty else _to_int(row.get("package_cost_num"))
@@ -835,11 +843,10 @@ else:
             st.success(f"Saved. Final: ₹{final_cost:,} • Expenses: ₹{total_expenses:,} • Profit: ₹{profit:,}")
             st.rerun()
 
-        # ---- Vendor Payments (flexible; add/edit freely) ----
+        # ---- Vendor Payments ----
         st.markdown("### Vendor Payments")
         st.caption("Add or edit vendor rows freely. Balance auto-calculates. You can lock with **Final done** if needed.")
         current_rows = get_vendor_rows(chosen_id)
-        # Seed with one empty row if none
         if current_rows.empty:
             current_rows = pd.DataFrame([{
                 "category":"Hotel","vendor":"","finalization_cost":0,
@@ -873,7 +880,6 @@ else:
             final_done_new = st.checkbox("Final done (lock further edits)", value=final_done_state)
         with colfd2:
             if st.button("💾 Save Vendor Payments"):
-                # recompute balance before save
                 if not edited_vendors.empty:
                     for i in edited_vendors.index:
                         edited_vendors.loc[i, "balance"] = max(
@@ -885,9 +891,8 @@ else:
                 st.success("Vendor payments saved.")
                 st.rerun()
 
-        # ---- Client Payment Summary & Vendor Status ----
+        # ---- Client & Vendor Payment Summaries ----
         st.markdown("### 📑 Payment Summaries")
-        # Client received vs balance
         final_now = int(df[df["itinerary_id"] == chosen_id]["final_cost"].iloc[0])
         received  = _to_int(df_up[df_up["itinerary_id"]==chosen_id]["advance_amount"].fillna(0).sum()) if not df_up.empty else 0
         balance   = max(final_now - received, 0)
@@ -896,7 +901,6 @@ else:
         cS2.metric("Received from client (₹)", f"{received:,}")
         cS3.metric("Pending from client (₹)", f"{balance:,}")
 
-        # Vendor-wise payment table
         vtab = get_vendor_rows(chosen_id)
         if not vtab.empty:
             vtab = vtab[["category","vendor","finalization_cost","adv1_amt","adv2_amt","final_amt","balance","adv1_date","adv2_date","final_date"]]
