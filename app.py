@@ -208,6 +208,9 @@ def _code_to_route(code) -> str | None:
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
+_EDITOR_KEY = "editor_widget"
+_MODEL_KEY  = "editor_model"
+
 def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
     return pd.DataFrame({
         "Date": [start + timedelta(days=i) for i in range(n_rows)],
@@ -225,11 +228,11 @@ def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
 
 def _seed_editor_model(n_rows: int, start: _date):
     """Create the working DF only when user asks; do NOT reseed on reruns."""
-    st.session_state["editor_model"] = _blank_df(n_rows, start)
+    st.session_state[_MODEL_KEY] = _blank_df(n_rows, start)
 
-def _apply_dates_days(start: _date, n_rows: int):
+def _apply_dates_days(n_rows: int, start: _date):
     """Pad/truncate existing model to match days; realign dates to start."""
-    df = st.session_state.get("editor_model")
+    df = st.session_state.get(_MODEL_KEY)
     if df is None:
         _seed_editor_model(n_rows, start)
         return
@@ -239,9 +242,29 @@ def _apply_dates_days(start: _date, n_rows: int):
         df = pd.concat([df, add], ignore_index=True)
     elif cur > n_rows:
         df = df.iloc[:n_rows].reset_index(drop=True)
-    # set dates
     df.loc[:, "Date"] = [start + timedelta(days=i) for i in range(n_rows)]
-    st.session_state["editor_model"] = df
+    st.session_state[_MODEL_KEY] = df
+
+def _ensure_numeric_costs(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
+        df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0.0)
+    return df
+
+def _editor_sync():
+    """Copy widget value back to our model on every edit (permanent fix)."""
+    raw = st.session_state.get(_EDITOR_KEY, None)
+    if raw is None:
+        return
+    # data_editor stores list[dict] in session_state; convert safely
+    df = pd.DataFrame(raw)
+    for c in TARGET_COLS:
+        if c not in df.columns:
+            df[c] = 0 if "Cost" in c else ""
+    # keep order and types stable
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    df = _ensure_numeric_costs(df)
+    st.session_state[_MODEL_KEY] = df[TARGET_COLS].copy()
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -286,7 +309,7 @@ def _client_suggestions(prefix: str) -> list[str]:
             {"$match": {"$or":[
                 {"client_name":{"$regex":rx,"$options":"i"}},
                 {"client_mobile":{"$regex":rx}}
-            ]}},
+            ]}}},
             {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
             {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
             {"$limit":50}
@@ -335,13 +358,13 @@ if mode == "Create new itinerary":
     with h1: start_date = st.date_input("Start date", key="k_start")
     with h2: days = st.number_input("No. of days", min_value=1, step=1, key="k_days")
 
-    # Button to apply days/start to the table (prevents auto reseed on every rerun)
+    # Button to apply days/start to the table (no reseed; preserves edits)
     if st.button("📅 Apply dates & days to table"):
-        _seed_editor_model(int(days), start_date)
+        _apply_dates_days(int(days), start_date)
         st.success("Dates & rows applied. You can edit the table now.")
 
-    # Ensure we at least have a model (first time)
-    if "editor_model" not in st.session_state:
+    # Ensure we at least have a model (first time only)
+    if _MODEL_KEY not in st.session_state:
         _seed_editor_model(int(days), start_date)
 
     # Bhas outside table
@@ -376,21 +399,23 @@ if mode == "Create new itinerary":
         "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
     }
 
-    # IMPORTANT: use a different key for the widget vs our storage
-    edited_df = st.data_editor(
-        st.session_state["editor_model"],
-        key="editor_widget",
+    # Render editor USING on_change sync callback (permanent persistence)
+    st.data_editor(
+        st.session_state[_MODEL_KEY],
+        key=_EDITOR_KEY,
         use_container_width=True,
         num_rows="fixed",
         hide_index=True,
         column_config=col_cfg,
+        on_change=_editor_sync,
     )
-    # Save the widget value back to our storage model (prevents first-edit vanish)
-    st.session_state["editor_model"] = edited_df.copy()
+    # Also one-time sync if editor had a value but model missing (rare)
+    if _MODEL_KEY not in st.session_state and _EDITOR_KEY in st.session_state:
+        _editor_sync()
 
     st.markdown("")
 
-    # ---------- Generate & save (ONLY here we compute & write to DB) ----------
+    # ---------- Generate & save ----------
     if st.button("✅ Generate itinerary & save (rev 1 for new / next rev for existing)", use_container_width=True):
         # validations
         if not client_name:
@@ -401,9 +426,8 @@ if mode == "Create new itinerary":
             st.error("Select **Representative**."); st.stop()
 
         client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
-        base = st.session_state["editor_model"].copy()
+        base = st.session_state[_MODEL_KEY].copy()
 
-        # realign dates to start_date (final)
         if base.empty:
             st.error("No rows to save. Apply dates & days and fill the table."); st.stop()
         base["Date"] = [start_date + dt.timedelta(days=i) for i in range(len(base))]
@@ -418,7 +442,7 @@ if mode == "Create new itinerary":
         package_cost_rows = float(pkg_car + pkg_hotel)
         actual_cost_rows  = float(act_car + act_hotel)
         total_package = ceil_to_999(package_cost_rows + bhas_pkg_total)
-        total_actual  = actual_cost_rows + bhas_actual_total
+        total_actual  = actual_cost_rows  + bhas_actual_total
         profit_total  = int(total_package - total_actual)
         after_ref     = int(round(total_package * 0.9)) if has_ref else total_package
 
@@ -646,19 +670,18 @@ else:
             for c in TARGET_COLS:
                 if c not in df.columns:
                     df[c] = 0 if "Cost" in c else ""
-            for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
-                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            df = _ensure_numeric_costs(df)
             df = df.reset_index(drop=True)
             for i in range(len(df)):
                 df.at[i, "Date"] = start + dt.timedelta(days=i)
             return df[TARGET_COLS]
 
-        st.session_state["editor_model"] = _rows_from_doc(loaded_doc, start_date)
+        st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
 
         st.markdown("### Fill line items")
-        edited_df = st.data_editor(
-            st.session_state["editor_model"],
-            key="editor_widget",
+        st.data_editor(
+            st.session_state[_MODEL_KEY],
+            key=_EDITOR_KEY,
             use_container_width=True,
             num_rows="fixed",
             hide_index=True,
@@ -675,8 +698,8 @@ else:
                 "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
                 "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
             },
+            on_change=_editor_sync,
         )
-        st.session_state["editor_model"] = edited_df.copy()
 
         if st.button("🔁 Update itinerary (save as next revision)", use_container_width=True):
             # next rev
@@ -685,7 +708,7 @@ else:
                 mx = max(mx, int(ddoc.get("revision_num", 0) or 0))
             next_rev = 1 if mx < 1 else (mx + 1)
 
-            base = st.session_state["editor_model"].copy()
+            base = st.session_state[_MODEL_KEY].copy()
             base["Date"] = [start_date + dt.timedelta(days=i) for i in range(len(base))]
 
             pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
