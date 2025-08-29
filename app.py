@@ -760,7 +760,9 @@ else:
             else:
                 picked_client_name = parts[0]
 
-    # --- after you've parsed sel_client into picked_client_name / picked_client_mobile ---
+# --- After parsing sel_client into picked_client_name / picked_client_mobile
+picked_client_name = picked_client_name or ""
+picked_client_mobile = picked_client_mobile or ""
 
 if picked_client_mobile:
     # Fetch ONLY this client's docs (name + mobile), newest first
@@ -776,11 +778,11 @@ if picked_client_mobile:
     )
 
     if not docs:
-        st.info("No itineraries found for this client.")
+        st.info("No itineraries found for this client yet.")
     else:
-        # Group revisions by start_date (i.e., by 'package')
+        # Group revisions by start_date (one package = one start date)
         from collections import defaultdict
-        by_start = defaultdict(list)
+        by_start: dict[str, list[dict]] = defaultdict(list)
         for d in docs:
             by_start[str(d.get("start_date", ""))].append(d)
 
@@ -792,7 +794,7 @@ if picked_client_mobile:
             key=f"start_{picked_client_mobile}",
         )
 
-        # Show revisions ONLY for that package
+        # Show revisions ONLY for the selected package
         revs = sorted(
             by_start.get(sel_start, []),
             key=lambda x: int(x.get("revision_num", 0) or 0),
@@ -809,12 +811,17 @@ if picked_client_mobile:
             key=f"rev_{picked_client_mobile}_{sel_start}",
         )
 
-        if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
+        if st.button(
+            "Load this revision",
+            use_container_width=False,
+            key=f"load_{picked_client_mobile}_{sel_start}",
+        ):
             loaded_doc = revs[sel_rev_idx]
             st.session_state[_SEARCH_DOC_KEY] = loaded_doc  # keep across reruns
             st.rerun()
-        else:
-            st.info("No itineraries found for this number yet.")
+else:
+    st.caption("Pick a client from **Suggestions** to see their packages & revisions.")
+------
 
     if loaded_doc:
         client_name = loaded_doc.get("client_name","")
