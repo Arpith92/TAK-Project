@@ -136,23 +136,40 @@ def mongo_client():
     return client
 
 @st.cache_resource
+def mongo_client():
+    uri = _find_uri()
+    if not uri:
+        st.error("Mongo URI not configured. Add mongo_uri in Secrets.")
+        st.stop()
+    client = MongoClient(uri, appName="TAK_App", maxPoolSize=100, serverSelectionTimeoutMS=5000, tz_aware=True)
+    client.admin.command("ping")
+    return client
+
+@st.cache_resource
 def get_collections():
+    """
+    Always return a dict with the required keys.
+    Even if caching/stale state occurs, callers can rely on these keys existing.
+    """
     db = mongo_client()["TAK_DB"]
+    # NOTE: Accessing db['name'] doesn't fail even if collection is empty; it just returns a handle.
     return {
-        "itineraries": db["itineraries"],
-        "audit_logins": db["audit_logins"],
-        # ⬇️ add these
+        "itineraries":     db["itineraries"],
+        "audit_logins":    db["audit_logins"],
         "package_updates": db["package_updates"],
-        "followups": db["followups"],
-        "expenses": db["expenses"],
+        "followups":       db["followups"],
+        "expenses":        db["expenses"],
     }
 
 cols = get_collections()
-col_it = cols["itineraries"]
-# ⬇️ handy locals
-col_updates = cols["package_updates"]
-col_followups = cols["followups"]
-col_expenses = cols["expenses"]
+_db = mongo_client()["TAK_DB"]  # fallback source of truth
+
+# Use .get(...) with guaranteed fallback to avoid KeyError if a stale cached dict is ever returned.
+col_it        = cols.get("itineraries")     or _db["itineraries"]
+col_updates   = cols.get("package_updates") or _db["package_updates"]
+col_followups = cols.get("followups")       or _db["followups"]
+col_expenses  = cols.get("expenses")        or _db["expenses"]
+
 
 from datetime import datetime as _dt, time as _time
 
