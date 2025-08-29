@@ -350,62 +350,128 @@ class PDF(FPDF):
         self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 8)
         self.cell(0, 5, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=1, align="C")
 
-def build_salary_pdf(
-    *, emp_name: str, month_label: str, period_label: str, calc: dict
-) -> bytes:
-    pdf = PDF()
-    pdf.add_page()
-    left = 16
-    col1_w, col2_w, col3_w = 90, 30, 40
-    th = 8
+# ====== PDF helpers (ASCII-safe) ======
 
-    # Title block
-    pdf.set_x(left)
-    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 12)
-    pdf.cell(0, 7, f"{month_label}  (Salary Statement {period_label})", ln=1)
-    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 11)
-    pdf.set_x(left); pdf.cell(0, 6, f"EMP NAME:  {emp_name}", ln=1)
+# Use ASCII money to avoid Unicode issues with ₹
+def inr_ascii(n: int | float) -> str:
+    try:
+        return f"Rs {int(round(float(n))):,}"
+    except Exception:
+        return f"Rs {n}"
+
+def _ascii(s: str) -> str:
+    """Normalize Unicode punctuation to ASCII for FPDF 'Helvetica' font."""
+    if s is None:
+        return ""
+    return (str(s)
+            .replace("₹", "Rs ")
+            .replace("–", "-").replace("—", "-")
+            .replace("•", "-")
+            .replace("“", '"').replace("”", '"')
+            .replace("’", "'").replace("‘", "'")
+            .replace("™", "(TM)")
+            )
+
+from fpdf import FPDF
+
+class PDF_ASCII(FPDF):
+    """Minimal wrapper that always normalizes text to ASCII before writing."""
+    def txta(self, s: str) -> str:
+        return _ascii(s)
+
+# ====== Salary PDF builder (ASCII only; no fonts required) ======
+def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc: dict) -> bytes:
+    """
+    calc must contain:
+      - days_in_month, base_salary, leave_days, leave_deduction,
+        ot_units, ot_amount, advances, net
+    """
+    pdf = PDF_ASCII(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    left = 16
+    th = 8
+    col1_w, col2_w, col3_w = 90, 40, 60  # Particulars | Days/Units | Amount
+
+    # Header box (border)
+    pdf.set_draw_color(150, 150, 150)
+    pdf.rect(8, 8, 194, 281)
+
+    # Header text
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_xy(left, 12)
+    pdf.cell(0, 9, pdf.txta("ACHALA HOLIDAYS PRIVATE LIMITED"), ln=1)
+
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf.txta(f"{month_label} (Salary Statement: {period_label})"), ln=1)
     pdf.ln(2)
 
-    # Table Head
+    # Employee row
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf.txta(f"EMP NAME:  {emp_name}"), ln=1)
+    pdf.ln(2)
+
+    # Table header
+    pdf.set_font("Helvetica", "B", 10)
     y = pdf.get_y()
-    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th); pdf.rect(left+col1_w+col2_w, y, col3_w, th)
-    pdf.text(left+2, y+th-2, "Particulars"); pdf.text(left+col1_w+2, y+th-2, "Units/Days")
-    pdf.text(left+col1_w+col2_w+2, y+th-2, "Amount")
+    pdf.rect(left, y, col1_w, th)                 # Particulars
+    pdf.rect(left + col1_w, y, col2_w, th)        # Days/Units
+    pdf.rect(left + col1_w + col2_w, y, col3_w, th)  # Amount
+    pdf.text(left + 2, y + th - 2, pdf.txta("Particulars"))
+    pdf.text(left + col1_w + 2, y + th - 2, pdf.txta("Days/Units"))
+    pdf.text(left + col1_w + col2_w + 2, y + th - 2, pdf.txta("Amount"))
     pdf.ln(th)
 
-    def row(lbl, units, amt, bold=False):
+    pdf.set_font("Helvetica", "", 10)
+
+    def row(label: str, days_units, amount):
         y = pdf.get_y()
-        pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B" if bold else "", 10)
-        pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th); pdf.rect(left+col1_w+col2_w, y, col3_w, th)
-        pdf.set_xy(left+2, y); pdf.cell(col1_w-4, th, lbl)
-        pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, f"{units}", align="R")
-        pdf.set_xy(left+col1_w+col2_w, y); pdf.cell(col3_w-2, th, f"{inr(amt)}", align="R")
+        pdf.rect(left, y, col1_w, th)
+        pdf.rect(left + col1_w, y, col2_w, th)
+        pdf.rect(left + col1_w + col2_w, y, col3_w, th)
+        pdf.text(left + 2, y + th - 2, pdf.txta(label))
+        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, pdf.txta(str(days_units)), align="R")
+        # ASCII money (no ₹)
+        pdf.set_xy(left + col1_w + col2_w, y); pdf.cell(col3_w - 2, th, pdf.txta(inr_ascii(amount)), align="R")
         pdf.ln(th)
 
-    # Rows
-    row("Total Days in Month", calc["days_in_month"], 0)
-    row("Salary (Base)", "-", BASE_SALARY)
-    row("Total Leave (₹400/day)", calc["leave_days"], calc["leave_ded"])
-    row("Over-time (₹300/unit)", calc["ot_units"], calc["overtime_amt"])
-    row("Advances (deduct)", "-", -calc["advances"])
-    pdf.ln(2)
-    row("Total Salary (Gross)", "-", calc["gross"], bold=True)
-    row("Net Payable", "-", calc["net"], bold=True)
+    # Rows (example structure from your calc)
+    row("Total Days in Month", calc.get("days_in_month", 0), 0)
+    row("Salary", "-", calc.get("base_salary", 0))
+    row("Total Leave", calc.get("leave_days", 0), calc.get("leave_deduction", 0))
+    row("Over-time", calc.get("ot_units", 0), calc.get("ot_amount", 0))
+    row("Advances (deduct)", "-", calc.get("advances", 0))
 
-    # Signature
-    pdf.ln(10)
+    # Total / Net
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 11)
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w + col2_w, th)
+    pdf.rect(left + col1_w + col2_w, y, col3_w, th)
+    pdf.text(left + 2, y + th - 2, pdf.txta("Total Salary (Net)"))
+    pdf.set_xy(left + col1_w + col2_w, y)
+    pdf.cell(col3_w - 2, th, pdf.txta(inr_ascii(calc.get("net", 0))), align="R")
+    pdf.ln(th + 10)
+
+    # Footer note
+    pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5, pdf.txta("Note: This is a computer-generated statement."))
+
+    # Signature (right)
+    pdf.ln(6)
     sig_w = 50
     sig_x = pdf.w - 16 - sig_w
     sig_y = pdf.get_y()
-    if ORG_SIGN and os.path.exists(ORG_SIGN):
-        try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
-        except Exception: pass
+    # If you have a signature image path (PNG), uncomment:
+    # try:
+    #     pdf.image(".streamlit/signature.png", x=sig_x, y=sig_y, w=sig_w)
+    # except Exception:
+    #     pass
     pdf.set_xy(sig_x, sig_y + 18)
-    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
-    pdf.cell(sig_w, 6, "Authorised Signatory", ln=1, align="C")
+    pdf.cell(sig_w, 6, pdf.txta("Authorised Signatory"), ln=1, align="C")
 
+    # Return bytes
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
