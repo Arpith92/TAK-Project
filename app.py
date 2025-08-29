@@ -33,6 +33,13 @@ CODE_FILE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Cod
 BHASMARATHI_TYPE_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Bhasmarathi_Type.xlsx"
 STAY_CITY_URL = "https://raw.githubusercontent.com/Arpith92/TAK-Project/main/Stay_City.xlsx"
 
+# ================= Helpers =================
+def _safe_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
 # ================= LOGIN (PIN) =================
 def _load_users() -> dict:
     try:
@@ -73,7 +80,7 @@ def _login() -> str | None:
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
             if st.button("Log out"):
                 st.session_state.pop("user", None)
-                st.rerun()
+                _safe_rerun()
 
     if st.session_state.get("user"): return st.session_state["user"]
 
@@ -93,7 +100,7 @@ def _login() -> str | None:
             try: audit_login(name)
             except Exception: pass
             st.success(f"Welcome, {name}!")
-            st.rerun()
+            _safe_rerun()
         else:
             st.error("Invalid PIN"); st.stop()
     return None
@@ -227,12 +234,10 @@ def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
     })[TARGET_COLS]
 
 def _ensure_model(days: int, start: _date):
-    """Create model once; no reseed on reruns (prevents first-edit loss)."""
     if MODEL_KEY not in st.session_state:
         st.session_state[MODEL_KEY] = _blank_df(days, start)
 
 def _apply_days_dates(days: int, start: _date):
-    """Pad/truncate model and align dates; preserve existing edits."""
     df = st.session_state.get(MODEL_KEY, _blank_df(days, start))
     if len(df) < days:
         add = _blank_df(days - len(df), start + timedelta(days=len(df)))
@@ -243,11 +248,9 @@ def _apply_days_dates(days: int, start: _date):
     st.session_state[MODEL_KEY] = df
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    # Ensure all columns exist
     for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0.0 if "Cost" in c else ""
-    # Normalize types
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -345,10 +348,10 @@ if mode == "Create new itinerary":
     with h1: start_date = st.date_input("Start date", key="k_start")
     with h2: days = st.number_input("No. of days", min_value=1, step=1, key="k_days")
 
-    # Ensure we at least have a model (first time only)
+    # Ensure we have a model
     _ensure_model(int(days), start_date)
 
-    # Optional button to force-align dates and rows (preserves edits)
+    # Optional button: adjust rows & dates (preserves edits)
     if st.button("📅 Apply dates & days to table"):
         _apply_days_dates(int(days), start_date)
         st.success("Dates & rows applied. You can edit the table now.")
@@ -385,16 +388,20 @@ if mode == "Create new itinerary":
         "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
     }
 
-    # 👉 Use return value, then normalize & store to MODEL_KEY (permanent fix)
-    df_widget = st.data_editor(
-        st.session_state[MODEL_KEY],
+    # Render editor → capture return → normalize → if changed, store & RERUN
+    df_input = st.session_state[MODEL_KEY]
+    df_return = st.data_editor(
+        df_input,
         key=EDITOR_KEY,
         use_container_width=True,
         num_rows="fixed",
         hide_index=True,
         column_config=col_cfg,
     )
-    st.session_state[MODEL_KEY] = _normalize_df(df_widget)
+    df_norm = _normalize_df(df_return)
+    if not df_input.equals(df_norm):
+        st.session_state[MODEL_KEY] = df_norm
+        _safe_rerun()
 
     # --- Live totals (update as you type) ---
     df_prev = st.session_state[MODEL_KEY].copy()
@@ -584,27 +591,22 @@ if mode == "Create new itinerary":
             "final_route": final_route,
             "car_types": car_types,
             "hotel_types": hotel_types,
-            # Bhas
             "bhasmarathi_required": (bhas_required=="Yes"),
-            "bhasmarathi_type": st.session_state.get("k_bhas_type","V-BH") if bhas_required=="Yes" else None,
+            "bhasmarathi_type": bhas_type if bhas_required=="Yes" else None,
             "bhasmarathi_persons": int(bhas_persons) if bhas_required=="Yes" else 0,
             "bhasmarathi_unit_pkg": int(bhas_unit_pkg) if bhas_required=="Yes" else 0,
             "bhasmarathi_unit_actual": int(bhas_unit_actual) if bhas_required=="Yes" else 0,
             "bhasmarathi_pkg_total": int(bhas_pkg_total),
             "bhasmarathi_actual_total": int(bhas_actual_total),
-            # totals
             "package_total": int(total_package),
             "package_after_referral": int(after_ref),
             "actual_total": int(total_actual),
             "profit_total": int(profit_total),
             "referred_by": (referred_sel if referred_sel != "-- None --" else None),
             "referral_discount_pct": (10 if referred_sel != "-- None --" else 0),
-            # rows + legacy
             "rows": rows_serialized.to_dict(orient="records"),
             "package_cost": int(total_package),
-            # text
             "itinerary_text": final_output,
-            # revision
             "revision_num": int(next_rev),
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
@@ -656,7 +658,6 @@ else:
                     loaded_doc = docs[pick_idx]
 
     if loaded_doc:
-        # Prefill some headers (read-only mobile)
         client_name = loaded_doc.get("client_name","")
         client_mobile = loaded_doc.get("client_mobile","")
         rep = loaded_doc.get("representative","-- Select --")
@@ -672,7 +673,6 @@ else:
                               key="s_rep")
         with c3: st.number_input("Total Pax*", min_value=1, step=1, value=total_pax, key="s_pax")
 
-        # Table from doc → model
         def _rows_from_doc(doc: dict, start: dt.date) -> pd.DataFrame:
             rows = doc.get("rows") or []
             if not rows:
@@ -689,8 +689,9 @@ else:
         st.session_state[MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
 
         st.markdown("### Fill line items (loaded revision)")
-        df_widget = st.data_editor(
-            st.session_state[MODEL_KEY],
+        df_input = st.session_state[MODEL_KEY]
+        df_return = st.data_editor(
+            df_input,
             key=EDITOR_KEY,
             use_container_width=True,
             num_rows="fixed",
@@ -709,10 +710,12 @@ else:
                 "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
             },
         )
-        st.session_state[MODEL_KEY] = _normalize_df(df_widget)
+        df_norm = _normalize_df(df_return)
+        if not df_input.equals(df_norm):
+            st.session_state[MODEL_KEY] = df_norm
+            _safe_rerun()
 
         if st.button("🔁 Update itinerary (save as next revision)", use_container_width=True):
-            # next rev
             mx = -1
             for ddoc in col_it.find({"client_mobile": client_mobile, "start_date": str(start_date)}, {"revision_num":1}):
                 mx = max(mx, int(ddoc.get("revision_num", 0) or 0))
@@ -725,10 +728,8 @@ else:
             pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
             act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
             act_hotel = pd.to_numeric(base.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
-            bhas_pkg_total    = 0
-            bhas_actual_total = 0
-            total_package = ceil_to_999(float(pkg_car + pkg_hotel) + bhas_pkg_total)
-            total_actual  = float(act_car + act_hotel) + bhas_actual_total
+            total_package = ceil_to_999(float(pkg_car + pkg_hotel))
+            total_actual  = float(act_car + act_hotel)
             profit_total  = int(total_package - total_actual)
 
             rows_serialized = base.copy()
