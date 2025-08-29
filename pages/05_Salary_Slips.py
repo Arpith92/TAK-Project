@@ -19,24 +19,17 @@ st.title("🧾 Monthly Salary Slip")
 # ---- Compact UI CSS tweaks (smaller text/controls) ----
 st.markdown("""
 <style>
-/* general text smaller */
 div[data-testid="stMarkdownContainer"] { font-size: 14px !important; }
-/* inputs text smaller */
-input, textarea, select, .st-al, .st-am, .st-b2, .st-b3, .st-b6, .st-c0, .st-c2 { font-size: 14px !important; }
-/* metric values/labels smaller (used in single-employee section) */
+input, textarea, select { font-size: 14px !important; }
 div[data-testid="stMetricValue"] { font-size: 16px !important; line-height: 1.1 !important; }
 div[data-testid="stMetricLabel"] { font-size: 12px !important; }
-/* dataframe font */
-.css-1v0mbdj, .stDataFrame, .dataframe { font-size: 13px !important; }
-/* container padding tighter */
-section.main > div > div { padding-top: 0.2rem; padding-bottom: 0.2rem; }
+.stDataFrame, .dataframe { font-size: 13px !important; }
 .small-kv { font-size: 13px; line-height: 1.2; }
 .small-kv b { font-size: 14px; }
-.compact-row { margin-top: .25rem; margin-bottom: .25rem; }
 </style>
 """, unsafe_allow_html=True)
 
-TTL = 60  # short cache for fast feel with fresh-ish data
+TTL = 60  # short cache
 
 # =============================
 # Mongo (safe/flexible)
@@ -61,10 +54,7 @@ def _find_uri() -> Optional[str]:
 def _get_client() -> MongoClient:
     uri = _find_uri()
     if not uri:
-        st.error(
-            "Mongo connection is not configured.\n\n"
-            "Add one of these in **Manage app → Settings → Secrets** (recommended: `mongo_uri`)."
-        )
+        st.error("Mongo connection is not configured. Add `mongo_uri` in Secrets.")
         st.stop()
     client = MongoClient(
         uri,
@@ -98,10 +88,9 @@ def load_users() -> dict:
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
-    # fallback to repo .streamlit/secrets.toml for dev only
     try:
         try:
-            import tomllib  # py 3.11+
+            import tomllib
         except Exception:
             import tomli as tomllib
         with open(".streamlit/secrets.toml", "rb") as f:
@@ -109,10 +98,7 @@ def load_users() -> dict:
         u = data.get("users", {})
         if isinstance(u, dict) and u:
             with st.sidebar:
-                st.warning(
-                    "Using users from repo .streamlit/secrets.toml. "
-                    "For production, set them in Manage app → Secrets."
-                )
+                st.warning("Using repo .streamlit/secrets.toml [dev]. Prefer Secrets in cloud.")
             return u
     except Exception:
         pass
@@ -133,7 +119,6 @@ FUEL_MAP    = {
     "Kuldeep": 3000,
     "Teena":  0,
 }
-CATEGORIES  = ["Car","Hotel","Bhasmarathi","Poojan","PhotoFrame","Other"]
 
 def _login() -> Optional[str]:
     with st.sidebar:
@@ -148,7 +133,7 @@ def _login() -> Optional[str]:
 
     users_map = load_users()
     if not users_map:
-        st.error("Login not configured. Add `mongo_uri` and a [users] table in **Manage app → Secrets**.")
+        st.error("Login not configured. Add `mongo_uri` and a [users] table in Secrets.")
         st.stop()
 
     st.markdown("### 🔐 Login")
@@ -171,7 +156,7 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
-# Audit (optional)
+# Optional audit
 try:
     from tak_audit import audit_pageview
     audit_pageview(st.session_state.get("user", "Unknown"), page="05_Salary_Slips")
@@ -234,6 +219,51 @@ def load_all_payroll_all_months() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["employee","month","amount","paid","components"])
     return pd.DataFrame(rows)
+
+# ===== Carry-forward helpers =====
+def previous_pending_amount(emp: str, current_month_key: str) -> int:
+    """
+    Sum of (due - paid) for all saved months strictly earlier than current_month_key.
+    Due is taken from saved components['net_pay'] snapshot for those months.
+    """
+    cur = list(col_payroll.find(
+        {"employee": emp, "month": {"$lt": current_month_key}},
+        {"_id":0, "amount":1, "components":1}
+    ))
+    total_due = sum(_to_int((r.get("components") or {}).get("net_pay", 0)) for r in cur)
+    total_paid = sum(_to_int(r.get("amount", 0)) for r in cur)
+    return max(total_due - total_paid, 0)
+
+def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) -> int:
+    """
+    Apply 'amount' to oldest unpaid previous months first.
+    Returns how much was consumed by previous months.
+    """
+    amt = int(amount or 0)
+    if amt <= 0:
+        return 0
+    rows = list(col_payroll.find(
+        {"employee": emp, "month": {"$lt": current_month_key}},
+        {"_id":1, "amount":1, "components":1, "month":1}
+    ).sort("month", 1))
+    applied = 0
+    for r in rows:
+        due = _to_int((r.get("components") or {}).get("net_pay", 0))
+        paid = _to_int(r.get("amount", 0))
+        gap = due - paid
+        if gap <= 0:
+            continue
+        pay = min(gap, amt - applied)
+        if pay <= 0:
+            break
+        col_payroll.update_one(
+            {"_id": r["_id"]},
+            {"$inc": {"amount": int(pay)}, "$set": {"updated_at": datetime.utcnow(), "updated_by": st.session_state.get("user","")}}
+        )
+        applied += pay
+        if applied >= amt:
+            break
+    return applied
 
 # =============================
 # Calculators
@@ -351,7 +381,7 @@ else:
 st.divider()
 
 # =============================
-# MODE: ALL EMPLOYEES OVERVIEW  (COMPACT + bulk edit + save)
+# MODE: ALL EMPLOYEES OVERVIEW  (COMPACT + bulk edit + save + CF)
 # =============================
 if mode == "All employees (overview)":
     st.subheader(f"👥 Team overview — {month_start.strftime('%B %Y')}")
@@ -367,18 +397,21 @@ if mode == "All employees (overview)":
         amount_paid = _to_int(payrec.get("amount", 0))
         default_amt = amount_paid if amount_paid else (comp["net_pay"] if paid_flag else 0)
 
-        with st.container(border=True):
-            # Tighter columns & small labels instead of st.metric
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1,0.9,0.9,0.9,0.9,1.1,1.1])
-            c1.markdown(f"**{emp}**")
+        cf = previous_pending_amount(emp, month_key)
+        total_due = comp["net_pay"] + cf
 
+        with st.container(border=True):
+            # compact columns
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.1,0.9,0.9,0.9,0.9,1.1,1.1,1.1])
+            c1.markdown(f"**{emp}**")
             c2.markdown(f'<div class="small-kv">Base<br><b>{money(comp["base_salary"])}</b></div>', unsafe_allow_html=True)
             c3.markdown(f'<div class="small-kv">Fuel<br><b>{money(comp["fuel_allow"])}</b></div>', unsafe_allow_html=True)
             c4.markdown(f'<div class="small-kv">Incent.<br><b>{money(comp["incentives"])}</b></div>', unsafe_allow_html=True)
             c5.markdown(f'<div class="small-kv">Reimb<br><b>{money(comp["net_reimb"])}</b></div>', unsafe_allow_html=True)
             c6.markdown(f'<div class="small-kv">Net Pay<br><b>{money(comp["net_pay"])}</b></div>', unsafe_allow_html=True)
+            c7.markdown(f'<div class="small-kv">Carry fwd<br><b>{money(cf)}</b></div>', unsafe_allow_html=True)
 
-            paid_choice = c7.selectbox(f"Paid? — {emp}", ["No","Yes"], index=(1 if paid_flag else 0), key=f"paid_{emp}")
+            paid_choice = c8.selectbox(f"Paid? — {emp}", ["No","Yes"], index=(1 if paid_flag else 0), key=f"paid_{emp}")
             paid_yes = (paid_choice == "Yes")
 
             d1, d2, d3, d4 = st.columns([1,1,1,1.1])
@@ -392,7 +425,7 @@ if mode == "All employees (overview)":
             with d3:
                 utr_val = st.text_input("UTR / Ref", value=(utr if paid_yes else ""),
                                         key=f"utr_{emp}", placeholder="UPI/NEFT ref", disabled=(not paid_yes))
-            balance = comp["net_pay"] - (int(pay_amt) if paid_yes else 0)
+            balance = total_due - (int(pay_amt) if paid_yes else 0)
             with d4:
                 st.markdown(f'<div class="small-kv">Balance<br><b>{money(balance if balance>=0 else 0)}</b></div>', unsafe_allow_html=True)
 
@@ -413,47 +446,56 @@ if mode == "All employees (overview)":
                     "period": {"start": str(month_start), "end": str(month_end)}
                 },
                 "notes": f"Salary for {month_start.strftime('%b %Y')}",
+                "carry_forward": cf,
             }
 
     st.info(f"**Total balance (unpaid across visible rows):** {money(int(pending_total))}")
 
     if is_admin and st.button("💾 Save all changes", use_container_width=True, type="primary"):
         for emp, payload in edit_states.items():
+            amt = payload["amount"]
+            # 1) allocate to previous months first
+            used_prev = allocate_payment_to_previous(emp, month_key, amt)
+            # 2) remainder goes to current month record
+            remaining = max(amt - used_prev, 0)
             save_or_update_pay(
                 emp=emp,
                 month_key=month_key,
-                amount=payload["amount"],
+                amount=remaining,
                 paid_on=payload["paid_on"],
                 utr=payload["utr"],
                 notes=payload["notes"],
                 components=payload["components"],
                 paid_flag=payload["paid"],
             )
-        st.success("Saved all payment updates.")
+        st.success("Saved all payment updates with carry-forward allocation.")
         st.rerun()
 
     st.divider()
 
 # =============================
-# MODE: SINGLE EMPLOYEE (detailed)
+# MODE: SINGLE EMPLOYEE (detailed + CF)
 # =============================
 if mode == "Single employee":
     comp = calc_components(view_emp, month_start, month_end)
+    cf_prev = previous_pending_amount(view_emp, month_key)
+    total_due = comp["net_pay"] + cf_prev
 
     l, r = st.columns([2,1])
     with l:
         st.markdown(f"### Salary Slip — **{view_emp}**")
         st.write({"Month": month_start.strftime("%B %Y"), "Employee": view_emp})
     with r:
-        st.metric("Net Pay", money(comp["net_pay"]))
+        st.metric("Total due (CF + This month)", money(total_due))
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("Base salary", money(comp["base_salary"]))
     k2.metric("Fuel allowance", money(comp["fuel_allow"]))
     k3.metric("Incentives (month)", money(comp["incentives"]))
     k4.metric("Reimbursable expenses", money(comp["reimb_total"]))
     k5.metric("Less: Settlements (month)", money(comp["settled_this_month"]))
-    st.caption(f"**Net reimbursement** this month = {money(comp['net_reimb'])}  →  **Net Pay** = Base + Fuel + Incentives + Net reimbursement.")
+    k6.metric("Carry forward", money(cf_prev))
+    st.caption(f"**Net Pay (this month)** = Base + Fuel + Incentives + Net reimbursement.  **Total due** = Carry-forward + Net Pay (this month).")
     st.divider()
 
     # Reimbursement details
@@ -485,7 +527,8 @@ if mode == "Single employee":
 - Incentives (month): {money(comp['incentives'])}  
 - Reimbursable expenses (month): {money(comp['reimb_total'])}  
 - Less settlements (month): {money(comp['settled_this_month'])}  
-- **Net Pay:** {money(comp['net_pay'])}  
+- Carry forward (previous pending): {money(cf_prev)}  
+- **Total due this cycle:** {money(total_due)}  
 """)
 
     # Admin payment controls with Paid? toggle
@@ -517,15 +560,20 @@ if mode == "Single employee":
 
         notes = st.text_area("Notes (optional)", value=default_notes, placeholder="e.g., Salary for Aug 2025")
 
-        # Balance preview
-        balance_preview = comp["net_pay"] - (int(pay_amount) if paid_yes else 0)
+        # Balance preview uses total due (CF + this month)
+        balance_preview = total_due - (int(pay_amount) if paid_yes else 0)
         st.metric("Balance (after this payment)", money(balance_preview if balance_preview >= 0 else 0))
 
         if st.button("💾 Save payment record", type="primary"):
+            # 1) allocate to previous months first
+            used_prev = allocate_payment_to_previous(view_emp, month_key, int(pay_amount if paid_yes else 0))
+            # 2) remainder goes to current month
+            remaining = max(int(pay_amount if paid_yes else 0) - used_prev, 0)
+
             save_or_update_pay(
                 emp=view_emp,
                 month_key=month_key,
-                amount=int(pay_amount if paid_yes else 0),
+                amount=remaining,
                 paid_on=(pay_date if paid_yes else None),
                 utr=(utr if paid_yes else ""),
                 notes=notes,
@@ -539,7 +587,7 @@ if mode == "Single employee":
                 },
                 paid_flag=paid_yes,
             )
-            st.success("Payment record saved.")
+            st.success("Payment saved with carry-forward allocation.")
             st.rerun()
 
         cur = load_payroll_record(view_emp, month_key)
