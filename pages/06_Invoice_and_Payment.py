@@ -82,9 +82,7 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 
 # ================= Org / assets =================
-# Toggle: "R" for ® (registered), "TM" for ™ (unregistered)
-TRADEMARK_MODE = "R"
-
+TRADEMARK_MODE = "R"  # "R" for ®, "TM" for ™
 def _brand_with_mark() -> str:
     return "TravelaajKal™" if TRADEMARK_MODE == "TM" else "TravelaajKal®"
 
@@ -94,7 +92,6 @@ ORG = {
     "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com  |  Mob: +91-7509612798",
     "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}",
 }
-# Put your files in .streamlit/
 ORG_LOGO = ".streamlit/logo.png"
 ORG_SIGN = ".streamlit/signature.png"
 
@@ -123,7 +120,7 @@ def _str(x) -> str:
     return "" if x is None else str(x)
 
 def _fmt_money(n: int) -> str:
-    return f"Rs {int(n):,}"  # ASCII-safe for PDFs
+    return f"Rs {int(n):,}"
 
 def _nights_days(start: Optional[date], end: Optional[date]) -> str:
     if not start or not end:
@@ -151,12 +148,6 @@ def _as_bytes(x) -> bytes:
         return str(x).encode("latin-1", errors="ignore")
 
 def _final_cost(iid: str) -> Dict[str, int]:
-    """
-    Final cost preference:
-      1) expenses.final_package_cost
-      2) expenses.base_package_cost - expenses.discount
-      3) itinerary.package_cost - itinerary.discount
-    """
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
         {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}
@@ -181,7 +172,6 @@ def _final_cost(iid: str) -> Dict[str, int]:
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def fetch_confirmed() -> pd.DataFrame:
-    # itineraries (essentials)
     its = list(col_itineraries.find({}, {
         "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
         "final_route":1, "total_pax":1, "start_date":1, "end_date":1
@@ -195,7 +185,6 @@ def fetch_confirmed() -> pd.DataFrame:
         r.pop("_id", None)
     df_i = pd.DataFrame(its)
 
-    # confirmed updates
     ups = list(col_updates.find({"status":"confirmed"}, {
         "_id":0, "itinerary_id":1, "status":1, "booking_date":1,
         "advance_amount":1, "rep_name":1, "incentive":1
@@ -208,10 +197,8 @@ def fetch_confirmed() -> pd.DataFrame:
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
-    # merge (fixed)
     df = df_i.merge(df_u, on="itinerary_id", how="inner")
 
-    # enrich final cost snapshot
     bases, discs, finals = [], [], []
     for iid in df["itinerary_id"]:
         c = _final_cost(iid)
@@ -235,7 +222,6 @@ def _update_advance_and_booking(iid: str, adv: int, bdate: Optional[date]) -> No
 
 # ================= Unicode/ASCII text handling =============
 def _ascii_downgrade(s: str) -> str:
-    """Fallback mapping when Unicode TTFs are not present."""
     if s is None:
         s = ""
     return (str(s)
@@ -257,7 +243,7 @@ class PDF(FPDF):
             self.add_font("DejaVu", "", FONT_REG, uni=True)
             self.add_font("DejaVu", "B", FONT_BLD, uni=True)
 
-        # PDF metadata to help Explorer preview/thumbnail
+        # PDF metadata (helps previews)
         self.set_title(f"{_brand_with_mark()} – Invoice/Payment Slip")
         self.set_author("Achala Holidays Pvt. Ltd.")
         self.set_creator("TravelaajKal – Streamlit")
@@ -266,69 +252,37 @@ class PDF(FPDF):
     def _txt(self, s: str) -> str:
         return s if self.use_unicode else _ascii_downgrade(s)
 
-    # ---------- Header (structured) ----------
+    # ---------- Header ----------
     def header(self):
-        # outer border
         self.set_draw_color(150,150,150)
         self.rect(8, 8, 194, 281)
 
-        # logo (left)
         if ORG_LOGO and os.path.exists(ORG_LOGO):
             try:
                 self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception:
                 pass
 
-        # company name centered
         self.set_xy(50, 12)
         self.set_font("DejaVu" if self.use_unicode else "Helvetica", "B", 14)
         self.cell(0, 7, self._txt(ORG["title"]), align="C", ln=1)
 
-        # address line
         self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
         self.cell(0, 6, self._txt(ORG["line1"]), align="C", ln=1)
-
-        # contacts line
         self.cell(0, 6, self._txt(ORG["line2"]), align="C", ln=1)
 
-        # divider
         self.ln(2)
         self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
-    # ---------- Footer (signature top-right over label; rights lifted) ----------
+    # ---------- Footer (rights only) ----------
     def footer(self):
-        right_margin = 16
-        img_w = 50
-        # signature image at top-right of footer block
-        self.set_y(-36)
-        if ORG_SIGN and os.path.exists(ORG_SIGN):
-            try:
-                x = self.w - right_margin - img_w
-                self.image(ORG_SIGN, x=x, y=self.get_y(), w=img_w)
-                # label centered under the image
-                self.set_xy(x, self.get_y() + 14)  # ~just below signature
-                self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
-                self.cell(img_w, 6, self._txt("Authorised Signatory"), ln=1, align="C")
-            except Exception:
-                # fallback: centered label
-                self.set_y(-18)
-                self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
-                self.cell(0, 6, self._txt("Authorised Signatory"), ln=1, align="C")
-        else:
-            # no image: keep label centered
-            self.set_y(-18)
-            self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
-            self.cell(0, 6, self._txt("Authorised Signatory"), ln=1, align="C")
-
-        # rights text lifted so it doesn't overlap the border line
-        self.set_y(-16)
+        self.set_y(-15)
         self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 8)
         self.cell(0, 5, self._txt(ORG["footer_rights"]), ln=1, align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
-    # Ensure we always return bytes (prevents grey/blank preview & download_button errors)
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
@@ -364,21 +318,14 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Route: {_str(row.get('final_route'))}"), ln=1)
     pdf.ln(2)
 
-    # ===== Subject row (aligned with table width) =====
+    # Subject row (aligned with table)
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w + col2_w, th)
     pdf.text(left + 2, y + th - 2, pdf._txt(f"Subject: {subject}"))
     pdf.ln(th + 2)
 
-    # Line item rows
-    days_nights = _nights_days(row.get("start_date"), row.get("end_date"))
-    base  = int(row.get("base_amount", 0))
-    disc  = int(row.get("discount", 0))
-    final = int(row.get("final_cost", 0))
-    desc = f"{days_nights} {_str(row.get('final_route'))} travel package for {_str(row.get('total_pax'))} pax"
-
-    # header row
+    # Table header
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
@@ -386,36 +333,52 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.text(left+col1_w+2, y+th-2, pdf._txt("Amount"))
     pdf.ln(th)
 
-    # item row
+    # Item row
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
     y = pdf.get_y()
+    days_nights = _nights_days(row.get("start_date"), row.get("end_date"))
+    base  = int(row.get("base_amount", 0))
+    disc  = int(row.get("discount", 0))
+    final = int(row.get("final_cost", 0))
+    desc = f"{days_nights} {_str(row.get('final_route'))} travel package for {_str(row.get('total_pax'))} pax"
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
     pdf.text(left+2, y+th-2, pdf._txt(desc))
-    pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(base)), align="R")
+    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(base)), align="R")
     pdf.ln(th)
 
-    # discount row
+    # Discount
     if disc > 0:
         y = pdf.get_y()
         pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
         pdf.text(left+2, y+th-2, pdf._txt("Less: Discount"))
-        pdf.set_xy(left+col1_w, y)
-        pdf.cell(col2_w-2, th, pdf._txt(f"- {_fmt_money(disc)}"), align="R")
+        pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(f"- {_fmt_money(disc)}"), align="R")
         pdf.ln(th)
 
-    # total row
+    # Total
     y = pdf.get_y()
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
     pdf.text(left+2, y+th-2, pdf._txt("Total Payable"))
-    pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(final)), align="R")
+    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(final)), align="R")
     pdf.ln(th + 4)
 
-    # note
+    # Note
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 9)
     pdf.multi_cell(0, 5, pdf._txt("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
+
+    # Signature block (RIGHT, immediately after note)
+    pdf.ln(6)
+    sig_w = 50  # width of signature image
+    sig_x = pdf.w - 16 - sig_w  # right margin 16
+    sig_y = pdf.get_y()
+    if ORG_SIGN and os.path.exists(ORG_SIGN):
+        try:
+            pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
+        except Exception:
+            pass
+    pdf.set_xy(sig_x, sig_y + 18)  # label below the image; adjust if your image is taller
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
+    pdf.cell(sig_w, 6, pdf._txt("Authorised Signatory"), ln=1, align="C")
 
     return _pdf_bytes(pdf)
 
@@ -454,7 +417,7 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     final   = int(row.get("final_cost", 0))
     bal     = max(final - advance, 0)
 
-    # table
+    # Table
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
@@ -482,8 +445,23 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(bal)), align="R")
     pdf.ln(th+4)
 
+    # Note
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 9)
     pdf.multi_cell(0, 5, pdf._txt(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
+
+    # Signature block (RIGHT, immediately after note)
+    pdf.ln(6)
+    sig_w = 50
+    sig_x = pdf.w - 16 - sig_w
+    sig_y = pdf.get_y()
+    if ORG_SIGN and os.path.exists(ORG_SIGN):
+        try:
+            pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
+        except Exception:
+            pass
+    pdf.set_xy(sig_x, sig_y + 18)
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
+    pdf.cell(sig_w, 6, pdf._txt("Authorised Signatory"), ln=1, align="C")
 
     return _pdf_bytes(pdf)
 
@@ -594,7 +572,7 @@ if "inv_pdf" in st.session_state:
     fname = f"Invoice_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Invoice (PDF)",
-        data=inv_b,  # bytes guaranteed
+        data=inv_b,
         file_name=fname,
         mime="application/pdf",
         use_container_width=True,
@@ -612,7 +590,7 @@ if "slip_pdf" in st.session_state:
     fname2 = f"PaymentSlip_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Payment Slip (PDF)",
-        data=slip_b,  # bytes guaranteed
+        data=slip_b,
         file_name=fname2,
         mime="application/pdf",
         use_container_width=True,
