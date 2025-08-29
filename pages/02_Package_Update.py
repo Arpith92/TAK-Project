@@ -292,6 +292,23 @@ def fetch_vendorpay_df() -> pd.DataFrame:
             })
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_vendor_master() -> pd.DataFrame:
+    """Vendor master list from `vendors` collection."""
+    docs = list(col_vendors.find({}, {"_id":0}))
+    if not docs:
+        return pd.DataFrame(columns=["vendor","category","active","contact"])
+    out = []
+    for d in docs:
+        out.append({
+            "vendor": _str_or_blank(d.get("vendor")),
+            "category": _str_or_blank(d.get("category")),
+            "active": bool(d.get("active", True)),
+            "contact": _str_or_blank(d.get("contact")),
+        })
+    dfv = pd.DataFrame(out)
+    return dfv[dfv["active"] == True] if not dfv.empty else dfv
+
 # ------------------------------------------------------------------
 # Dedupe logic & revision view
 # ------------------------------------------------------------------
@@ -326,6 +343,33 @@ def build_revision_table(df_all: pd.DataFrame, mobile: str) -> pd.DataFrame:
     sub.sort_values(["start_date","revision_num","upload_date"], ascending=[True, False, False], inplace=True)
     return sub[cols]
 
+def _oid_time(iid: str) -> datetime:
+    ts = _created_utc(iid)
+    if ts is None:
+        return datetime.min.replace(tzinfo=None)
+    return ts
+
+def latest_confirmed_unique_by_mobile(df_now: pd.DataFrame) -> pd.DataFrame:
+    """
+    From confirmed rows, keep only the latest per client_mobile.
+    Priority: booking_date desc (None last), then upload_date desc, then ObjectId time desc.
+    """
+    if df_now.empty:
+        return df_now
+    d = df_now.copy()
+    d["booking_date"] = pd.to_datetime(d.get("booking_date")).dt.date
+    d["_bd_sort"] = pd.to_datetime(d["booking_date"], errors="coerce")
+    d["_ud_sort"] = pd.to_datetime(d.get("upload_date"), errors="coerce")
+    d["_oid_sort"] = d["itinerary_id"].apply(_oid_time)
+    d.sort_values(
+        ["client_mobile", "_bd_sort", "_ud_sort", "_oid_sort"],
+        ascending=[True, False, False, False],
+        inplace=True
+    )
+    latest = d.groupby("client_mobile", as_index=False).first()
+    latest.drop(columns=["_bd_sort","_ud_sort","_oid_sort"], inplace=True, errors="ignore")
+    return latest
+
 # ------------------------------------------------------------------
 # Build page data (vectorized merges + final_cost)
 # ------------------------------------------------------------------
@@ -337,6 +381,7 @@ if df_it.empty:
 df_up   = fetch_updates_df()
 df_exp  = fetch_expenses_df()
 df_vpay = fetch_vendorpay_df()
+df_vend_master = fetch_vendor_master()
 
 df = df_it.merge(df_up, on="itinerary_id", how="left")
 df["status"] = df["status"].fillna("pending")
@@ -668,11 +713,13 @@ df_now = df_it.merge(fetch_updates_df(), on="itinerary_id", how="left")
 df_now["status"] = df_now["status"].fillna("pending")
 df_now = _ensure_cols(df_now, ["advance_amount"], 0)
 df_now["advance_amount"] = pd.to_numeric(df_now["advance_amount"], errors="coerce").fillna(0).astype(int)
-for c in ["booking_date","start_date","end_date"]:
+for c in ["booking_date","start_date","end_date","upload_date"]:
     if c in df_now.columns:
         df_now[c] = df_now[c].apply(to_date_or_none)
 
-confirmed = df_now[df_now["status"] == "confirmed"].copy()
+# ✅ Keep ONLY ONE confirmed package per client (mobile): the latest
+confirmed_all = df_now[df_now["status"] == "confirmed"].copy()
+confirmed = latest_confirmed_unique_by_mobile(confirmed_all)
 
 if confirmed.empty:
     st.info("No confirmed packages yet.")
@@ -749,7 +796,7 @@ else:
         fetch_expenses_df.clear()
         return profit, total_expenses, final_cost
 
-    # ------- Vendor payments helpers (FREE vendor entry) -------
+    # ------- Vendor payments helpers -------
     def get_vendor_rows(itinerary_id: str) -> pd.DataFrame:
         vdf = fetch_vendorpay_df()
         return vdf[vdf["itinerary_id"] == itinerary_id].copy() if not vdf.empty else pd.DataFrame()
@@ -799,7 +846,7 @@ else:
 
     # ------- UI for selected confirmed package -------
     if chosen_id:
-        row = df[df["itinerary_id"] == chosen_id].iloc[0]
+        row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
         client_name  = row.get("client_name","")
         booking_date = row.get("booking_date","")
         advance      = _to_int(df_up[df_up["itinerary_id"]==chosen_id]["advance_amount"].fillna(0).sum()) if not df_up.empty else 0
@@ -846,6 +893,35 @@ else:
         # ---- Vendor Payments ----
         st.markdown("### Vendor Payments")
         st.caption("Add or edit vendor rows freely. Balance auto-calculates. You can lock with **Final done** if needed.")
+
+        # ➕ Add to vendor master (instant availability)
+        with st.expander("➕ Add vendor to master"):
+            vc1, vc2, vc3 = st.columns([1,1,2])
+            with vc1:
+                new_cat = st.selectbox("Category", ["Hotel","Car","Bhasmarathi","Poojan","PhotoFrame","Others"])
+            with vc2:
+                new_vendor = st.text_input("Vendor name")
+            with vc3:
+                new_contact = st.text_input("Contact (optional)")
+            if st.button("Add vendor to master"):
+                if (new_vendor or "").strip():
+                    try:
+                        col_vendors.update_one(
+                            {"vendor": new_vendor.strip(), "category": new_cat},
+                            {"$set": {"vendor": new_vendor.strip(), "category": new_cat, "active": True, "contact": new_contact.strip(), "updated_at": datetime.utcnow()}},
+                            upsert=True
+                        )
+                        fetch_vendor_master.clear()
+                        st.success("Vendor added.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not add vendor: {e}")
+                else:
+                    st.warning("Enter a vendor name.")
+
+        # Build vendor options (flat list – data_editor can't do per-row options)
+        vendor_options = sorted(df_vend_master["vendor"].unique().tolist()) if not df_vend_master.empty else []
+
         current_rows = get_vendor_rows(chosen_id)
         if current_rows.empty:
             current_rows = pd.DataFrame([{
@@ -862,7 +938,8 @@ else:
             num_rows="dynamic",
             column_config={
                 "category": st.column_config.SelectboxColumn("Category", options=["Hotel","Car","Bhasmarathi","Poojan","PhotoFrame","Others"]),
-                "vendor": st.column_config.TextColumn("Vendor name"),
+                # ⬇️ use vendor master as dropdown; still allows typing free text if needed
+                "vendor": st.column_config.SelectboxColumn("Vendor", options=[""] + vendor_options),
                 "finalization_cost": st.column_config.NumberColumn("Finalization (₹)", min_value=0, step=100),
                 "adv1_amt": st.column_config.NumberColumn("Adv-1 (₹)", min_value=0, step=100),
                 "adv1_date": st.column_config.DateColumn("Adv-1 Date"),
@@ -921,7 +998,8 @@ st.divider()
 st.subheader("3) Calendar – Confirmed Packages")
 view = st.radio("View", ["By Booking Date", "By Travel Dates"], horizontal=True)
 
-confirmed_view = df[df["status"] == "confirmed"].copy()
+# Use deduped confirmed set for calendar as well
+confirmed_view = latest_confirmed_unique_by_mobile(df[df["status"] == "confirmed"].copy())
 if confirmed_view.empty:
     st.info("No confirmed packages to show on calendar.")
 else:
