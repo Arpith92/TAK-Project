@@ -72,35 +72,25 @@ col_expenses    = db["expenses"]
 # Users + login  (UPDATED)
 # =========================
 def load_users() -> dict:
-    """
-    Load users from Streamlit Secrets first, then fall back to .streamlit/secrets.toml.
-    Optionally supports USERS_JSON env var as a last resort.
-    """
-    # 1) Streamlit Secrets
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
-
-    # 2) Local repo fallback
+    # local fallback
     try:
         try:
-            import tomllib  # py>=3.11
+            import tomllib
         except Exception:
-            import tomli as tomllib  # py<=3.10
+            import tomli as tomllib
         with open(".streamlit/secrets.toml", "rb") as f:
             data = tomllib.load(f)
         u = data.get("users", {})
         if isinstance(u, dict) and u:
             with st.sidebar:
-                st.warning(
-                    "Using users from repo .streamlit/secrets.toml (dev fallback). "
-                    "For production, set [users] in Manage app → Secrets."
-                )
+                st.warning("Using users from repo .streamlit/secrets.toml (dev fallback).")
             return u
     except Exception:
         pass
-
-    # 3) USERS_JSON env var (JSON dict)
+    # env fallback (optional)
     try:
         import json
         raw = os.getenv("USERS_JSON")
@@ -108,11 +98,10 @@ def load_users() -> dict:
             u = json.loads(raw)
             if isinstance(u, dict) and u:
                 with st.sidebar:
-                    st.warning("Using users from USERS_JSON environment variable.")
+                    st.warning("Using users from USERS_JSON env var.")
                 return u
     except Exception:
         pass
-
     return {}
 
 def _login() -> Optional[str]:
@@ -130,13 +119,8 @@ def _login() -> Optional[str]:
     if not users_map:
         st.error(
             "Login not configured.\n\n"
-            "Add a `[users]` table in **Manage app → Settings → Secrets** or in your local `.streamlit/secrets.toml`.\n\n"
-            "Example:\n\n"
-            "[users]\n"
-            "Arpith  = \"Arpith&92\"\n"
-            "Reena   = \"Reena&90\"\n"
-            "Teena   = \"Teena@123\"\n"
-            "Kuldeep = \"Kuldeep&96\""
+            "Add a `[users]` table in **Manage app → Secrets** or in `.streamlit/secrets.toml`.\n\n"
+            "[users]\nArpith=\"Arpith&92\"\nReena=\"Reena&90\"\nTeena=\"Teena@123\"\nKuldeep=\"Kuldeep&96\""
         )
         st.stop()
 
@@ -163,7 +147,7 @@ if not user:
 USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
 is_admin   = (str(user).strip().lower() == "arpith")
-is_manager = (str(user).strip() == "Kuldeep")  # can reassign & credit incentives
+is_manager = (str(user).strip() == "Kuldeep")
 can_reassign = is_admin or is_manager
 
 from tak_audit import audit_pageview
@@ -219,7 +203,7 @@ def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
     return doc or {}
 
 # =========================
-# Final cost logic (vectorized-friendly)
+# Final cost logic + SYNC
 # =========================
 @st.cache_data(ttl=60, show_spinner=False)
 def _final_cost_map(ids: List[str]) -> Dict[str, int]:
@@ -250,8 +234,24 @@ def _compute_incentive(final_amt: int) -> int:
     if final_amt >= 20000: return 500
     return 0
 
+def _sync_cost_to_updates(iid: str, final_cost: int, base: int, disc: int) -> None:
+    """
+    Mirror cost fields into package_updates so dashboards/pages that read updates see the numbers.
+    """
+    col_updates.update_one(
+        {"itinerary_id": str(iid)},
+        {"$set": {
+            "package_cost": int(final_cost),
+            "final_package_cost": int(final_cost),
+            "base_package_cost": int(base),
+            "discount": int(disc),
+            "updated_at": datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+
 # =========================
-# Cached fetchers (lean projections)
+# Cached fetchers
 # =========================
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_assigned_followups_raw(assigned_to: Optional[str]) -> pd.DataFrame:
@@ -280,7 +280,6 @@ def fetch_assigned_followups_raw(assigned_to: Optional[str]) -> pd.DataFrame:
     return df_u.merge(df_i, on="itinerary_id", how="left")
 
 def _dedupe_latest_by_mobile(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only the latest package per client_mobile using ObjectId time (fast & robust)."""
     if df.empty: return df
     df2 = df.copy()
     df2["client_mobile"] = df2["client_mobile"].astype(str).fillna("")
@@ -385,18 +384,35 @@ def upsert_update_status(
     elif final_status == "confirmed":
         if booking_date: upd["booking_date"] = datetime.combine(booking_date, dtime.min)
         if advance_amount is not None: upd["advance_amount"] = int(advance_amount)
+
+        # Pull latest cost from expenses and stamp into updates so other pages see it
         fc = _final_cost_for(iid)
-        upd["incentive"] = _compute_incentive(fc)
-        upd["rep_name"] = credit_user
-        upd["assigned_to"] = None
+        exp_doc = col_expenses.find_one({"itinerary_id": str(iid)},
+                                        {"base_package_cost":1,"discount":1,"final_package_cost":1,"package_cost":1}) or {}
+        base_amt = _to_int(exp_doc.get("base_package_cost", 0))
+        disc_amt = _to_int(exp_doc.get("discount", 0))
+        if fc <= 0:  # fallback if expenses not saved yet
+            fc = max(0, base_amt - disc_amt)
+
+        upd.update({
+            "incentive": _compute_incentive(fc),
+            "rep_name": credit_user,
+            "assigned_to": None,
+            "package_cost": int(fc),
+            "final_package_cost": int(fc),
+            "base_package_cost": int(base_amt),
+            "discount": int(disc_amt),
+        })
     elif final_status == "cancelled":
         upd["cancellation_reason"] = str(cancellation_reason or "")
         upd["assigned_to"] = None
+
     col_updates.update_one({"itinerary_id": str(iid)}, {"$set": upd}, upsert=True)
 
 def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_user: str, credit_user: Optional[str]=None) -> None:
     base = _to_int(base_amount); disc = _to_int(discount)
     final_cost = max(0, base - disc)
+    # 1) persist in expenses
     col_expenses.update_one(
         {"itinerary_id": str(iid)},
         {"$set": {
@@ -409,11 +425,18 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
         }},
         upsert=True
     )
+    # 2) mirror into updates so dashboards read it
+    _sync_cost_to_updates(iid=str(iid), final_cost=final_cost, base=base, disc=disc)
+
+    # 3) if already confirmed, recompute incentive + keep/overwrite rep
     upd = col_updates.find_one({"itinerary_id": str(iid)}, {"status":1, "rep_name":1})
     if upd and upd.get("status") == "confirmed":
         inc = _compute_incentive(int(final_cost))
         rep = credit_user or upd.get("rep_name") or actor_user
-        col_updates.update_one({"itinerary_id": str(iid)}, {"$set": {"incentive": inc, "rep_name": rep}})
+        col_updates.update_one(
+            {"itinerary_id": str(iid)},
+            {"$set": {"incentive": inc, "rep_name": rep, "updated_at": datetime.utcnow()}}
+        )
 
 # =============================================================================
 # UI
@@ -439,7 +462,7 @@ if is_admin or is_manager:
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
 
 # =========================
-# TAB 1: Follow-ups (DEDUPED BY MOBILE)
+# TAB 1: Follow-ups
 # =========================
 with tabs[0]:
     df_raw = fetch_assigned_followups_raw(user_filter)
@@ -612,8 +635,9 @@ with tabs[0]:
         try:
             save_final_package_cost(chosen_id, int(base_amount), int(discount),
                                     actor_user=user, credit_user=credit_user_cost)
-            st.success("Final package cost saved. Incentive updated if already confirmed.")
+            st.success("Final package cost saved. Synced to updates; incentive updated if already confirmed.")
             _final_cost_map.clear()
+            fetch_assigned_followups_raw.clear()
             st.rerun()
         except Exception as e:
             st.error(f"Could not save package cost: {e}")
@@ -726,7 +750,6 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
-        # Attach final cost in batch
         id_list = df_all["itinerary_id"].astype(str).tolist()
         fc_map_all = _final_cost_map(id_list)
         df_all["final_cost"] = df_all["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
@@ -741,7 +764,6 @@ with tabs[1]:
                 df_all["final_route"].astype(str).str.lower().str.contains(s2)
             ]
 
-        # Status KPIs
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("✅ Confirmed", int((df_all["status"]=="confirmed").sum()))
         m2.metric("🟡 Pending", int((df_all["status"]=="pending").sum()))
@@ -779,7 +801,7 @@ with tabs[1]:
             sel_multi = st.multiselect(
                 "Select one or more packages to reassign",
                 options_all,
-                help="You can type to search by ACH, client or mobile"
+                help="Type to search by ACH, client or mobile"
             )
 
             target_user = st.selectbox(
@@ -793,11 +815,10 @@ with tabs[1]:
                 try:
                     moved = 0
                     for row in sel_multi:
-                        iid = row.split(" | ")[-1]  # itinerary_id
+                        iid = row.split(" | ")[-1]
                         reassign_followup(iid, from_user=user, to_user=target_user)
                         moved += 1
 
-                    # Clear caches so UI updates instantly
                     fetch_assigned_followups_raw.clear()
                     fetch_packages_with_updates.clear()
 
@@ -806,7 +827,6 @@ with tabs[1]:
                 except Exception as e:
                     st.error(f"Could not reassign: {e}")
 
-        # Export CSV (kept after bulk reassign UI)
         if st.button("⬇️ Export table (CSV)"):
             out3 = io.StringIO()
             view.drop(columns=["itinerary_id"]).to_csv(out3, index=False)
