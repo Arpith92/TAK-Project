@@ -67,9 +67,9 @@ def get_db():
     return _get_client()["TAK_DB"]
 
 db = get_db()
-col_updates  = db["package_updates"]     # incentives live here
-col_split    = db["expense_splitwise"]   # splitwise-style expenses/settlements
-col_payroll  = db["salary_payments"]     # NEW: salary/UTR records per employee-month
+col_updates  = db["package_updates"]     # incentives
+col_split    = db["expense_splitwise"]   # expenses/settlements
+col_payroll  = db["salary_payments"]     # salary/UTR per employee-month
 
 # =============================
 # Users & login
@@ -98,13 +98,12 @@ def load_users() -> dict:
         pass
     return {}
 
-# Admins (Kuldeep included, per your policy)
 ADMIN_USERS = set(st.secrets.get("admin_users", ["Arpith", "Kuldeep"]))
 
-# Base salary & fuel rules — update here if needed
+# Base salary & fuel rules
 SALARY_MAP  = {
-    "Arpith": 10000,   # fixed
-    "Reena":  0,       # no base (incentives only)
+    "Arpith": 10000,
+    "Reena":  0,
     "Kuldeep": 10000,
     "Teena":  5000,
 }
@@ -152,16 +151,18 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
-# Audit
-from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), page="05_Salary_Slips")
+# Audit (optional)
+try:
+    from tak_audit import audit_pageview
+    audit_pageview(st.session_state.get("user", "Unknown"), page="05_Salary_Slips")
+except Exception:
+    pass
 
 # =============================
 # Helpers
 # =============================
 def month_bounds(d: date) -> Tuple[date, date]:
     first = d.replace(day=1)
-    # next month 1st
     next_first = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
     last = next_first - timedelta(days=1)
     return first, last
@@ -181,26 +182,38 @@ def money(n: int) -> str:
 def all_employees() -> List[str]:
     return sorted(load_users().keys())
 
-# =============================
-# Inputs (who + which month)
-# =============================
-emp_opts = all_employees()
-if is_admin:
-    mode = st.radio("View mode", ["Single employee", "All employees (overview)"], horizontal=True)
-    if mode == "Single employee":
-        view_emp = st.selectbox("View employee", emp_opts, index=(emp_opts.index(user) if user in emp_opts else 0))
-    else:
-        view_emp = None  # handled below
-else:
-    mode = "Single employee"
-    view_emp = user
+def _ym_key(d: date) -> str:
+    return d.strftime("%Y-%m")  # e.g., 2025-08
 
-month_pick = st.date_input("Slip month", value=date.today())
-month_start, month_end = month_bounds(month_pick)
-st.caption(f"Period: **{month_start} → {month_end}**")
+def load_payroll_record(emp: str, month_key: str) -> dict:
+    return col_payroll.find_one({"employee": emp, "month": month_key}, {"_id":0}) or {}
+
+def save_or_update_pay(emp: str, month_key: str, *, amount: int, paid_on: Optional[date], utr: str, notes: str, components: dict, paid_flag: bool):
+    payload = {
+        "employee": emp,
+        "month": month_key,
+        "amount": int(amount),
+        "paid": bool(paid_flag),
+        "paid_on": datetime.combine(paid_on, datetime.min.time()) if (paid_on and paid_flag) else None,
+        "utr": (utr or "").strip(),
+        "notes": (notes or "").strip(),
+        "components": components,
+        "updated_at": datetime.utcnow(),
+        "updated_by": st.session_state.get("user",""),
+    }
+    col_payroll.update_one({"employee": emp, "month": month_key}, {"$set": payload}, upsert=True)
+
+def load_all_payroll_for_month(month_key: str) -> List[dict]:
+    return list(col_payroll.find({"month": month_key}, {"_id":0}))
+
+def load_all_payroll_all_months() -> pd.DataFrame:
+    rows = list(col_payroll.find({}, {"_id":0}))
+    if not rows:
+        return pd.DataFrame(columns=["employee","month","amount","paid","components"])
+    return pd.DataFrame(rows)
 
 # =============================
-# Data fetchers
+# Calculators
 # =============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
@@ -248,33 +261,6 @@ def settlements_paid(emp: str, start: date, end: date) -> int:
     }
     return sum(_to_int(r.get("amount",0)) for r in col_split.find(q, {"amount":1}))
 
-# Payroll records CRUD
-def _ym_key(d: date) -> str:
-    return d.strftime("%Y-%m")  # e.g., 2025-08
-
-def load_payroll_record(emp: str, month_key: str) -> dict:
-    return col_payroll.find_one({"employee": emp, "month": month_key}, {"_id":0}) or {}
-
-def save_or_update_pay(emp: str, month_key: str, *, amount: int, paid_on: date, utr: str, notes: str, components: dict):
-    payload = {
-        "employee": emp,
-        "month": month_key,
-        "amount": int(amount),
-        "paid_on": datetime.combine(paid_on, datetime.min.time()) if paid_on else None,
-        "utr": (utr or "").strip(),
-        "notes": (notes or "").strip(),
-        "components": components,   # snapshot of calc parts used for net pay (base, fuel, incentives, reimb)
-        "updated_at": datetime.utcnow(),
-        "updated_by": st.session_state.get("user",""),
-    }
-    col_payroll.update_one({"employee": emp, "month": month_key}, {"$set": payload}, upsert=True)
-
-def load_all_payroll_for_month(month_key: str) -> List[dict]:
-    return list(col_payroll.find({"month": month_key}, {"_id":0}))
-
-# =============================
-# Calculators
-# =============================
 def calc_components(emp: str, start: date, end: date) -> dict:
     base_salary = _to_int(SALARY_MAP.get(emp, 0))
     fuel_allow  = _to_int(FUEL_MAP.get(emp, 0))
@@ -298,44 +284,132 @@ def calc_components(emp: str, start: date, end: date) -> dict:
     }
 
 # =============================
-# MODE: ALL EMPLOYEES OVERVIEW
+# Inputs (who + which month)
 # =============================
+emp_opts = all_employees()
+if is_admin:
+    mode = st.radio("View mode", ["Single employee", "All employees (overview)"], horizontal=True)
+    if mode == "Single employee":
+        view_emp = st.selectbox("View employee", emp_opts, index=(emp_opts.index(user) if user in emp_opts else 0))
+    else:
+        view_emp = None
+else:
+    mode = "Single employee"
+    view_emp = user
+
+month_pick = st.date_input("Slip month", value=date.today())
+month_start, month_end = month_bounds(month_pick)
+st.caption(f"Period: **{month_start} → {month_end}**")
 month_key = _ym_key(month_start)
 
+# =============================
+# TOP: Overall pending summary (all months)
+# =============================
+st.divider()
+st.subheader("📊 Overall pending (all months)")
+df_all = load_all_payroll_all_months()
+if df_all.empty:
+    st.caption("No saved salary records yet.")
+else:
+    # compute due vs paid from saved snapshots
+    df_all["due"] = df_all["components"].apply(lambda c: _to_int((c or {}).get("net_pay", 0)))
+    df_all["paid_amt"] = df_all["amount"].apply(_to_int)
+    sel_emp = st.multiselect("Filter employees", options=emp_opts, default=emp_opts)
+    df_f = df_all[df_all["employee"].isin(sel_emp)]
+    agg = (
+        df_f.groupby("employee", as_index=False)[["due","paid_amt"]]
+        .sum()
+        .assign(pending=lambda d: d["due"] - d["paid_amt"])
+        .sort_values("employee")
+    )
+    show = agg.rename(columns={"employee":"Employee","due":"Total Due (₹)","paid_amt":"Total Paid (₹)","pending":"Pending (₹)"})
+    show[["Total Due (₹)","Total Paid (₹)","Pending (₹)"]] = show[["Total Due (₹)","Total Paid (₹)","Pending (₹)"]].applymap(lambda x: f"₹ {int(x):,}")
+    st.dataframe(show, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# =============================
+# MODE: ALL EMPLOYEES OVERVIEW  (bulk edit + save)
+# =============================
 if mode == "All employees (overview)":
     st.subheader(f"👥 Team overview — {month_start.strftime('%B %Y')}")
-    rows = []
+
+    # Build current table & editable controls
+    pending_total = 0
+    edit_states: Dict[str, Dict] = {}
     for emp in emp_opts:
         comp = calc_components(emp, month_start, month_end)
         payrec = load_payroll_record(emp, month_key)
-        rows.append({
-            "Employee": emp,
-            "Base": comp["base_salary"],
-            "Fuel": comp["fuel_allow"],
-            "Incentives": comp["incentives"],
-            "Reimb": comp["net_reimb"],
-            "Net Pay": comp["net_pay"],
-            "Paid?": "Yes" if payrec else "No",
-            "Paid on": payrec.get("paid_on"),
-            "UTR": payrec.get("utr",""),
-            "Amount paid": payrec.get("amount", 0),
-        })
-    df_team = pd.DataFrame(rows)
-    if not df_team.empty:
-        df_team["Paid on"] = pd.to_datetime(df_team["Paid on"]).dt.date
-        show = df_team.copy()
-        show[["Base","Fuel","Incentives","Reimb","Net Pay","Amount paid"]] = show[["Base","Fuel","Incentives","Reimb","Net Pay","Amount paid"]].applymap(lambda x: f"₹ {int(x):,}")
-        st.dataframe(
-            show.sort_values(["Paid?","Employee"], ascending=[True, True]),
-            use_container_width=True, hide_index=True
-        )
-    else:
-        st.info("No users found.")
+        paid_flag = bool(payrec.get("paid", False))
+        paid_on = pd.to_datetime(payrec.get("paid_on")).date() if payrec.get("paid_on") else date.today()
+        utr = payrec.get("utr","")
+        amount_paid = _to_int(payrec.get("amount", 0))
+        default_amt = amount_paid if amount_paid else (comp["net_pay"] if paid_flag else 0)
+
+        with st.container(border=True):
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.2,1,1,1,1.2,1.2,1.4])
+            c1.markdown(f"**{emp}**")
+            c2.metric("Base", money(comp["base_salary"]))
+            c3.metric("Fuel", money(comp["fuel_allow"]))
+            c4.metric("Incentives", money(comp["incentives"]))
+            c5.metric("Reimb", money(comp["net_reimb"]))
+            c6.metric("Net Pay", money(comp["net_pay"]))
+
+            paid_choice = c7.selectbox(f"Paid? — {emp}", ["No","Yes"], index=(1 if paid_flag else 0), key=f"paid_{emp}")
+            paid_yes = (paid_choice == "Yes")
+            d1, d2, d3, d4 = st.columns([1,1,1,1.4])
+            with d1:
+                pay_date = st.date_input("Paid on", value=(paid_on if paid_yes else date.today()), key=f"date_{emp}", disabled=(not paid_yes))
+            with d2:
+                pay_amt = st.number_input("Amount paid (₹)", min_value=0, step=500,
+                                          value=int(default_amt if paid_yes else 0),
+                                          key=f"amt_{emp}", disabled=(not paid_yes))
+            with d3:
+                utr_val = st.text_input("UTR / Ref", value=(utr if paid_yes else ""), key=f"utr_{emp}", placeholder="UPI/NEFT ref", disabled=(not paid_yes))
+            balance = comp["net_pay"] - (int(pay_amt) if paid_yes else 0)
+            with d4:
+                st.metric("Balance", money(balance if balance>=0 else 0))
+            pending_total += max(balance, 0)
+
+            # Capture state for later bulk save
+            edit_states[emp] = {
+                "paid": paid_yes,
+                "amount": int(pay_amt if paid_yes else 0),
+                "paid_on": pay_date if paid_yes else None,
+                "utr": utr_val if paid_yes else "",
+                "components": {
+                    "base_salary": comp["base_salary"],
+                    "fuel_allow": comp["fuel_allow"],
+                    "incentives": comp["incentives"],
+                    "net_reimb": comp["net_reimb"],
+                    "net_pay": comp["net_pay"],
+                    "period": {"start": str(month_start), "end": str(month_end)}
+                },
+                "notes": f"Salary for {month_start.strftime('%b %Y')}",
+            }
+
+    st.info(f"**Total balance (unpaid across visible rows):** {money(int(pending_total))}")
+
+    if is_admin:
+        if st.button("💾 Save all changes", use_container_width=True, type="primary"):
+            for emp, payload in edit_states.items():
+                save_or_update_pay(
+                    emp=emp,
+                    month_key=month_key,
+                    amount=payload["amount"],
+                    paid_on=payload["paid_on"],
+                    utr=payload["utr"],
+                    notes=payload["notes"],
+                    components=payload["components"],
+                    paid_flag=payload["paid"],
+                )
+            st.success("Saved all payment updates.")
+            st.rerun()
 
     st.divider()
 
 # =============================
-# MODE: SINGLE EMPLOYEE
+# MODE: SINGLE EMPLOYEE (detailed)
 # =============================
 if mode == "Single employee":
     comp = calc_components(view_emp, month_start, month_end)
@@ -378,7 +452,6 @@ if mode == "Single employee":
             )
     st.divider()
 
-    # Printable summary
     with st.expander("Printable slip (summary)"):
         st.markdown(f"""
 **Employee:** {view_emp}  
@@ -392,38 +465,46 @@ if mode == "Single employee":
 - **Net Pay:** {money(comp['net_pay'])}  
 """)
 
-    # =============================
-    # Admin: mark / update payment for this employee & month
-    # =============================
+    # Admin payment controls with Paid? toggle
     if is_admin:
         st.divider()
         st.subheader("💵 Mark/Update payment for this month")
 
         existing = load_payroll_record(view_emp, month_key)
+        already_paid = bool(existing.get("paid", False))
         default_paid_on = pd.to_datetime(existing.get("paid_on")).date() if existing.get("paid_on") else date.today()
-        default_amt     = int(existing.get("amount", comp["net_pay"]))
+        default_amt     = int(existing.get("amount", 0))
         default_utr     = existing.get("utr","")
         default_notes   = existing.get("notes","")
 
-        with st.form("pay_form", clear_on_submit=False):
-            p1, p2, p3 = st.columns([1,1,2])
-            with p1:
-                pay_amount = st.number_input("Amount paid (₹)", min_value=0, step=500, value=int(default_amt))
-            with p2:
-                pay_date = st.date_input("Paid on", value=default_paid_on)
-            with p3:
-                utr = st.text_input("UTR / Ref", value=default_utr, placeholder="UPI/NEFT reference")
-            notes = st.text_area("Notes (optional)", value=default_notes, placeholder="e.g., Salary for Aug 2025")
+        paid_choice = st.selectbox("Paid?", ["No","Yes"], index=(1 if already_paid else 0))
+        paid_yes = (paid_choice == "Yes")
 
-            submitted = st.form_submit_button("💾 Save payment record")
+        p1, p2, p3 = st.columns([1,1,2])
+        with p1:
+            pay_amount = st.number_input("Amount paid (₹)", min_value=0, step=500,
+                                         value=int(default_amt if paid_yes else 0),
+                                         disabled=(not paid_yes))
+        with p2:
+            pay_date = st.date_input("Paid on", value=(default_paid_on if paid_yes else date.today()),
+                                     disabled=(not paid_yes))
+        with p3:
+            utr = st.text_input("UTR / Ref", value=(default_utr if paid_yes else ""),
+                                placeholder="UPI/NEFT reference", disabled=(not paid_yes))
 
-        if submitted:
+        notes = st.text_area("Notes (optional)", value=default_notes, placeholder="e.g., Salary for Aug 2025", disabled=False)
+
+        # Balance preview
+        balance_preview = comp["net_pay"] - (int(pay_amount) if paid_yes else 0)
+        st.metric("Balance (after this payment)", money(balance_preview if balance_preview >= 0 else 0))
+
+        if st.button("💾 Save payment record", type="primary"):
             save_or_update_pay(
                 emp=view_emp,
                 month_key=month_key,
-                amount=int(pay_amount),
-                paid_on=pay_date,
-                utr=utr,
+                amount=int(pay_amount if paid_yes else 0),
+                paid_on=(pay_date if paid_yes else None),
+                utr=(utr if paid_yes else ""),
                 notes=notes,
                 components={
                     "base_salary": comp["base_salary"],
@@ -432,16 +513,17 @@ if mode == "Single employee":
                     "net_reimb": comp["net_reimb"],
                     "net_pay": comp["net_pay"],
                     "period": {"start": str(month_start), "end": str(month_end)}
-                }
+                },
+                paid_flag=paid_yes,
             )
             st.success("Payment record saved.")
             st.rerun()
 
-        # show current payment record if exists
         cur = load_payroll_record(view_emp, month_key)
         if cur:
             st.caption("Current payment record")
             rec = {
+                "Paid?": "Yes" if cur.get("paid") else "No",
                 "Paid on": pd.to_datetime(cur.get("paid_on")).date() if cur.get("paid_on") else None,
                 "Amount paid (₹)": cur.get("amount", 0),
                 "UTR / Ref": cur.get("utr",""),
@@ -452,7 +534,7 @@ if mode == "Single employee":
             st.write(rec)
 
 # =============================
-# Admin: Month payments table
+# Admin: Month payments table (for reference)
 # =============================
 if is_admin:
     st.divider()
@@ -465,6 +547,7 @@ if is_admin:
         for r in all_pay:
             rows.append({
                 "Employee": r.get("employee",""),
+                "Paid?": "Yes" if r.get("paid") else "No",
                 "Paid on": pd.to_datetime(r.get("paid_on")).date() if r.get("paid_on") else None,
                 "Amount paid (₹)": _to_int(r.get("amount",0)),
                 "UTR / Ref": r.get("utr",""),
