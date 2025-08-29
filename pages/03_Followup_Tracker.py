@@ -250,6 +250,72 @@ def _sync_cost_to_updates(iid: str, final_cost: int, base: int, disc: int) -> No
         upsert=True,
     )
 
+# ======== NEW: Auto-confirm other packages (same mobile) ========
+def _auto_confirm_other_packages(current_iid: str, credit_user: str, booking_date: Optional[date], actor_user: str):
+    """When one itinerary is confirmed, auto-confirm all *other* itineraries with the same client_mobile."""
+    base_doc = _get_itinerary(current_iid, {"client_mobile":1, "client_name":1, "ach_id":1})
+    mobile = str(base_doc.get("client_mobile","")).strip()
+    if not mobile:
+        return
+
+    # Find other itineraries with the same mobile
+    others = list(col_itineraries.find(
+        {"client_mobile": mobile},
+        {"_id":1, "ach_id":1, "client_name":1, "client_mobile":1}
+    ))
+    other_ids = [str(o["_id"]) for o in others if str(o["_id"]) != str(current_iid)]
+    if not other_ids:
+        return
+
+    # We only auto-confirm those that are not already confirmed/cancelled
+    existing_upds = list(col_updates.find({"itinerary_id": {"$in": other_ids}}, {"itinerary_id":1, "status":1}))
+    status_map = {str(u.get("itinerary_id")): u.get("status") for u in existing_upds}
+
+    for oid in other_ids:
+        if status_map.get(oid) in ("confirmed", "cancelled"):
+            continue  # skip already finalised
+
+        # Compute cost for that itinerary (from expenses if available)
+        fc = _final_cost_for(oid)
+        exp_doc = col_expenses.find_one({"itinerary_id": str(oid)},
+                                        {"base_package_cost":1,"discount":1,"final_package_cost":1,"package_cost":1}) or {}
+        base_amt = _to_int(exp_doc.get("base_package_cost", 0))
+        disc_amt = _to_int(exp_doc.get("discount", 0))
+        if fc <= 0:
+            fc = max(0, base_amt - disc_amt)
+
+        # Trail log
+        base_it = _get_itinerary(oid, {"client_name":1,"client_mobile":1,"ach_id":1})
+        col_followups.insert_one({
+            "itinerary_id": str(oid),
+            "created_at": datetime.utcnow(),
+            "created_by": actor_user,
+            "status": "confirmed",
+            "comment": f"Auto-confirmed due to confirmation of another package for same mobile {mobile}.",
+            "next_followup_on": None,
+            "cancellation_reason": "",
+            "credited_to": credit_user,
+            "client_name": base_it.get("client_name",""),
+            "client_mobile": base_it.get("client_mobile",""),
+            "ach_id": base_it.get("ach_id",""),
+        })
+
+        # Update package_updates (advance set 0 for auto-confirm)
+        upd = {
+            "status": "confirmed",
+            "booking_date": (datetime.combine(booking_date, dtime.min) if booking_date else None),
+            "advance_amount": 0,
+            "incentive": _compute_incentive(fc),
+            "rep_name": credit_user,
+            "assigned_to": None,
+            "package_cost": int(fc),
+            "final_package_cost": int(fc),
+            "base_package_cost": int(base_amt),
+            "discount": int(disc_amt),
+            "updated_at": datetime.utcnow(),
+        }
+        col_updates.update_one({"itinerary_id": str(oid)}, {"$set": upd}, upsert=True)
+
 # =========================
 # Cached fetchers
 # =========================
@@ -391,7 +457,7 @@ def upsert_update_status(
                                         {"base_package_cost":1,"discount":1,"final_package_cost":1,"package_cost":1}) or {}
         base_amt = _to_int(exp_doc.get("base_package_cost", 0))
         disc_amt = _to_int(exp_doc.get("discount", 0))
-        if fc <= 0:  # fallback if expenses not saved yet
+        if fc <= 0:
             fc = max(0, base_amt - disc_amt)
 
         upd.update({
@@ -403,6 +469,13 @@ def upsert_update_status(
             "base_package_cost": int(base_amt),
             "discount": int(disc_amt),
         })
+
+        # NEW: auto-confirm other packages for the same mobile
+        _auto_confirm_other_packages(current_iid=str(iid),
+                                     credit_user=credit_user,
+                                     booking_date=booking_date,
+                                     actor_user=actor_user)
+
     elif final_status == "cancelled":
         upd["cancellation_reason"] = str(cancellation_reason or "")
         upd["assigned_to"] = None
@@ -750,6 +823,7 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
+        # Attach final cost in batch
         id_list = df_all["itinerary_id"].astype(str).tolist()
         fc_map_all = _final_cost_map(id_list)
         df_all["final_cost"] = df_all["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
@@ -764,6 +838,7 @@ with tabs[1]:
                 df_all["final_route"].astype(str).str.lower().str.contains(s2)
             ]
 
+        # Status KPIs
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("✅ Confirmed", int((df_all["status"]=="confirmed").sum()))
         m2.metric("🟡 Pending", int((df_all["status"]=="pending").sum()))
