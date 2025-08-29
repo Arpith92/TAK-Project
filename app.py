@@ -760,45 +760,59 @@ else:
             else:
                 picked_client_name = parts[0]
 
-    if picked_client_mobile:
-        docs = list(
-            col_it.find({"client_mobile": picked_client_mobile}, {})
-            .sort([("start_date", -1), ("revision_num",-1), ("upload_date",-1)])
+    # --- after you've parsed sel_client into picked_client_name / picked_client_mobile ---
+
+if picked_client_mobile:
+    # Fetch ONLY this client's docs (name + mobile), newest first
+    rx_name = f"^{re.escape(picked_client_name)}$" if picked_client_name else ".*"
+    docs = list(
+        col_it.find(
+            {
+                "client_mobile": picked_client_mobile,
+                "client_name": {"$regex": rx_name, "$options": "i"},
+            },
+            {}
+        ).sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
+    )
+
+    if not docs:
+        st.info("No itineraries found for this client.")
+    else:
+        # Group revisions by start_date (i.e., by 'package')
+        from collections import defaultdict
+        by_start = defaultdict(list)
+        for d in docs:
+            by_start[str(d.get("start_date", ""))].append(d)
+
+        # Choose a package (start date)
+        start_dates = sorted(by_start.keys(), reverse=True)
+        sel_start = st.selectbox(
+            "Select package start date",
+            start_dates,
+            key=f"start_{picked_client_mobile}",
         )
-        if docs:
-            labels = [
-                f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
-                for d in docs
-            ]
-            rev_key = f"rev_pick_{picked_client_mobile}"
-            selected_idx = st.selectbox(
-                "Pick a start date & revision",
-                options=list(range(len(labels))),
-                format_func=lambda i: labels[i],
-                index=0,
-                key=rev_key,
-            )
-            if not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(docs):
-                selected_idx = 0
 
-            if st.button("Load this package", use_container_width=False, key=f"load_{picked_client_mobile}"):
-                loaded_doc = docs[selected_idx]
-                st.session_state[_SEARCH_DOC_KEY] = loaded_doc
+        # Show revisions ONLY for that package
+        revs = sorted(
+            by_start.get(sel_start, []),
+            key=lambda x: int(x.get("revision_num", 0) or 0),
+            reverse=True,
+        )
+        rev_labels = [
+            f"rev:{int(d.get('revision_num', 0) or 0)} • uploaded:{str(d.get('upload_date',''))[:10]}"
+            for d in revs
+        ]
+        sel_rev_idx = st.selectbox(
+            "Select revision",
+            list(range(len(revs))),
+            format_func=lambda i: rev_labels[i],
+            key=f"rev_{picked_client_mobile}_{sel_start}",
+        )
 
-                def _rows_from_doc(doc: dict, start: dt.date) -> pd.DataFrame:
-                    rows = doc.get("rows") or []
-                    df = pd.DataFrame(rows)
-                    for c in TARGET_COLS:
-                        if c not in df.columns:
-                            df[c] = 0 if "Cost" in c else ""
-                    df = _normalize_to_model(df)
-                    df = df.reset_index(drop=True)
-                    for i in range(len(df)):
-                        df.at[i, "Date"] = start + dt.timedelta(days=i)
-                    return df[TARGET_COLS]
-                start_date = dt.date.fromisoformat(str(loaded_doc.get("start_date")))
-                st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
-                st.rerun()
+        if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
+            loaded_doc = revs[sel_rev_idx]
+            st.session_state[_SEARCH_DOC_KEY] = loaded_doc  # keep across reruns
+            st.rerun()
         else:
             st.info("No itineraries found for this number yet.")
 
