@@ -69,28 +69,38 @@ col_followups   = db["followups"]
 col_expenses    = db["expenses"]
 
 # =========================
-# Users + login
+# =========================
+# Users + login  (REPLACE THIS BLOCK)
 # =========================
 def load_users() -> dict:
+    """
+    Load users from Streamlit Secrets first, then fall back to .streamlit/secrets.toml
+    (useful when running locally). Optionally supports USERS_JSON env var.
+    """
+    # 1) Streamlit Cloud / Manage app → Secrets
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
-    return {}
 
-def _login() -> Optional[str]:
-    with st.sidebar:
-        if st.session_state.get("user"):
-            st.markdown(f"**Signed in as:** {st.session_state['user']}")
-            if st.button("Log out"):
-                st.session_state.pop("user", None)
-                st.rerun()
-    if st.session_state.get("user"):
-        return st.session_state["user"]
-
-    users_map = load_users()
-    if not users_map:
-        st.error("Login not configured. Add `[users]` to Secrets.")
-        st.stop()
+    # 2) Local fallback: repo .streamlit/secrets.toml
+    try:
+        try:
+            import tomllib  # py>=3.11
+        except Exception:
+            import tomli as tomllib  # py<=3.10
+        with open(".streamlit/secrets.toml", "rb") as f:
+            data = tomllib.load(f)
+        u = data.get("users", {})
+        if isinstance(u, dict) and u:
+            # Show a gentle warning in the sidebar so you know which source is used
+            with st.sidebar:
+                st.warning(
+                    "Using users from repo .streamlit/secrets.toml (dev fallback). "
+                    "For production, set [users] in Manage app → Secrets."
+                )
+            return u
+    except Exception:
+        pass
 
     st.markdown("### 🔐 Login")
     c1, c2 = st.columns(2)
