@@ -251,20 +251,48 @@ def _ensure_numeric_costs(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _editor_sync():
-    """Copy widget value back to our model on every edit (permanent fix)."""
+    """Copy widget value back to our model on every edit (robust to multiple shapes)."""
     raw = st.session_state.get(_EDITOR_KEY, None)
     if raw is None:
         return
-    # data_editor stores list[dict] in session_state; convert safely
-    df = pd.DataFrame(raw)
+
+    # 1) Already a DataFrame (newer Streamlit)
+    if isinstance(raw, pd.DataFrame):
+        df = raw.copy()
+
+    # 2) List of row dicts (older Streamlit)
+    elif isinstance(raw, list):
+        df = pd.DataFrame(raw)
+
+    # 3) Dict container (some builds: {"data": [...]} or col-wise dict)
+    elif isinstance(raw, dict):
+        if "data" in raw and isinstance(raw["data"], list):
+            df = pd.DataFrame(raw["data"])
+        else:
+            # last resort – try column-wise dict → frame
+            try:
+                df = pd.DataFrame.from_dict(raw)
+            except Exception:
+                # don’t crash app; keep existing model
+                return
+    else:
+        # unsupported type – keep existing model
+        return
+
+    # Ensure all expected columns exist and types are stable
     for c in TARGET_COLS:
         if c not in df.columns:
-            df[c] = 0 if "Cost" in c else ""
-    # keep order and types stable
+            df[c] = 0.0 if "Cost" in c else ""
+
+    # Normalize types
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-    df = _ensure_numeric_costs(df)
+
+    for c in ["Pkg-Car Cost", "Pkg-Hotel Cost", "Act-Car Cost", "Act-Hotel Cost"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
     st.session_state[_MODEL_KEY] = df[TARGET_COLS].copy()
+
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
