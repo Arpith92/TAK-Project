@@ -228,7 +228,6 @@ def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
     })[TARGET_COLS]
 
 def _normalize_to_model(obj) -> pd.DataFrame:
-    """Return a DF with TARGET_COLS and fixed dtypes, regardless of the editor's payload shape."""
     if obj is None:
         return pd.DataFrame(columns=TARGET_COLS)
 
@@ -260,7 +259,7 @@ def _normalize_to_model(obj) -> pd.DataFrame:
     return df[TARGET_COLS].copy()
 
 def _seed_editor_model(n_rows: int, start: _date):
-    st.session_state[_MODEL_KEY] = _blank_df(n_rows, start)
+    st.session_state.setdefault(_MODEL_KEY, _blank_df(n_rows, start))
 
 def _apply_dates_days(n_rows: int, start: _date):
     df = st.session_state.get(_MODEL_KEY)
@@ -276,9 +275,25 @@ def _apply_dates_days(n_rows: int, start: _date):
     st.session_state[_MODEL_KEY] = df
 
 def _editor_sync():
+    """
+    Robust sync: ignore spurious clears that can happen on first rerun.
+    Only commit when we actually received structured rows/cols.
+    """
     raw = st.session_state.get(_EDITOR_KEY, None)
-    if raw is None: return
-    st.session_state[_MODEL_KEY] = _normalize_to_model(raw)
+    if raw is None:
+        return
+    new_df = _normalize_to_model(raw)
+
+    # If the payload is empty but we already have a non-empty model, keep the model.
+    if new_df.empty and _MODEL_KEY in st.session_state and not st.session_state[_MODEL_KEY].empty:
+        return
+
+    # If columns mismatch (rare older builds), also keep the old model.
+    if set(new_df.columns) != set(TARGET_COLS):
+        if _MODEL_KEY in st.session_state and set(st.session_state[_MODEL_KEY].columns) == set(TARGET_COLS):
+            return
+
+    st.session_state[_MODEL_KEY] = new_df
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -386,17 +401,22 @@ if mode == "Create new itinerary":
     if _MODEL_KEY not in st.session_state:
         _seed_editor_model(int(days), start_date)
 
-    # Bhas
+    # Bhas outside table
     bhc1, bhc2, bhc3 = st.columns(3)
-    with bhc1: bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], key="k_bhas_req")
-    with bhc2: bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], key="k_bhas_type")
-    with bhc3: bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, step=1, key="k_bhas_pax", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc1:
+        bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], key="k_bhas_req")
+    with bhc2:
+        bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], key="k_bhas_type")
+    with bhc3:
+        bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, step=1, key="k_bhas_pax", disabled=(st.session_state["k_bhas_req"]=="No"))
 
     bhc4, bhc5 = st.columns(2)
-    with bhc4: bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, key="k_bhas_pkg", disabled=(st.session_state["k_bhas_req"]=="No"))
-    with bhc5: bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc4:
+        bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, key="k_bhas_pkg", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc5:
+        bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
-    # ---- Editor ----
+    # ---------- Line items table ----------
     st.markdown("### Fill line items")
     col_cfg = {
         "Date": st.column_config.DateColumn("Date", disabled=True),
@@ -411,6 +431,7 @@ if mode == "Create new itinerary":
         "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
         "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
     }
+
     st.data_editor(
         st.session_state[_MODEL_KEY],
         key=_EDITOR_KEY,
@@ -420,11 +441,12 @@ if mode == "Create new itinerary":
         column_config=col_cfg,
         on_change=_editor_sync,
     )
-    # << Force-sync so first edit reflects immediately >>
+    # Force-sync so first edit reflects immediately, but don't nuke a non-empty model
     _editor_sync()
 
-    # ---- Live totals preview ----
+    # --- Live totals preview (before Generate) ---
     df_prev = st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS)).copy()
+
     pkg_car   = pd.to_numeric(df_prev.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
     pkg_hotel = pd.to_numeric(df_prev.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
     act_car   = pd.to_numeric(df_prev.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
@@ -611,11 +633,9 @@ if mode == "Create new itinerary":
 
         final_output = itinerary_text + "\n\n" + inclusions + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
-        # serialize rows (Date -> str)
         rows_serialized = base.copy()
         rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
-        # revision number
         start_key = str(start_date)
         try:
             mx = -1
@@ -718,7 +738,6 @@ else:
                 loaded_doc = docs[selected_idx]
                 st.session_state[_SEARCH_DOC_KEY] = loaded_doc
 
-                # Initialize model from picked doc (so table shows immediately)
                 def _rows_from_doc(doc: dict, start: dt.date) -> pd.DataFrame:
                     rows = doc.get("rows") or []
                     df = pd.DataFrame(rows)
@@ -737,7 +756,6 @@ else:
             st.info("No itineraries found for this number yet.")
 
     if loaded_doc:
-        # header
         client_name = loaded_doc.get("client_name","")
         client_mobile = loaded_doc.get("client_mobile","")
         rep = loaded_doc.get("representative","-- Select --")
@@ -751,7 +769,7 @@ else:
         with c2: st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"], index=max(0, ["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(rep) if rep in ["Arpith","Reena","Kuldeep","Teena"] else 0), key="s_rep")
         with c3: st.number_input("Total Pax*", min_value=1, step=1, value=total_pax, key="s_pax")
 
-        # Bhas fields from doc
+        # Bhas from doc
         bhas_required = "Yes" if loaded_doc.get("bhasmarathi_required") else "No"
         bhas_type = loaded_doc.get("bhasmarathi_type","V-BH") or "V-BH"
         bhas_persons = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
@@ -767,7 +785,6 @@ else:
         with bhc4: st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, value=bhas_unit_pkg, key="s_bpkg")
         with bhc5: st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, value=bhas_unit_actual, key="s_bact")
 
-        # ensure table exists (if user jumped straight after login)
         if _MODEL_KEY not in st.session_state:
             st.session_state[_MODEL_KEY] = pd.DataFrame(loaded_doc.get("rows") or [])[TARGET_COLS] if loaded_doc.get("rows") else _blank_df(days, start_date)
 
@@ -795,10 +812,7 @@ else:
         )
         _editor_sync()
 
-        submit_update = st.button("🔁 Update itinerary (save as next revision)", use_container_width=True)
-
-        # ================== UPDATE BLOCK (fully rebuilt) ==================
-        if submit_update:
+        if st.button("🔁 Update itinerary (save as next revision)", use_container_width=True):
             client_name_new   = st.session_state.get("s_client_name", client_name)
             rep_new           = st.session_state.get("s_rep", rep)
             total_pax_new     = int(st.session_state.get("s_pax", total_pax) or 1)
@@ -937,7 +951,6 @@ else:
 
             final_output = itinerary_text + "\n\n" + inclusions_block + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
-            # next revision
             mx = -1
             for ddoc in col_it.find({"client_mobile": client_mobile, "start_date": str(start_date)}, {"revision_num":1}):
                 mx = max(mx, int(ddoc.get("revision_num", 0) or 0))
@@ -967,7 +980,7 @@ else:
                 "bhasmarathi_pkg_total": int(bhas_pkg_total),
                 "bhasmarathi_actual_total": int(bhas_act_total),
                 "package_total": int(total_package),
-                "package_after_referral": int(total_package),  # no referral in search flow
+                "package_after_referral": int(total_package),
                 "actual_total": int(total_actual),
                 "profit_total": int(profit_total),
                 "rows": rows_serialized.to_dict(orient="records"),
