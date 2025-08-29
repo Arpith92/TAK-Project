@@ -141,10 +141,104 @@ def get_collections():
     return {
         "itineraries": db["itineraries"],
         "audit_logins": db["audit_logins"],
+        # ⬇️ add these
+        "package_updates": db["package_updates"],
+        "followups": db["followups"],
+        "expenses": db["expenses"],
     }
 
 cols = get_collections()
 col_it = cols["itineraries"]
+# ⬇️ handy locals
+col_updates = cols["package_updates"]
+col_followups = cols["followups"]
+col_expenses = cols["expenses"]
+
+from datetime import datetime as _dt, time as _time
+
+def _to_int(x, default=0):
+    try:
+        if x is None:
+            return default
+        return int(float(str(x).replace(",", "")))
+    except Exception:
+        return default
+
+def upsert_update_from_rep(itinerary_id: str, representative: str, actor_user: str):
+    """
+    Ensure `package_updates` exists and is assigned to `representative`.
+    - If no doc exists: create with status='followup'
+    - If exists and not confirmed/cancelled: keep status, but set assigned_to=<representative>
+    """
+    itinerary_id = str(itinerary_id or "")
+    representative = (representative or "").strip()
+    if not itinerary_id or not representative:
+        return
+
+    pre = col_updates.find_one({"itinerary_id": itinerary_id}, {"_id": 1, "assigned_to": 1, "status": 1})
+    if not pre:
+        col_updates.update_one(
+            {"itinerary_id": itinerary_id},
+            {"$set": {
+                "status": "followup",
+                "assigned_to": representative,
+                "updated_at": _dt.utcnow(),
+            }},
+            upsert=True,
+        )
+        # first assignment trail
+        col_followups.insert_one({
+            "itinerary_id": itinerary_id,
+            "created_at": _dt.utcnow(),
+            "created_by": actor_user,
+            "status": "followup",
+            "comment": f"Auto-assigned from representative {representative}",
+            "credited_to": representative,
+            "next_followup_on": None,
+        })
+    else:
+        if pre.get("status") not in ("confirmed", "cancelled") and pre.get("assigned_to") != representative:
+            col_updates.update_one(
+                {"itinerary_id": itinerary_id},
+                {"$set": {"assigned_to": representative, "updated_at": _dt.utcnow()}}
+            )
+
+def sync_initial_cost_to_expenses_and_updates(itinerary_id: str, total_package: int):
+    """
+    Mirror initial cost so other pages immediately see amounts.
+    Writes both to `expenses` and `package_updates` without changing status.
+    """
+    final_cost = _to_int(total_package, 0)
+    base_amt   = final_cost
+    disc_amt   = 0
+
+    # expenses
+    col_expenses.update_one(
+        {"itinerary_id": str(itinerary_id)},
+        {"$set": {
+            "itinerary_id": str(itinerary_id),
+            "base_package_cost": int(base_amt),
+            "discount": int(disc_amt),
+            "final_package_cost": int(final_cost),
+            "package_cost": int(final_cost),
+            "saved_at": _dt.utcnow(),
+        }},
+        upsert=True,
+    )
+
+    # package_updates (do not clobber status; just mirror cost fields)
+    col_updates.update_one(
+        {"itinerary_id": str(itinerary_id)},
+        {"$set": {
+            "package_cost": int(final_cost),
+            "final_package_cost": int(final_cost),
+            "base_package_cost": int(base_amt),
+            "discount": int(disc_amt),
+            "updated_at": _dt.utcnow(),
+        }},
+        upsert=True,
+    )
+
 
 # ---------- Sidebar: User Trail ----------
 with st.sidebar.expander("👤 User trail (last 25)"):
@@ -754,12 +848,18 @@ if mode == "Create new itinerary":
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
         try:
-            col_it.insert_one(record)
-            st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
-            st.session_state["last_preview_text"] = final_output
-            st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
-        except Exception as e:
-            st.error(f"Could not save itinerary: {e}")
+    res = col_it.insert_one(record)  # <= keep the result to get the id
+    inserted_id = str(res.inserted_id)
+
+    # ⬇️ Immediately reflect assignment & cost for visibility in other pages
+    upsert_update_from_rep(inserted_id, rep, actor_user=user)
+    sync_initial_cost_to_expenses_and_updates(inserted_id, total_package)
+
+    st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
+    st.session_state["last_preview_text"] = final_output
+    st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
+except Exception as e:
+    st.error(f"Could not save itinerary: {e}")
 
     st.divider()
     st.caption("Tip: Click “Apply dates & days” before editing the table. Your first edits will persist.")
@@ -1116,13 +1216,18 @@ else:
                 "is_revision": True,
                 "revision_notes": "edit from search",
             }
-            col_it.insert_one(record)
-            st.success(f"✅ Updated & saved as **rev {next_rev}**")
-            st.session_state["last_preview_text"] = final_output
-            st.session_state["last_generated_meta"] = {"client": client_name_new, "mobile": client_mobile, "rev": next_rev}
+           res = col_it.insert_one(record)
+inserted_id = str(res.inserted_id)
 
-    st.divider()
-    st.caption("Tip: Type just one character to see suggestions. All table values from the selected revision are loaded and editable.")
+# Keep assignment aligned to representative edits (if any)
+upsert_update_from_rep(inserted_id, rep_new, actor_user=user)
+# Mirror latest quoted package total to expenses/updates
+sync_initial_cost_to_expenses_and_updates(inserted_id, total_package)
+
+st.success(f"✅ Updated & saved as **rev {next_rev}**")
+st.session_state["last_preview_text"] = final_output
+st.session_state["last_generated_meta"] = {"client": client_name_new, "mobile": client_mobile, "rev": next_rev}
+
 
 # ============= Shared: show preview & download if available =============
 if "last_preview_text" in st.session_state:
