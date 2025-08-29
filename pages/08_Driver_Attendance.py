@@ -520,9 +520,9 @@ if is_admin and tab_admin is not None:
         # Filters
         a1, a2 = st.columns(2)
         with a1:
-            admin_driver = st.selectbox("Driver", DRIVERS, index=0, key="adm_driver")
+            admin_driver = st.selectbox("Driver", DRIVERS, index=0, key="adm_driver_select")
         with a2:
-            ref_month = st.date_input("Salary month anchor", value=date.today())
+            ref_month = st.date_input("Salary month anchor", value=date.today(), key="adm_ref_month")
         mstart, mend = month_bounds(ref_month)
         st.caption(f"Period: **{mstart} → {mend}**")
 
@@ -530,22 +530,22 @@ if is_admin and tab_admin is not None:
         st.markdown("#### Bulk mark days")
         b1, b2 = st.columns(2)
         with b1:
-            bfrom = st.date_input("From date", value=mstart)
+            bfrom = st.date_input("From date", value=mstart, key="adm_bulk_from")
         with b2:
-            bto = st.date_input("To date", value=mend)
+            bto = st.date_input("To date", value=mend, key="adm_bulk_to")
             if bto < bfrom: bto = bfrom
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            status_sel = st.selectbox("Status", ["Present","Leave"], index=0)
+            status_sel = st.selectbox("Status", ["Present","Leave"], index=0, key="adm_status_sel")
         with c2:
-            mark_outstation = st.checkbox("Overnight – Outstation", value=False)
+            mark_outstation = st.checkbox("Overnight – Outstation", value=False, key="adm_mark_outstation")
         with c3:
-            mark_overnight_client = st.checkbox("Overnight – Client", value=False)
+            mark_overnight_client = st.checkbox("Overnight – Client", value=False, key="adm_mark_ovt_client")
         with c4:
-            mark_bhas = st.checkbox("Bhasmarathi", value=False)
+            mark_bhas = st.checkbox("Bhasmarathi", value=False, key="adm_mark_bhas")
 
-        if st.button("🚀 Apply bulk"):
+        if st.button("🚀 Apply bulk", key="adm_apply_bulk_btn"):
             bulk_upsert_range(
                 driver=admin_driver, start=bfrom, end=bto,
                 status=status_sel, mark_outstation=mark_outstation,
@@ -558,12 +558,12 @@ if is_admin and tab_admin is not None:
         st.markdown("#### Add Advance (deduct from salary)")
         ad1, ad2, ad3 = st.columns(3)
         with ad1:
-            adv_date = st.date_input("Advance date", value=mstart)
+            adv_date = st.date_input("Advance date", value=mstart, key="adm_adv_date")
         with ad2:
-            adv_amt = st.number_input("Amount (₹)", min_value=0, step=100, value=0)
+            adv_amt = st.number_input("Amount (₹)", min_value=0, step=100, value=0, key="adm_adv_amt")
         with ad3:
-            adv_note = st.text_input("Note", "")
-        if st.button("➕ Add advance"):
+            adv_note = st.text_input("Note", "", key="adm_adv_note")
+        if st.button("➕ Add advance", key="adm_add_adv_btn"):
             if adv_amt > 0:
                 add_advance(driver=admin_driver, day=adv_date, amount=int(adv_amt), note=adv_note)
                 load_advances.clear()
@@ -583,14 +583,14 @@ if is_admin and tab_admin is not None:
         k3.metric("Advances", inr(calc_m["advances"]))
         k4.metric("Net Pay", inr(calc_m["net"]))
 
-        with st.expander("Attendance (month)"):
+        with st.expander("Attendance (month)", expanded=False):
             st.dataframe(df_att_m.sort_values("date"), use_container_width=True, hide_index=True)
-        with st.expander("Advances (month)"):
+        with st.expander("Advances (month)", expanded=False):
             st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
 
-        # --- NEW: Export customer allocations for expense pipeline
+        # Export customer allocations for expense pipeline
         st.markdown("#### Export customer-wise allocations (for expense posting)")
-        if st.button("⬇️ Download allocations CSV (month)"):
+        if st.button("⬇️ Download allocations CSV (month)", key="adm_alloc_csv_btn"):
             alloc = df_att_m.copy()
             if not alloc.empty:
                 alloc["billable_ot_amount"] = alloc["billable_ot_units"].apply(lambda x: int(x or 0) * OVERTIME_ADD)
@@ -612,13 +612,14 @@ if is_admin and tab_admin is not None:
                 data=csv,
                 file_name=f"driver_customer_allocations_{admin_driver}_{mstart}_to_{mend}.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
+                key="adm_alloc_csv_dl"
             )
 
         # PDF
         month_label = f"{mstart.strftime('%B-%Y')}"
         period_label = f"{mstart.strftime('%d-%B-%Y')} to {mend.strftime('%d-%B-%Y')}"
-        if st.button("📄 Generate Salary PDF"):
+        if st.button("📄 Generate Salary PDF", key="adm_pdf_btn"):
             pdf_bytes = build_salary_pdf(
                 emp_name=admin_driver, month_label=month_label,
                 period_label=period_label, calc=calc_m
@@ -633,5 +634,6 @@ if is_admin and tab_admin is not None:
                 data=b,
                 file_name=f"Salary_{admin_driver}_{mstart.strftime('%Y_%m')}.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                use_container_width=True,
+                key="adm_pdf_dl_btn"
             )
