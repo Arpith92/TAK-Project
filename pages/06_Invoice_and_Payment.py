@@ -85,7 +85,7 @@ col_expenses    = db["expenses"]
 ORG = {
     "title": "TravelaajKal™ – Achala Holidays Pvt. Ltd",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
-    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com" | Mob: ,
+    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com | Mob: +91-7509612798" ,
     
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
