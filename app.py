@@ -440,6 +440,53 @@ if mode == "Create new itinerary":
         column_config=col_cfg,
         on_change=_editor_sync,
     )
+
+# --- Live totals preview (before Generate) ---
+df_prev = st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS)).copy()
+
+pkg_car   = pd.to_numeric(df_prev.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
+pkg_hotel = pd.to_numeric(df_prev.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+act_car   = pd.to_numeric(df_prev.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
+act_hotel = pd.to_numeric(df_prev.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+
+# Bhasmarathi inputs from the current form
+bhas_required     = st.session_state.get("k_bhas_req", "No")
+bhas_persons      = int(st.session_state.get("k_bhas_pax", 0) or 0)
+bhas_unit_pkg     = int(st.session_state.get("k_bhas_pkg", 0) or 0)
+bhas_unit_actual  = int(st.session_state.get("k_bhas_act", 0) or 0)
+has_ref           = st.session_state.get("k_ref_sel", "-- None --") != "-- None --"
+
+bhas_pkg_total    = (bhas_unit_pkg * bhas_persons) if bhas_required == "Yes" else 0
+bhas_actual_total = (bhas_unit_actual * bhas_persons) if bhas_required == "Yes" else 0
+
+package_cost_rows = float(pkg_car + pkg_hotel)
+actual_cost_rows  = float(act_car + act_hotel)
+preview_package   = ceil_to_999(package_cost_rows + bhas_pkg_total)
+preview_actual    = actual_cost_rows + bhas_actual_total
+preview_profit    = int(preview_package - preview_actual)
+preview_after_ref = int(round(preview_package * 0.9)) if has_ref else preview_package
+
+badge_color = "#16a34a" if preview_profit >= 4000 else "#dc2626"
+hint = "" if preview_profit >= 4000 else " • Keep profit margin ≥ ₹4,000"
+
+ref_html = (
+    f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
+    f'After Referral (10%): <b>₹{in_locale(preview_after_ref)}</b></div>'
+) if has_ref else ""
+
+totals_html = (
+    '<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">'
+    f'<div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">'
+    f'Package Cost: <b>₹{in_locale(preview_package)}</b></div>'
+    f'{ref_html}'
+    f'<div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">'
+    f'Actual Cost: <b>₹{in_locale(preview_actual)}</b></div>'
+    f'<div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">'
+    f'Profit: <b>₹{in_locale(preview_profit)}</b>{hint}</div>'
+    '</div>'
+)
+st.markdown(totals_html, unsafe_allow_html=True)
+
     # Also one-time sync if editor had a value but model missing (rare)
     if _MODEL_KEY not in st.session_state and _EDITOR_KEY in st.session_state:
         _editor_sync()
@@ -628,6 +675,20 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
 
     st.divider()
     st.caption("Tip: Click “Apply dates & days” before editing the table. Your first edits will persist.")
+
+st.session_state["last_preview_text"] = final_output
+st.session_state["last_generated_meta"] = {
+    "client": client_name,
+    "mobile": client_mobile,
+    "rev": next_rev,
+}
+
+st.session_state["last_preview_text"] = final_output
+st.session_state["last_generated_meta"] = {
+    "client": client_name,
+    "mobile": client_mobile,
+    "rev": next_rev,
+}
 
 # =========================================================
 #                      SEARCH / LOAD
