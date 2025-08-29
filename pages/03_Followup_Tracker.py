@@ -73,15 +73,15 @@ col_expenses    = db["expenses"]
 # =========================
 def load_users() -> dict:
     """
-    Load users from Streamlit Secrets first, then fall back to .streamlit/secrets.toml
-    (useful when running locally). Optionally supports USERS_JSON env var as a last resort.
+    Load users from Streamlit Secrets first, then fall back to .streamlit/secrets.toml.
+    Optionally supports USERS_JSON env var as a last resort.
     """
-    # 1) Streamlit Cloud / Manage app → Secrets
+    # 1) Streamlit Secrets
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
 
-    # 2) Local fallback: repo .streamlit/secrets.toml
+    # 2) Local repo fallback
     try:
         try:
             import tomllib  # py>=3.11
@@ -100,11 +100,12 @@ def load_users() -> dict:
     except Exception:
         pass
 
-    # 3) Optional: USERS_JSON env var (expects a JSON dict of {name: pin})
+    # 3) USERS_JSON env var (JSON dict)
     try:
         import json
-        if os.getenv("USERS_JSON"):
-            u = json.loads(os.getenv("USERS_JSON"))
+        raw = os.getenv("USERS_JSON")
+        if raw:
+            u = json.loads(raw)
             if isinstance(u, dict) and u:
                 with st.sidebar:
                     st.warning("Using users from USERS_JSON environment variable.")
@@ -569,7 +570,7 @@ with tabs[0]:
             "Final package cost (₹)": _final_cost_for(chosen_id),
         })
 
-    # Reassign
+    # Reassign (single)
     if can_reassign:
         st.markdown("### Reassign this follow-up")
         current_assignee = (upd_doc or {}).get("assigned_to", "")
@@ -725,6 +726,7 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
+        # Attach final cost in batch
         id_list = df_all["itinerary_id"].astype(str).tolist()
         fc_map_all = _final_cost_map(id_list)
         df_all["final_cost"] = df_all["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
@@ -757,9 +759,54 @@ with tabs[1]:
             "start_date":"Start","end_date":"End","assigned_to":"Assigned to","rep_name":"Rep (credited)",
             "booking_date":"Booking date","final_cost":"Final package cost (₹)"
         }, inplace=True)
-        st.dataframe(view.sort_values(["Booking date","Start","Client"], na_position="last").drop(columns=["itinerary_id"]),
-                     use_container_width=True, hide_index=True)
 
+        st.dataframe(
+            view.sort_values(["Booking date","Start","Client"], na_position="last").drop(columns=["itinerary_id"]),
+            use_container_width=True, hide_index=True
+        )
+
+        # --- BULK REASSIGN (Admin/Manager) ---
+        if is_admin or is_manager:
+            st.markdown("### 🔁 Bulk reassign packages")
+
+            options_all = (
+                view["ACH ID"].fillna("").astype(str) + " | " +
+                view["Client"].fillna("") + " | " +
+                view["Mobile"].fillna("") + " | " +
+                view["itinerary_id"]
+            ).tolist()
+
+            sel_multi = st.multiselect(
+                "Select one or more packages to reassign",
+                options_all,
+                help="You can type to search by ACH, client or mobile"
+            )
+
+            target_user = st.selectbox(
+                "Reassign selected to",
+                ALL_USERS,
+                index=0,
+                help="Choose the new owner for these follow-ups"
+            )
+
+            if st.button("➡️ Reassign selected", type="primary", use_container_width=True, disabled=(not sel_multi)):
+                try:
+                    moved = 0
+                    for row in sel_multi:
+                        iid = row.split(" | ")[-1]  # itinerary_id
+                        reassign_followup(iid, from_user=user, to_user=target_user)
+                        moved += 1
+
+                    # Clear caches so UI updates instantly
+                    fetch_assigned_followups_raw.clear()
+                    fetch_packages_with_updates.clear()
+
+                    st.success(f"Reassigned {moved} package(s) to {target_user}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not reassign: {e}")
+
+        # Export CSV (kept after bulk reassign UI)
         if st.button("⬇️ Export table (CSV)"):
             out3 = io.StringIO()
             view.drop(columns=["itinerary_id"]).to_csv(out3, index=False)
