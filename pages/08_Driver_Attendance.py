@@ -67,6 +67,10 @@ def _get_client() -> MongoClient:
 DB = _get_client()["TAK_DB"]
 col_att = DB["driver_attendance"]   # one doc per driver+date
 col_adv = DB["driver_advances"]     # arbitrary advances
+# For confirmed-customer list (read-only)
+col_updates = DB["package_updates"]
+col_itins   = DB["itineraries"]
+
 # optional audit
 try:
     from tak_audit import audit_pageview
@@ -112,6 +116,53 @@ def inr(n: int) -> str:
     return f"₹ {int(n):,}"
 
 # ==============================
+# Confirmed customers (ACH/Name) for linking
+# ==============================
+@st.cache_data(ttl=TTL, show_spinner=False)
+def load_confirmed_customers() -> pd.DataFrame:
+    """
+    Returns rows with itinerary_id, ach_id, client_name, client_mobile.
+    Only for package_updates with status == confirmed.
+    """
+    ups = list(col_updates.find(
+        {"status": "confirmed"},
+        {"_id":0, "itinerary_id":1}
+    ))
+    if not ups:
+        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile"])
+    iids = [str(u.get("itinerary_id") or "") for u in ups if u.get("itinerary_id")]
+    # Resolve itineraries
+    # They might be ObjectId strings or legacy ids; try both fields safely
+    it_rows = []
+    if iids:
+        # 1) Try by _id for 24-char hex
+        obj_ids = [ObjectId(i) for i in iids if len(i) == 24]
+        if obj_ids:
+            for r in col_itins.find({"_id": {"$in": obj_ids}},
+                                    {"ach_id":1,"client_name":1,"client_mobile":1}):
+                it_rows.append({
+                    "itinerary_id": str(r["_id"]),
+                    "ach_id": r.get("ach_id",""),
+                    "client_name": r.get("client_name",""),
+                    "client_mobile": r.get("client_mobile","")
+                })
+        # 2) Fallback by itinerary_id string field
+        str_ids = [i for i in iids if len(i) != 24]
+        if str_ids:
+            for r in col_itins.find({"itinerary_id": {"$in": str_ids}},
+                                    {"_id":1,"itinerary_id":1,"ach_id":1,"client_name":1,"client_mobile":1}):
+                it_rows.append({
+                    "itinerary_id": str(r.get("itinerary_id") or r.get("_id")),
+                    "ach_id": r.get("ach_id",""),
+                    "client_name": r.get("client_name",""),
+                    "client_mobile": r.get("client_mobile","")
+                })
+    if not it_rows:
+        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile"])
+    df = pd.DataFrame(it_rows).drop_duplicates(subset=["itinerary_id"]).reset_index(drop=True)
+    return df
+
+# ==============================
 # Cached loaders
 # ==============================
 @st.cache_data(ttl=TTL, show_spinner=False)
@@ -136,11 +187,21 @@ def load_attendance(driver: str, start: date, end: date) -> pd.DataFrame:
             "bhasmarathi": bool(r.get("bhasmarathi", False)),
             "bhas_client_name": r.get("bhas_client_name",""),
             "notes": r.get("notes",""),
+            # customer linkage & cost allocation
+            "cust_itinerary_id": r.get("cust_itinerary_id",""),
+            "cust_ach_id": r.get("cust_ach_id",""),
+            "cust_name": r.get("cust_name",""),
+            "cust_is_custom": bool(r.get("cust_is_custom", False)),
+            "billable_salary": _to_int(r.get("billable_salary", 0)),
+            "billable_ot_units": _to_int(r.get("billable_ot_units", 0)),
+            "billable_ot_amount": _to_int(r.get("billable_ot_amount", 0)),
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         "date","driver","car","in_time","out_time","status",
         "outstation_overnight","overnight_client","overnight_client_name",
-        "bhasmarathi","bhas_client_name","notes"
+        "bhasmarathi","bhas_client_name","notes",
+        "cust_itinerary_id","cust_ach_id","cust_name","cust_is_custom",
+        "billable_salary","billable_ot_units","billable_ot_amount"
     ])
 
 @st.cache_data(ttl=TTL, show_spinner=False)
@@ -161,9 +222,13 @@ def upsert_attendance(
     *, driver: str, day: date, car: str,
     in_time: str, out_time: str, status: str,
     outstation_overnight: bool, overnight_client: bool, overnight_client_name: str,
-    bhasmarathi: bool, bhas_client_name: str, notes: str
+    bhasmarathi: bool, bhas_client_name: str, notes: str,
+    # new customer-link & cost allocation
+    cust_itinerary_id: str, cust_ach_id: str, cust_name: str, cust_is_custom: bool,
+    billable_salary: int, billable_ot_units: int
 ):
     key_dt = datetime.combine(day, dtime.min)
+    billable_ot_amount = int(billable_ot_units) * OVERTIME_ADD
     payload = {
         "driver": driver,
         "date": key_dt,
@@ -177,6 +242,15 @@ def upsert_attendance(
         "bhasmarathi": bool(bhasmarathi),
         "bhas_client_name": bhas_client_name or "",
         "notes": notes or "",
+        # linkage
+        "cust_itinerary_id": str(cust_itinerary_id or ""),
+        "cust_ach_id": cust_ach_id or "",
+        "cust_name": cust_name or "",
+        "cust_is_custom": bool(cust_is_custom),
+        # allocation
+        "billable_salary": int(billable_salary or 0),
+        "billable_ot_units": int(billable_ot_units or 0),
+        "billable_ot_amount": int(billable_ot_amount),
         "updated_at": datetime.utcnow(),
     }
     col_att.update_one({"driver": driver, "date": key_dt}, {"$set": payload}, upsert=True)
@@ -202,7 +276,10 @@ def bulk_upsert_range(
             overnight_client=mark_overnight_client,
             overnight_client_name="",
             bhasmarathi=mark_bhas, bhas_client_name="",
-            notes="(bulk update)"
+            notes="(bulk update)",
+            # no customer link in bulk; keep blank
+            cust_itinerary_id="", cust_ach_id="", cust_name="", cust_is_custom=False,
+            billable_salary=0, billable_ot_units=0
         )
         cur += timedelta(days=1)
 
@@ -364,6 +441,40 @@ with tab_driver:
         bhasmarathi = st.checkbox("Bhasmarathi duty", value=False)
         bhas_client = st.text_input("Bhasmarathi client", value="", disabled=(not bhasmarathi))
 
+    # --- NEW: Customer link & per-customer cost allocation
+    st.markdown("### Link to Customer (optional) & Cost Allocation")
+    confirmed = load_confirmed_customers()
+    choices = []
+    if confirmed.empty:
+        st.caption("No confirmed packages found.")
+    else:
+        choices = (confirmed["ach_id"].fillna("") + " | " +
+                   confirmed["client_name"].fillna("") + " | " +
+                   confirmed["itinerary_id"]).tolist()
+    choices = [""] + choices + ["➕ Add new / other"]
+    pick = st.selectbox("Select confirmed customer (ACH | Name | IID)", choices, index=0)
+
+    cust_itinerary_id = ""
+    cust_ach_id = ""
+    cust_name = ""
+    cust_is_custom = False
+
+    if pick == "➕ Add new / other":
+        cust_is_custom = True
+        cust_name = st.text_input("Enter customer name (free text)")
+    elif pick:
+        parts = [p.strip() for p in pick.split(" | ")]
+        if len(parts) == 3:
+            cust_ach_id, cust_name, cust_itinerary_id = parts[0], parts[1], parts[2]
+
+    ac1, ac2, ac3 = st.columns(3)
+    with ac1:
+        billable_salary = st.number_input("Billable salary to this customer (₹)", min_value=0, step=100, value=0)
+    with ac2:
+        billable_ot_units = st.number_input("Billable OT units (× ₹300)", min_value=0, step=1, value=0)
+    with ac3:
+        st.metric("Billable OT amount", inr(int(billable_ot_units) * OVERTIME_ADD))
+
     notes = st.text_area("Notes (optional)")
 
     if st.button("💾 Save today’s entry"):
@@ -371,7 +482,11 @@ with tab_driver:
             driver=driver, day=day, car=car, in_time=in_time, out_time=out_time, status=status,
             outstation_overnight=outstation_overnight,
             overnight_client=overnight_client, overnight_client_name=overnight_client_name,
-            bhasmarathi=bhasmarathi, bhas_client_name=bhas_client, notes=notes
+            bhasmarathi=bhasmarathi, bhas_client_name=bhas_client, notes=notes,
+            # linkage & allocation
+            cust_itinerary_id=cust_itinerary_id, cust_ach_id=cust_ach_id,
+            cust_name=cust_name, cust_is_custom=cust_is_custom,
+            billable_salary=int(billable_salary), billable_ot_units=int(billable_ot_units)
         )
         load_attendance.clear()
         st.success("Saved.")
@@ -472,6 +587,33 @@ if is_admin and tab_admin is not None:
             st.dataframe(df_att_m.sort_values("date"), use_container_width=True, hide_index=True)
         with st.expander("Advances (month)"):
             st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
+
+        # --- NEW: Export customer allocations for expense pipeline
+        st.markdown("#### Export customer-wise allocations (for expense posting)")
+        if st.button("⬇️ Download allocations CSV (month)"):
+            alloc = df_att_m.copy()
+            if not alloc.empty:
+                alloc["billable_ot_amount"] = alloc["billable_ot_units"].apply(lambda x: int(x or 0) * OVERTIME_ADD)
+                cols = [
+                    "date","driver","cust_ach_id","cust_name","cust_itinerary_id",
+                    "billable_salary","billable_ot_units","billable_ot_amount",
+                    "notes"
+                ]
+                for c in cols:
+                    if c not in alloc.columns: alloc[c] = ""
+                csv = alloc[cols].sort_values(["date","cust_name"]).to_csv(index=False).encode("utf-8")
+            else:
+                csv = pd.DataFrame(columns=[
+                    "date","driver","cust_ach_id","cust_name","cust_itinerary_id",
+                    "billable_salary","billable_ot_units","billable_ot_amount","notes"
+                ]).to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download CSV",
+                data=csv,
+                file_name=f"driver_customer_allocations_{admin_driver}_{mstart}_to_{mend}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
         # PDF
         month_label = f"{mstart.strftime('%B-%Y')}"
