@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import os
 import io
 import math
+
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
@@ -162,27 +163,19 @@ user = _login()
 if not user:
     st.stop()
 
-# --- after login / role detection ---
 USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
 
-# Current:
-# is_admin = (str(user).strip().lower() == "arpith")
-
-# Update to add a manager role for reassignment:
+# Roles
 is_admin = (str(user).strip().lower() == "arpith")
-is_manager = (str(user).strip() == "Kuldeep")
+is_manager = (str(user).strip() == "Kuldeep")            # Kuldeep can also reassign + credit incentives
 can_reassign = is_admin or is_manager
-
 
 # =========================
 # Audit
 # =========================
-try:
-    from tak_audit import audit_pageview
-    audit_pageview(st.session_state.get("user", "Unknown"), page="03_Followup_Tracker")
-except Exception:
-    pass
+from tak_audit import audit_pageview
+audit_pageview(st.session_state.get("user", "Unknown"), page="03_Followup_Tracker")
 
 # =========================
 # Helpers (aligned across pages)
@@ -232,13 +225,12 @@ def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
         doc = col_itineraries.find_one({"itinerary_id": str(iid)}, projection)
     return doc or {}
 
-# -------- Final cost logic (new -> old fallbacks) ----------
+# -------- Final cost logic (base − discount) ----------
 def _final_cost_for(iid: str) -> int:
     """
-    Priority:
-    1) expenses.final_package_cost
-    2) expenses.base_package_cost - expenses.discount (or expenses.package_cost legacy)
-    3) itinerary.package_total / package_after_referral / (legacy package_cost - discount)
+    Final cost = base_package_cost - discount, prefer explicit 'final_package_cost' in expenses.
+    Falls back to itinerary.package_cost if no expense record exists.
+    Back-compat: if only 'package_cost' exists in expenses, treat as final.
     """
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
@@ -256,18 +248,29 @@ def _final_cost_for(iid: str) -> int:
     if "package_cost" in exp:
         return _to_int(exp.get("package_cost", 0))
 
-    it = _get_itinerary(iid, {
-        "package_total":1, "package_after_referral":1, "package_cost":1, "discount":1
-    })
-    if it:
-        pkg_total = _to_int(it.get("package_total", it.get("package_cost", 0)))
-        pkg_after = _to_int(it.get("package_after_referral", 0))
-        if pkg_after > 0:
-            return pkg_after
-        disc = _to_int(it.get("discount", 0))
-        return max(0, pkg_total - disc)
+    it = _get_itinerary(iid, {"package_cost": 1, "discount": 1})
+    base = _to_int(it.get("package_cost", 0))
+    disc = _to_int(it.get("discount", 0))
+    return max(0, base - disc)
 
-    return 0
+def _final_cost_map(ids: List[str]) -> Dict[str, int]:
+    """Batch compute final cost for a list of itinerary IDs."""
+    if not ids:
+        return {}
+    cur = list(col_expenses.find(
+        {"itinerary_id": {"$in": [str(x) for x in ids]}},
+        {"_id": 0, "itinerary_id": 1, "final_package_cost": 1, "base_package_cost": 1, "discount": 1, "package_cost": 1}
+    ))
+    out: Dict[str, int] = {}
+    for d in cur:
+        iid = str(d.get("itinerary_id"))
+        if "final_package_cost" in d and _to_int(d.get("final_package_cost", 0)) > 0:
+            out[iid] = _to_int(d.get("final_package_cost", 0))
+        elif ("base_package_cost" in d) or ("discount" in d):
+            out[iid] = max(0, _to_int(d.get("base_package_cost", d.get("package_cost", 0))) - _to_int(d.get("discount", 0)))
+        elif "package_cost" in d:
+            out[iid] = _to_int(d.get("package_cost", 0))
+    return out
 
 def _compute_incentive(final_amt: int) -> int:
     if 5000 < final_amt < 20000:
@@ -364,6 +367,15 @@ def count_confirmed(user_filter: Optional[str], start_d: Optional[date]=None, en
             "$lte": datetime.combine(end_d, dtime.max),
         }
     return col_updates.count_documents(q)
+
+def fetch_followup_counts_by_user() -> pd.DataFrame:
+    rows = list(col_updates.find({"status": "followup"}, {"_id":0, "assigned_to":1, "itinerary_id":1}))
+    if not rows:
+        return pd.DataFrame(columns=["assigned_to","count"])
+    df = pd.DataFrame(rows)
+    df["assigned_to"] = df["assigned_to"].fillna("").replace("", "Unassigned")
+    agg = df.groupby("assigned_to")["itinerary_id"].nunique().rename("Follow-ups").reset_index()
+    return agg.sort_values("Follow-ups", ascending=False)
 
 # =========================
 # Reassign follow-ups
@@ -474,7 +486,7 @@ def upsert_update_status(
 
 def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_user: str, credit_user: Optional[str]=None) -> None:
     """
-    Persist base, discount, and final cost. Overwrite legacy 'package_cost' with final for consistency.
+    Persist base, discount, and final cost. Also overwrite legacy 'package_cost' with final for consistency.
     If already confirmed, recompute incentive using the final cost.
     """
     base = _to_int(base_amount)
@@ -486,12 +498,12 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
         "base_package_cost": int(base),
         "discount": int(disc),
         "final_package_cost": int(final_cost),
-        "package_cost": int(final_cost),  # legacy key aligned
+        "package_cost": int(final_cost),  # legacy mirror
         "saved_at": datetime.utcnow(),
     }
     col_expenses.update_one({"itinerary_id": str(iid)}, {"$set": doc}, upsert=True)
 
-    # Refresh incentive if confirmed
+    # If confirmed, refresh incentive (credit to explicit user if provided)
     upd = col_updates.find_one({"itinerary_id": str(iid)}, {"status": 1, "rep_name": 1})
     if upd and upd.get("status") == "confirmed":
         inc = _compute_incentive(int(final_cost))
@@ -506,24 +518,27 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
 # =============================================================================
 
 # Sidebar filters (admin can choose user)
-# Old
-# if is_admin:
-#     st.markdown("### Reassign this follow-up")
-#     ...
+with st.sidebar:
+    if is_admin:
+        view_user = st.selectbox("Filter follow-ups by user", ["All users"] + ALL_USERS, index=0)
+        user_filter = None if view_user == "All users" else view_user
+        st.caption("Admin mode: view all or filter by user. You can record updates on behalf of a user.")
+    else:
+        st.caption("User mode: viewing your assigned follow-ups.")
+        view_user = user
+        user_filter = user
 
-# New
-if can_reassign:
-    st.markdown("### Reassign this follow-up")
-    current_assignee = upd_doc.get("assigned_to")
-    candidates = [u for u in ALL_USERS if u != current_assignee] or ALL_USERS
-    to_user = st.selectbox("Move to user", candidates, key="reassign_to")
-    if st.button("➡️ Reassign now"):
-        try:
-            reassign_followup(chosen_id, from_user=user, to_user=to_user)
-            st.success(f"Moved to {to_user}.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Could not reassign: {e}")
+# Admin quick overview: counts by assignee (only useful when seeing all users)
+if is_admin or is_manager:
+    df_over = fetch_followup_counts_by_user()
+    if not df_over.empty:
+        st.markdown("### 👥 Follow-ups by assignee")
+        st.dataframe(df_over.rename(columns={"assigned_to":"User"}), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No active follow-ups yet.")
+    st.divider()
+
+tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
 
 # =========================
 # TAB 1: Follow-ups
@@ -556,6 +571,9 @@ with tabs[0]:
         df_assigned["last_comment"] = df_assigned["itinerary_id"].map(
             lambda x: (latest_map.get(str(x), {}) or {}).get("comment", "")
         )
+        # Final cost map (vectorized)
+        fc_map = _final_cost_map(itinerary_ids)
+        df_assigned["final_cost"] = df_assigned["itinerary_id"].map(lambda x: fc_map.get(str(x), _final_cost_for(str(x))))
 
     today = _today_utc()
     tmr = today + timedelta(days=1)
@@ -597,7 +615,7 @@ with tabs[0]:
 
     table = df_assigned[[
         "ach_id","client_name","client_mobile","start_date","end_date",
-        "final_route","assigned_to","next_followup_on","last_comment","itinerary_id"
+        "final_route","assigned_to","next_followup_on","last_comment","final_cost","itinerary_id"
     ]].copy().sort_values(["next_followup_on","start_date"], na_position="last")
     table.rename(columns={
         "ach_id":"ACH ID",
@@ -609,6 +627,7 @@ with tabs[0]:
         "assigned_to":"Assigned to",
         "next_followup_on":"Next follow-up",
         "last_comment":"Last comment",
+        "final_cost":"Final package cost (₹)",
     }, inplace=True)
 
     left, right = st.columns([2, 1])
@@ -678,10 +697,10 @@ with tabs[0]:
             "Final package cost (₹)": _final_cost_for(chosen_id),
         })
 
-    # ---- Reassign control (admin only) ----
-    if is_admin:
+    # ---- Reassign control (Admin or Kuldeep) ----
+    if can_reassign:
         st.markdown("### Reassign this follow-up")
-        current_assignee = upd_doc.get("assigned_to")
+        current_assignee = (upd_doc or {}).get("assigned_to", "")
         candidates = [u for u in ALL_USERS if u != current_assignee] or ALL_USERS
         to_user = st.selectbox("Move to user", candidates, key="reassign_to")
         if st.button("➡️ Reassign now"):
@@ -699,24 +718,14 @@ with tabs[0]:
         {"itinerary_id": str(chosen_id)},
         {"base_package_cost":1, "discount":1, "final_package_cost":1, "package_cost":1}
     ) or {}
-    # fallback to itinerary if expenses not set
-    base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0)))
-    disc_default = _to_int(exp_doc.get("discount", 0)) or max(0, _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0))) - _to_int(it_doc.get("package_after_referral", 0)))
+    base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(it_doc.get("package_cost", 0))
+    disc_default = _to_int(exp_doc.get("discount", 0))
 
-# Old
-# if is_admin:
-#     credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
-#     credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
-# else:
-#     credit_user_cost = None
-
-# New
-if is_admin or is_manager:
-    credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
-    credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
-else:
-    credit_user_cost = None
-
+    if is_admin or is_manager:
+        credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
+        credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
+    else:
+        credit_user_cost = None
 
     c1c, c2c, c3c = st.columns(3)
     with c1c:
@@ -823,7 +832,7 @@ else:
         st.rerun()
 
 # =========================
-# TAB 2: All packages (admin overview)
+# TAB 2: All packages (admin overview / my overview)
 # =========================
 with tabs[1]:
     if is_admin:
@@ -837,6 +846,11 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
+        # Attach final cost vectorized
+        id_list = df_all["itinerary_id"].astype(str).tolist()
+        fc_map_all = _final_cost_map(id_list)
+        df_all["final_cost"] = df_all["itinerary_id"].map(lambda x: fc_map_all.get(str(x), _final_cost_for(str(x))))
+
         # quick search
         q2 = st.text_input("Search in packages (name / mobile / ACH / route)", "")
         if q2.strip():
@@ -848,14 +862,27 @@ with tabs[1]:
                 df_all["final_route"].astype(str).str.lower().str.contains(s2)
             ]
 
+        # Status mix + quick KPIs
+        mix = df_all["status"].fillna("pending").value_counts().rename_axis("Status").reset_index(name="Count")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("✅ Confirmed", int((df_all["status"]=="confirmed").sum()))
+        m2.metric("🟡 Pending", int((df_all["status"]=="pending").sum()))
+        m3.metric("🟠 Under discussion", int((df_all["status"]=="under_discussion").sum()))
+        m4.metric("🔵 Follow-up", int((df_all["status"]=="followup").sum()))
+        m5.metric("🔴 Cancelled", int((df_all["status"]=="cancelled").sum()))
+        with st.expander("Status breakdown"):
+            st.dataframe(mix, use_container_width=True, hide_index=True)
+
         view = df_all[[
             "ach_id","client_name","client_mobile","final_route","total_pax",
-            "start_date","end_date","status","assigned_to","rep_name","booking_date","advance_amount","incentive","itinerary_id"
+            "start_date","end_date","status","assigned_to","rep_name","booking_date","advance_amount","incentive","final_cost","itinerary_id"
         ]].copy()
         view.rename(columns={
             "ach_id":"ACH ID","client_name":"Client","client_mobile":"Mobile","final_route":"Route","total_pax":"Pax",
-            "start_date":"Start","end_date":"End","assigned_to":"Assigned to","rep_name":"Rep (credited)","booking_date":"Booking date"
+            "start_date":"Start","end_date":"End","assigned_to":"Assigned to","rep_name":"Rep (credited)","booking_date":"Booking date",
+            "final_cost":"Final package cost (₹)"
         }, inplace=True)
+
         st.dataframe(
             view.sort_values(["Booking date","Start","Client"], na_position="last").drop(columns=["itinerary_id"]),
             use_container_width=True, hide_index=True
