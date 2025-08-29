@@ -847,12 +847,21 @@ if mode == "Create new itinerary":
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
+# --- build 'record' dict above this line ---
+
 try:
-    res = col_it.insert_one(record)  # <= keep the result to get the id
+    res = col_it.insert_one(record)   # INSERT
     new_id = str(res.inserted_id)
+
+    # (optional) stash for navigation or follow-up pages
+    st.session_state["last_saved_itinerary_id"] = new_id
+
     st.success(f"Package saved with ID: {new_id}")
+
 except Exception as e:
     st.error(f"Error saving package: {e}")
+    st.stop()
+
 
     # ⬇️ Immediately reflect assignment & cost for visibility in other pages
     upsert_update_from_rep(inserted_id, rep, actor_user=user)
