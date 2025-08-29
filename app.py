@@ -14,7 +14,7 @@ except Exception:
     import streamlit as st  # ensure st is available
 
 # ----------------- Imports -----------------
-import io, math, datetime as dt, os, re, json
+import io, math, datetime as dt, os, re
 from collections.abc import Mapping
 from datetime import timedelta, date as _date
 from zoneinfo import ZoneInfo
@@ -204,12 +204,12 @@ def _code_to_route(code) -> str | None:
     except Exception:
         return None
 
-# ---------- editor helpers (PERMANENT FIX) ----------
+# ---------- editor helpers ----------
 TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Type",
                "Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]
 
-_EDITOR_KEY = "editor_widget"
-_MODEL_KEY  = "editor_model"
+EDITOR_KEY = "data_editor_widget"   # widget state key
+MODEL_KEY  = "data_editor_model"    # our working DataFrame
 
 def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
     return pd.DataFrame({
@@ -226,69 +226,32 @@ def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
         "Act-Hotel Cost": [0.0 for _ in range(n_rows)],
     })[TARGET_COLS]
 
-def _seed_editor_model(n_rows: int, start: _date):
-    """Create the working DF only when user asks; do NOT reseed on reruns."""
-    st.session_state[_MODEL_KEY] = _blank_df(n_rows, start)
+def _ensure_model(days: int, start: _date):
+    """Create model once; no reseed on reruns (prevents first-edit loss)."""
+    if MODEL_KEY not in st.session_state:
+        st.session_state[MODEL_KEY] = _blank_df(days, start)
 
-def _apply_dates_days(n_rows: int, start: _date):
-    """Pad/truncate existing model to match days; realign dates to start."""
-    df = st.session_state.get(_MODEL_KEY)
-    if df is None:
-        _seed_editor_model(n_rows, start)
-        return
-    cur = len(df)
-    if cur < n_rows:
-        add = _blank_df(n_rows - cur, start + timedelta(days=cur))
+def _apply_days_dates(days: int, start: _date):
+    """Pad/truncate model and align dates; preserve existing edits."""
+    df = st.session_state.get(MODEL_KEY, _blank_df(days, start))
+    if len(df) < days:
+        add = _blank_df(days - len(df), start + timedelta(days=len(df)))
         df = pd.concat([df, add], ignore_index=True)
-    elif cur > n_rows:
-        df = df.iloc[:n_rows].reset_index(drop=True)
-    df.loc[:, "Date"] = [start + timedelta(days=i) for i in range(n_rows)]
-    st.session_state[_MODEL_KEY] = df
+    elif len(df) > days:
+        df = df.iloc[:days].reset_index(drop=True)
+    df["Date"] = [start + timedelta(days=i) for i in range(days)]
+    st.session_state[MODEL_KEY] = df
 
-def _ensure_numeric_costs(df: pd.DataFrame) -> pd.DataFrame:
-    for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
-        df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0.0)
-    return df
-
-def _editor_sync():
-    """Copy widget value back to our model on every edit (robust to multiple shapes)."""
-    raw = st.session_state.get(_EDITOR_KEY, None)
-    if raw is None:
-        return
-
-    # 1) Already a DataFrame (newer Streamlit)
-    if isinstance(raw, pd.DataFrame):
-        df = raw.copy()
-
-    # 2) List of row dicts (older Streamlit)
-    elif isinstance(raw, list):
-        df = pd.DataFrame(raw)
-
-    # 3) Dict container (some builds: {"data": [...]} or col-wise dict)
-    elif isinstance(raw, dict):
-        if "data" in raw and isinstance(raw["data"], list):
-            df = pd.DataFrame(raw["data"])
-        else:
-            try:
-                df = pd.DataFrame.from_dict(raw)
-            except Exception:
-                return
-    else:
-        return
-
-    # Ensure all expected columns exist and types are stable
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Ensure all columns exist
     for c in TARGET_COLS:
         if c not in df.columns:
             df[c] = 0.0 if "Cost" in c else ""
-
     # Normalize types
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-
-    for c in ["Pkg-Car Cost", "Pkg-Hotel Cost", "Act-Car Cost", "Act-Hotel Cost"]:
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+    for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-
-    st.session_state[_MODEL_KEY] = df[TARGET_COLS].copy()
+    return df[TARGET_COLS].copy()
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -377,21 +340,18 @@ if mode == "Create new itinerary":
 
     ref_labels = ["-- None --"] + _load_client_refs()
     referred_sel = st.selectbox("Referred By (applies 10% discount)", ref_labels, key="k_ref_sel")
-    has_ref = referred_sel != "-- None --"
-    discount_pct = 10 if has_ref else 0
 
     h1, h2 = st.columns(2)
     with h1: start_date = st.date_input("Start date", key="k_start")
     with h2: days = st.number_input("No. of days", min_value=1, step=1, key="k_days")
 
-    # Button to apply days/start to the table (no reseed; preserves edits)
-    if st.button("📅 Apply dates & days to table"):
-        _apply_dates_days(int(days), start_date)
-        st.success("Dates & rows applied. You can edit the table now.")
-
     # Ensure we at least have a model (first time only)
-    if _MODEL_KEY not in st.session_state:
-        _seed_editor_model(int(days), start_date)
+    _ensure_model(int(days), start_date)
+
+    # Optional button to force-align dates and rows (preserves edits)
+    if st.button("📅 Apply dates & days to table"):
+        _apply_days_dates(int(days), start_date)
+        st.success("Dates & rows applied. You can edit the table now.")
 
     # Bhas outside table
     bhc1, bhc2, bhc3 = st.columns(3)
@@ -413,7 +373,7 @@ if mode == "Create new itinerary":
 
     col_cfg = {
         "Date": st.column_config.DateColumn("Date", disabled=True),
-        "Time": st.column_config.SelectboxColumn("Time", options=time_options),
+        "Time": st.column_config.SelectboxColumn("Time", options=_time_list(15)),
         "Code": st.column_config.SelectboxColumn("Code", options=code_options),
         "Car Type": st.column_config.SelectboxColumn("Car Type", options=car_options),
         "Hotel Type": st.column_config.SelectboxColumn("Hotel Type", options=hotel_options),
@@ -425,30 +385,29 @@ if mode == "Create new itinerary":
         "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
     }
 
-    # Render editor USING on_change sync callback (permanent persistence)
-    st.data_editor(
-        st.session_state[_MODEL_KEY],
-        key=_EDITOR_KEY,
+    # 👉 Use return value, then normalize & store to MODEL_KEY (permanent fix)
+    df_widget = st.data_editor(
+        st.session_state[MODEL_KEY],
+        key=EDITOR_KEY,
         use_container_width=True,
         num_rows="fixed",
         hide_index=True,
         column_config=col_cfg,
-        on_change=_editor_sync,
     )
+    st.session_state[MODEL_KEY] = _normalize_df(df_widget)
 
-    # --- Live totals preview (before Generate) ---
-    df_prev = st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS)).copy()
-
+    # --- Live totals (update as you type) ---
+    df_prev = st.session_state[MODEL_KEY].copy()
     pkg_car   = pd.to_numeric(df_prev.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
     pkg_hotel = pd.to_numeric(df_prev.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
     act_car   = pd.to_numeric(df_prev.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
     act_hotel = pd.to_numeric(df_prev.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
 
+    has_ref           = st.session_state.get("k_ref_sel", "-- None --") != "-- None --"
     bhas_required     = st.session_state.get("k_bhas_req", "No")
     bhas_persons      = int(st.session_state.get("k_bhas_pax", 0) or 0)
     bhas_unit_pkg     = int(st.session_state.get("k_bhas_pkg", 0) or 0)
     bhas_unit_actual  = int(st.session_state.get("k_bhas_act", 0) or 0)
-    has_ref           = st.session_state.get("k_ref_sel", "-- None --") != "-- None --"
 
     bhas_pkg_total    = (bhas_unit_pkg * bhas_persons) if bhas_required == "Yes" else 0
     bhas_actual_total = (bhas_unit_actual * bhas_persons) if bhas_required == "Yes" else 0
@@ -462,12 +421,8 @@ if mode == "Create new itinerary":
 
     badge_color = "#16a34a" if preview_profit >= 4000 else "#dc2626"
     hint = "" if preview_profit >= 4000 else " • Keep profit margin ≥ ₹4,000"
-
-    ref_html = (
-        f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
-        f'After Referral (10%): <b>₹{in_locale(preview_after_ref)}</b></div>'
-    ) if has_ref else ""
-
+    ref_html = (f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
+                f'After Referral (10%): <b>₹{in_locale(preview_after_ref)}</b></div>') if has_ref else ""
     totals_html = (
         '<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">'
         f'<div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">'
@@ -494,8 +449,7 @@ if mode == "Create new itinerary":
             st.error("Select **Representative**."); st.stop()
 
         client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
-        base = st.session_state[_MODEL_KEY].copy()
-
+        base = st.session_state[MODEL_KEY].copy()
         if base.empty:
             st.error("No rows to save. Apply dates & days and fill the table."); st.stop()
         base["Date"] = [start_date + dt.timedelta(days=i) for i in range(len(base))]
@@ -505,6 +459,7 @@ if mode == "Create new itinerary":
         pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
         act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
         act_hotel = pd.to_numeric(base.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
+
         bhas_pkg_total    = (bhas_unit_pkg * bhas_persons) if bhas_required=="Yes" else 0
         bhas_actual_total = (bhas_unit_actual * bhas_persons) if bhas_required=="Yes" else 0
         package_cost_rows = float(pkg_car + pkg_hotel)
@@ -512,9 +467,9 @@ if mode == "Create new itinerary":
         total_package = ceil_to_999(package_cost_rows + bhas_pkg_total)
         total_actual  = actual_cost_rows  + bhas_actual_total
         profit_total  = int(total_package - total_actual)
-        after_ref     = int(round(total_package * 0.9)) if has_ref else total_package
+        after_ref     = int(round(total_package * 0.9)) if (referred_sel != "-- None --") else total_package
 
-        # meta / text
+        # text/meta
         dates_series   = pd.to_datetime(base["Date"], errors="coerce")
         start_date_calc = dates_series.min().date()
         end_date_calc   = dates_series.max().date()
@@ -535,7 +490,7 @@ if mode == "Create new itinerary":
 
         bhas_desc_str = ""
         if bhas_required == "Yes":
-            mm = bhas_df.loc[bhas_df["Bhasmarathi Type"].astype(str) == str(bhas_type), "Description"]
+            mm = bhas_df.loc[bhas_df["Bhasmarathi Type"].astype(str) == str(st.session_state.get("k_bhas_type","V-BH")), "Description"]
             if not mm.empty: bhas_desc_str = str(mm.iloc[0])
 
         night_txt  = "Night" if total_nights == 1 else "Nights"
@@ -558,7 +513,7 @@ if mode == "Create new itinerary":
         details_bits = [x for x in [car_types or None, hotel_types or None, bhas_desc_str or None] if x]
         details_line = "(" + ",".join(details_bits) + ")" if details_bits else ""
         itinerary_text += f"\n*Package cost: ₹{in_locale(total_package)}/-*\n"
-        if has_ref:
+        if referred_sel != "-- None --":
             itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
         itinerary_text += f"{details_line}"
 
@@ -578,30 +533,28 @@ if mode == "Create new itinerary":
             "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
             "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
         ])
-        cxl = """
-*Cancellation Policy:-*
-1. 30+ days → 20% of advance deducted.
-2. 15–29 days → 50% of advance deducted.
-3. <15 days → No refund on advance.
-4. No refund for no-shows/early departures.
-5. One-time reschedule allowed ≥15 days prior, subject to availability.
-"""
-        pay = """*Payment Terms:-*
-50% advance and remaining 50% after arrival at Ujjain.
-"""
-        acct = """*Company Account details:-*
-Account Name: ACHALA HOLIDAYS PVT LTD
-Bank: Axis Bank
-Account No: 923020071937652
-IFSC Code: UTIB0000329
-MICR Code: 452211003
-Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
-
-Regards,
-Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd
-Visit: www.travelaajkal.com • IG: @travelaaj_kal
-DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
-"""
+        cxl = (
+            "*Cancellation Policy:-*\n"
+            "1. 30+ days → 20% of advance deducted.\n"
+            "2. 15–29 days → 50% of advance deducted.\n"
+            "3. <15 days → No refund on advance.\n"
+            "4. No refund for no-shows/early departures.\n"
+            "5. One-time reschedule allowed ≥15 days prior, subject to availability.\n"
+        )
+        pay = "*Payment Terms:-*\n50% advance and remaining 50% after arrival at Ujjain.\n"
+        acct = (
+            "*Company Account details:-*\n"
+            "Account Name: ACHALA HOLIDAYS PVT LTD\n"
+            "Bank: Axis Bank\n"
+            "Account No: 923020071937652\n"
+            "IFSC Code: UTIB0000329\n"
+            "MICR Code: 452211003\n"
+            "Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010\n\n"
+            "Regards,\n"
+            "Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
+            "Visit: www.travelaajkal.com • IG: @travelaaj_kal\n"
+            "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
+        )
         final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
         # serialize rows (Date -> str)
@@ -633,7 +586,7 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
             "hotel_types": hotel_types,
             # Bhas
             "bhasmarathi_required": (bhas_required=="Yes"),
-            "bhasmarathi_type": bhas_type if bhas_required=="Yes" else None,
+            "bhasmarathi_type": st.session_state.get("k_bhas_type","V-BH") if bhas_required=="Yes" else None,
             "bhasmarathi_persons": int(bhas_persons) if bhas_required=="Yes" else 0,
             "bhasmarathi_unit_pkg": int(bhas_unit_pkg) if bhas_required=="Yes" else 0,
             "bhasmarathi_unit_actual": int(bhas_unit_actual) if bhas_required=="Yes" else 0,
@@ -644,8 +597,8 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
             "package_after_referral": int(after_ref),
             "actual_total": int(total_actual),
             "profit_total": int(profit_total),
-            "referred_by": referred_sel if has_ref else None,
-            "referral_discount_pct": discount_pct,
+            "referred_by": (referred_sel if referred_sel != "-- None --" else None),
+            "referral_discount_pct": (10 if referred_sel != "-- None --" else 0),
             # rows + legacy
             "rows": rows_serialized.to_dict(orient="records"),
             "package_cost": int(total_package),
@@ -660,20 +613,13 @@ DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
         try:
             col_it.insert_one(record)
             st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
-
-            # Store preview + meta and show download UI
             st.session_state["last_preview_text"] = final_output
-            st.session_state["last_generated_meta"] = {
-                "client": client_name,
-                "mobile": client_mobile,
-                "rev": next_rev,
-            }
-
+            st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
         except Exception as e:
             st.error(f"Could not save itinerary: {e}")
 
     st.divider()
-    st.caption("Tip: Click “Apply dates & days” before editing the table. Your first edits will persist.")
+    st.caption("Tip: Your first edits now persist. Totals above update live as you type.")
 
 # =========================================================
 #                      SEARCH / LOAD
@@ -710,7 +656,7 @@ else:
                     loaded_doc = docs[pick_idx]
 
     if loaded_doc:
-        # Prefill
+        # Prefill some headers (read-only mobile)
         client_name = loaded_doc.get("client_name","")
         client_mobile = loaded_doc.get("client_mobile","")
         rep = loaded_doc.get("representative","-- Select --")
@@ -721,50 +667,37 @@ else:
         c0, c1, c2, c3 = st.columns([1.6,1,1,1])
         with c0: st.text_input("Client Name*", value=client_name, key="s_client_name")
         with c1: st.text_input("Client mobile (10 digits)*", value=client_mobile, key="s_mobile", disabled=True)
-        with c2: st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"], index=max(0, ["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(rep) if rep in ["Arpith","Reena","Kuldeep","Teena"] else 0), key="s_rep")
+        with c2: st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"],
+                              index=max(0, ["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(rep) if rep in ["Arpith","Reena","Kuldeep","Teena"] else 0),
+                              key="s_rep")
         with c3: st.number_input("Total Pax*", min_value=1, step=1, value=total_pax, key="s_pax")
 
-        # Bhas
-        bhas_required = "Yes" if loaded_doc.get("bhasmarathi_required") else "No"
-        bhas_type = loaded_doc.get("bhasmarathi_type","V-BH") or "V-BH"
-        bhas_persons = int(loaded_doc.get("bhasmarathi_persons",0) or 0)
-        bhas_unit_pkg = int(loaded_doc.get("bhasmarathi_unit_pkg",0) or 0)
-        bhas_unit_actual = int(loaded_doc.get("bhasmarathi_unit_actual",0) or 0)
-
-        bhc1, bhc2, bhc3 = st.columns(3)
-        with bhc1: st.selectbox("Bhasmarathi required?", ["No","Yes"], index=(1 if bhas_required=="Yes" else 0), key="s_breq")
-        with bhc2: st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], index=max(0, ["V-BH","P-BH","BH"].index(bhas_type) if bhas_type in ["V-BH","P-BH","BH"] else 0), key="s_btype")
-        with bhc3: st.number_input("Persons for Bhasmarathi", min_value=0, step=1, value=bhas_persons, key="s_bpax")
-
-        bhc4, bhc5 = st.columns(2)
-        with bhc4: st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, value=bhas_unit_pkg, key="s_bpkg")
-        with bhc5: st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, value=bhas_unit_actual, key="s_bact")
-
-        # Build table from doc
+        # Table from doc → model
         def _rows_from_doc(doc: dict, start: dt.date) -> pd.DataFrame:
             rows = doc.get("rows") or []
+            if not rows:
+                return _blank_df(days, start)
             df = pd.DataFrame(rows)
             for c in TARGET_COLS:
                 if c not in df.columns:
                     df[c] = 0 if "Cost" in c else ""
-            df = _ensure_numeric_costs(df)
-            df = df.reset_index(drop=True)
+            df = _normalize_df(df)
             for i in range(len(df)):
                 df.at[i, "Date"] = start + dt.timedelta(days=i)
             return df[TARGET_COLS]
 
-        st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
+        st.session_state[MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
 
-        st.markdown("### Fill line items")
-        st.data_editor(
-            st.session_state[_MODEL_KEY],
-            key=_EDITOR_KEY,
+        st.markdown("### Fill line items (loaded revision)")
+        df_widget = st.data_editor(
+            st.session_state[MODEL_KEY],
+            key=EDITOR_KEY,
             use_container_width=True,
             num_rows="fixed",
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", disabled=True),
-                "Time": st.column_config.SelectboxColumn("Time", options=time_options),
+                "Time": st.column_config.SelectboxColumn("Time", options=_time_list(15)),
                 "Code": st.column_config.SelectboxColumn("Code", options=code_options),
                 "Car Type": st.column_config.SelectboxColumn("Car Type", options=car_options),
                 "Hotel Type": st.column_config.SelectboxColumn("Hotel Type", options=hotel_options),
@@ -775,8 +708,8 @@ else:
                 "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
                 "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
             },
-            on_change=_editor_sync,
         )
+        st.session_state[MODEL_KEY] = _normalize_df(df_widget)
 
         if st.button("🔁 Update itinerary (save as next revision)", use_container_width=True):
             # next rev
@@ -785,15 +718,15 @@ else:
                 mx = max(mx, int(ddoc.get("revision_num", 0) or 0))
             next_rev = 1 if mx < 1 else (mx + 1)
 
-            base = st.session_state[_MODEL_KEY].copy()
+            base = st.session_state[MODEL_KEY].copy()
             base["Date"] = [start_date + dt.timedelta(days=i) for i in range(len(base))]
 
             pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
             pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
             act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
             act_hotel = pd.to_numeric(base.get("Act-Hotel Cost", 0), errors="coerce").fillna(0).sum()
-            bhas_pkg_total    = st.session_state.get("s_bpkg",0) * st.session_state.get("s_bpax",0)
-            bhas_actual_total = st.session_state.get("s_bact",0) * st.session_state.get("s_bpax",0)
+            bhas_pkg_total    = 0
+            bhas_actual_total = 0
             total_package = ceil_to_999(float(pkg_car + pkg_hotel) + bhas_pkg_total)
             total_actual  = float(act_car + act_hotel) + bhas_actual_total
             profit_total  = int(total_package - total_actual)
@@ -814,15 +747,8 @@ else:
                 "final_route": loaded_doc.get("final_route",""),
                 "car_types": "-".join(pd.Series(base.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-"),
                 "hotel_types":"-".join(pd.Series(base.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-"),
-                "bhasmarathi_required": (st.session_state.get("s_breq","No")=="Yes"),
-                "bhasmarathi_type": st.session_state.get("s_btype","V-BH"),
-                "bhasmarathi_persons": int(st.session_state.get("s_bpax",0)),
-                "bhasmarathi_unit_pkg": int(st.session_state.get("s_bpkg",0)),
-                "bhasmarathi_unit_actual": int(st.session_state.get("s_bact",0)),
-                "bhasmarathi_pkg_total": int(bhas_pkg_total),
-                "bhasmarathi_actual_total": int(bhas_actual_total),
                 "package_total": int(total_package),
-                "package_after_referral": int(total_package),  # referral not tracked on updates here
+                "package_after_referral": int(total_package),
                 "actual_total": int(total_actual),
                 "profit_total": int(profit_total),
                 "rows": rows_serialized.to_dict(orient="records"),
@@ -854,10 +780,10 @@ if "last_preview_text" in st.session_state:
     st.markdown("### Preview of generated itinerary")
     st.text_area("Copy from here", value=text, height=420, key="itinerary_preview")
 
-    import re
+    import re as _re
     def _slug(s: str) -> str:
         s = s.strip().replace(" ", "_")
-        return re.sub(r"[^A-Za-z0-9._-]+", "", s)
+        return _re.sub(r"[^A-Za-z0-9._-]+", "", s)
 
     today_str = str(dt.date.today())
     fname = f"itinerary_{_slug(client)}_{_slug(mobile)}_{today_str}.txt"
