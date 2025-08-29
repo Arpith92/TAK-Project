@@ -10,7 +10,7 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
-from fpdf import FPDF  # fpdf2
+from fpdf import FPDF  # fpdf2 (pip install "fpdf>=2,<3")
 
 # ================= Page config =================
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
@@ -136,6 +136,20 @@ def _nights_days(start: Optional[date], end: Optional[date]) -> str:
     except Exception:
         return ""
 
+def _as_bytes(x) -> bytes:
+    if x is None:
+        return b""
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x)
+    if isinstance(x, memoryview):
+        return x.tobytes()
+    if isinstance(x, str):
+        return x.encode("latin-1", errors="ignore")
+    try:
+        return bytes(x)
+    except Exception:
+        return str(x).encode("latin-1", errors="ignore")
+
 def _final_cost(iid: str) -> Dict[str, int]:
     """
     Final cost preference:
@@ -194,7 +208,7 @@ def fetch_confirmed() -> pd.DataFrame:
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
-    # merge
+    # merge (fixed)
     df = df_i.merge(df_u, on="itinerary_id", how="inner")
 
     # enrich final cost snapshot
@@ -307,7 +321,7 @@ class PDF(FPDF):
         self.cell(0, 5, self._txt(ORG["footer_rights"]), ln=1, align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
-    # Ensure we always return bytes (prevents grey/blank preview)
+    # Ensure we always return bytes (prevents grey/blank preview & download_button errors)
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
@@ -538,7 +552,7 @@ c1, c2 = st.columns([1,1])
 with c1:
     if st.button("Generate Invoice PDF"):
         inv_bytes = build_invoice_pdf(row, subject=subject)
-        st.session_state["inv_pdf"] = inv_bytes
+        st.session_state["inv_pdf"] = _as_bytes(inv_bytes)
 
 with c2:
     pay_date_default = row.get("booking_date") or date.today()
@@ -550,14 +564,15 @@ with c2:
     pay_date = st.date_input("Payment made date (for slip)", value=pay_date_default)
     if st.button("Generate Payment Slip PDF"):
         slip_bytes = build_payment_slip_pdf(row, payment_date=pay_date)
-        st.session_state["slip_pdf"] = slip_bytes
+        st.session_state["slip_pdf"] = _as_bytes(slip_bytes)
 
 st.markdown("---")
 
 # ===== Preview + Download (Invoice) =====
 if "inv_pdf" in st.session_state:
+    inv_b = _as_bytes(st.session_state["inv_pdf"])
     st.markdown("#### Invoice preview")
-    b64 = base64.b64encode(st.session_state["inv_pdf"]).decode()
+    b64 = base64.b64encode(inv_b).decode()
     st.components.v1.html(
         f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
@@ -565,7 +580,7 @@ if "inv_pdf" in st.session_state:
     fname = f"Invoice_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Invoice (PDF)",
-        data=st.session_state["inv_pdf"],
+        data=inv_b,  # bytes guaranteed
         file_name=fname,
         mime="application/pdf",
         use_container_width=True,
@@ -573,8 +588,9 @@ if "inv_pdf" in st.session_state:
 
 # ===== Preview + Download (Payment Slip) =====
 if "slip_pdf" in st.session_state:
+    slip_b = _as_bytes(st.session_state["slip_pdf"])
     st.markdown("#### Payment slip preview")
-    b64s = base64.b64encode(st.session_state["slip_pdf"]).decode()
+    b64s = base64.b64encode(slip_b).decode()
     st.components.v1.html(
         f'<iframe src="data:application/pdf;base64,{b64s}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
@@ -582,7 +598,7 @@ if "slip_pdf" in st.session_state:
     fname2 = f"PaymentSlip_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Payment Slip (PDF)",
-        data=st.session_state["slip_pdf"],
+        data=slip_b,  # bytes guaranteed
         file_name=fname2,
         mime="application/pdf",
         use_container_width=True,
