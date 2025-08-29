@@ -198,7 +198,7 @@ def fetch_confirmed() -> pd.DataFrame:
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
-    df = df_i.merge(df_u, on("itinerary_id"), how="inner")
+    df = df_i.merge(df_u, on="itinerary_id", how="inner")
 
     bases, discs, finals = [], [], []
     for iid in df["itinerary_id"]:
