@@ -69,13 +69,12 @@ col_followups   = db["followups"]
 col_expenses    = db["expenses"]
 
 # =========================
-# =========================
-# Users + login  (REPLACE THIS BLOCK)
+# Users + login  (UPDATED)
 # =========================
 def load_users() -> dict:
     """
     Load users from Streamlit Secrets first, then fall back to .streamlit/secrets.toml
-    (useful when running locally). Optionally supports USERS_JSON env var.
+    (useful when running locally). Optionally supports USERS_JSON env var as a last resort.
     """
     # 1) Streamlit Cloud / Manage app → Secrets
     users = st.secrets.get("users", None)
@@ -92,7 +91,6 @@ def load_users() -> dict:
             data = tomllib.load(f)
         u = data.get("users", {})
         if isinstance(u, dict) and u:
-            # Show a gentle warning in the sidebar so you know which source is used
             with st.sidebar:
                 st.warning(
                     "Using users from repo .streamlit/secrets.toml (dev fallback). "
@@ -102,12 +100,52 @@ def load_users() -> dict:
     except Exception:
         pass
 
+    # 3) Optional: USERS_JSON env var (expects a JSON dict of {name: pin})
+    try:
+        import json
+        if os.getenv("USERS_JSON"):
+            u = json.loads(os.getenv("USERS_JSON"))
+            if isinstance(u, dict) and u:
+                with st.sidebar:
+                    st.warning("Using users from USERS_JSON environment variable.")
+                return u
+    except Exception:
+        pass
+
+    return {}
+
+def _login() -> Optional[str]:
+    with st.sidebar:
+        if st.session_state.get("user"):
+            st.markdown(f"**Signed in as:** {st.session_state['user']}")
+            if st.button("Log out"):
+                st.session_state.pop("user", None)
+                st.rerun()
+
+    if st.session_state.get("user"):
+        return st.session_state["user"]
+
+    users_map = load_users()
+    if not users_map:
+        st.error(
+            "Login not configured.\n\n"
+            "Add a `[users]` table in **Manage app → Settings → Secrets** or in your local `.streamlit/secrets.toml`.\n\n"
+            "Example:\n\n"
+            "[users]\n"
+            "Arpith  = \"Arpith&92\"\n"
+            "Reena   = \"Reena&90\"\n"
+            "Teena   = \"Teena@123\"\n"
+            "Kuldeep = \"Kuldeep&96\""
+        )
+        st.stop()
+
     st.markdown("### 🔐 Login")
     c1, c2 = st.columns(2)
     with c1:
         name = st.selectbox("User", list(users_map.keys()), key="login_user")
     with c2:
         pin = st.text_input("PIN", type="password", key="login_pin")
+
     if st.button("Sign in"):
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
@@ -244,11 +282,9 @@ def _dedupe_latest_by_mobile(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only the latest package per client_mobile using ObjectId time (fast & robust)."""
     if df.empty: return df
     df2 = df.copy()
-    # fill missing mobile as empty to avoid drop
     df2["client_mobile"] = df2["client_mobile"].astype(str).fillna("")
     df2["_created_utc"] = df2["_created_utc"].apply(lambda x: x or datetime.min)
     df2.sort_values(["client_mobile", "_created_utc"], ascending=[True, False], inplace=True)
-    # keep first occurrence (latest)
     latest = df2.groupby("client_mobile", as_index=False).first()
     return latest
 
@@ -405,7 +441,6 @@ tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
 # TAB 1: Follow-ups (DEDUPED BY MOBILE)
 # =========================
 with tabs[0]:
-    # Fetch raw and dedupe to ONE package per mobile (latest by ObjectId time)
     df_raw = fetch_assigned_followups_raw(user_filter)
     df_assigned = _dedupe_latest_by_mobile(df_raw)
 
@@ -424,7 +459,6 @@ with tabs[0]:
         st.info("No follow-ups found for the selected filter.")
         st.stop()
 
-    # Latest log + final cost in batch
     itinerary_ids = df_assigned["itinerary_id"].astype(str).tolist()
     latest_map = fetch_latest_followup_log_map(itinerary_ids)
     fc_map = _final_cost_map(itinerary_ids)
@@ -545,12 +579,12 @@ with tabs[0]:
             try:
                 reassign_followup(chosen_id, from_user=user, to_user=to_user)
                 st.success(f"Moved to {to_user}.")
-                fetch_assigned_followups_raw.clear()  # Bust cache to reflect move fast
+                fetch_assigned_followups_raw.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not reassign: {e}")
 
-    # Final package cost (fast, single write)
+    # Final package cost
     st.markdown("### Final package cost")
     exp_doc = col_expenses.find_one(
         {"itinerary_id": str(chosen_id)},
@@ -578,7 +612,7 @@ with tabs[0]:
             save_final_package_cost(chosen_id, int(base_amount), int(discount),
                                     actor_user=user, credit_user=credit_user_cost)
             st.success("Final package cost saved. Incentive updated if already confirmed.")
-            _final_cost_map.clear()  # refresh cached cost map
+            _final_cost_map.clear()
             st.rerun()
         except Exception as e:
             st.error(f"Could not save package cost: {e}")
@@ -691,7 +725,6 @@ with tabs[1]:
     if df_all.empty:
         st.info("No packages to display for the selected filter.")
     else:
-        # Attach final cost in batch
         id_list = df_all["itinerary_id"].astype(str).tolist()
         fc_map_all = _final_cost_map(id_list)
         df_all["final_cost"] = df_all["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
