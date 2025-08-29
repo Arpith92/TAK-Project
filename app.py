@@ -276,24 +276,71 @@ def _apply_dates_days(n_rows: int, start: _date):
 
 def _editor_sync():
     """
-    Robust sync: ignore spurious clears that can happen on first rerun.
-    Only commit when we actually received structured rows/cols.
+    Robust sync for st.data_editor:
+    - Applies diff-style payloads ({edited_rows, added_rows, deleted_rows})
+    - Accepts full DataFrame or {"data":[...]} payloads
+    - Ignores spurious clears so the table never 'disappears'
     """
     raw = st.session_state.get(_EDITOR_KEY, None)
     if raw is None:
         return
-    new_df = _normalize_to_model(raw)
 
-    # If the payload is empty but we already have a non-empty model, keep the model.
-    if new_df.empty and _MODEL_KEY in st.session_state and not st.session_state[_MODEL_KEY].empty:
+    # Helper to coerce types after we've updated df
+    def _coerce(df: pd.DataFrame) -> pd.DataFrame:
+        # Ensure all target columns exist
+        for c in TARGET_COLS:
+            if c not in df.columns:
+                df[c] = 0.0 if "Cost" in c else ""
+        # Normalize types
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+        for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        return df[TARGET_COLS].copy()
+
+    # 1) Full DataFrame payload (newer Streamlit)
+    if isinstance(raw, pd.DataFrame):
+        st.session_state[_MODEL_KEY] = _coerce(raw.copy())
         return
 
-    # If columns mismatch (rare older builds), also keep the old model.
-    if set(new_df.columns) != set(TARGET_COLS):
-        if _MODEL_KEY in st.session_state and set(st.session_state[_MODEL_KEY].columns) == set(TARGET_COLS):
+    # 2) {"data":[...]} style
+    if isinstance(raw, dict) and isinstance(raw.get("data"), list):
+        st.session_state[_MODEL_KEY] = _coerce(pd.DataFrame(raw["data"]))
+        return
+
+    # 3) Diff-style payload: {'edited_rows': {row_idx: {col: val, ...}, ...}, 'added_rows': [], 'deleted_rows': []}
+    if isinstance(raw, dict) and ("edited_rows" in raw or "added_rows" in raw or "deleted_rows" in raw):
+        # Start from current model; if absent, bail (nothing to patch onto)
+        base = st.session_state.get(_MODEL_KEY)
+        if base is None or not isinstance(base, pd.DataFrame) or base.empty:
+            # No valid base to apply diffs — keep current state untouched
             return
 
-    st.session_state[_MODEL_KEY] = new_df
+        df = base.copy()
+
+        # Apply edits
+        edited = raw.get("edited_rows", {}) or {}
+        for idx_str, changes in edited.items():
+            try:
+                idx = int(idx_str)
+            except Exception:
+                # Some builds already provide int keys
+                idx = idx_str
+            if idx in df.index:
+                for col, val in (changes or {}).items():
+                    if col in df.columns:
+                        df.at[idx, col] = val
+
+        # (added_rows / deleted_rows are ignored because num_rows='fixed')
+        st.session_state[_MODEL_KEY] = _coerce(df)
+        return
+
+    # 4) Any other unknown shape: ignore if we already have a non-empty model
+    if _MODEL_KEY in st.session_state and isinstance(st.session_state[_MODEL_KEY], pd.DataFrame) and not st.session_state[_MODEL_KEY].empty:
+        return
+    # Otherwise initialize safely to an empty, typed frame (won't break UI)
+    st.session_state[_MODEL_KEY] = _coerce(pd.DataFrame(columns=TARGET_COLS))
+
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
