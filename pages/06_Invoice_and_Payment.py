@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import os, base64
 from datetime import datetime, date
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict
 
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
+
+# IMPORTANT: use fpdf2 (same import name "fpdf") for Unicode TTF support
+# pip install fpdf==2.* in your environment
 from fpdf import FPDF
 
 # ================= Page config =================
@@ -82,16 +85,27 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 
 # ================= Org / assets =================
+# Flip this to "TM" if you want ™ (unregistered). For registered, keep "R".
+TRADEMARK_MODE = "R"  # "TM" or "R"
+
+def _brand_with_mark():
+    if TRADEMARK_MODE == "TM":
+        return "TravelaajKal™"
+    return "TravelaajKal®"
+
 ORG = {
-    "title": "TravelaajKal® – Achala Holidays Pvt. Ltd",
+    "title": f"{_brand_with_mark()} – Achala Holidays Pvt. Ltd.",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
-    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com | Mob: +91-7509612798" ,
-    
-    "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
+    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com  |  Mob: +91-7509612798",
+    "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}",
 }
 # Put your files in .streamlit/
 ORG_LOGO = ".streamlit/logo.png"
-ORG_SIGN = ".streamlit/signature.png"   # update to your file name if different
+ORG_SIGN = ".streamlit/signature.png"
+
+# Optional Unicode TTF fonts for perfect ™/®/–:
+FONT_REG = ".streamlit/DejaVuSans.ttf"
+FONT_BLD = ".streamlit/DejaVuSans-Bold.ttf"
 
 # ================= Helpers =====================
 def _to_int(x, default=0) -> int:
@@ -159,7 +173,6 @@ def _final_cost(iid: str) -> Dict[str, int]:
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def fetch_confirmed() -> pd.DataFrame:
-    # itineraries (essentials)
     its = list(col_itineraries.find({}, {
         "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
         "final_route":1, "total_pax":1, "start_date":1, "end_date":1
@@ -173,7 +186,6 @@ def fetch_confirmed() -> pd.DataFrame:
         r.pop("_id", None)
     df_i = pd.DataFrame(its)
 
-    # confirmed updates
     ups = list(col_updates.find({"status":"confirmed"}, {
         "_id":0, "itinerary_id":1, "status":1, "booking_date":1,
         "advance_amount":1, "rep_name":1, "incentive":1
@@ -186,9 +198,8 @@ def fetch_confirmed() -> pd.DataFrame:
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
-    df = df_i.merge(df_u, on="itinerary_id", how="inner")
+    df = df_i.merge(df_u, on("itinerary_id"), how="inner")
 
-    # enrich final cost snapshot
     bases, discs, finals = [], [], []
     for iid in df["itinerary_id"]:
         c = _final_cost(iid)
@@ -202,7 +213,7 @@ def fetch_confirmed() -> pd.DataFrame:
 def _update_advance_and_booking(iid: str, adv: int, bdate: Optional[date]) -> None:
     payload = {
         "itinerary_id": str(iid),
-        "status": "confirmed",   # keep it confirmed
+        "status": "confirmed",
         "advance_amount": int(adv),
         "updated_at": datetime.utcnow(),
     }
@@ -210,52 +221,80 @@ def _update_advance_and_booking(iid: str, adv: int, bdate: Optional[date]) -> No
         payload["booking_date"] = datetime.combine(bdate, datetime.min.time())
     col_updates.update_one({"itinerary_id": str(iid)}, {"$set": payload}, upsert=True)
 
-# ================= FPDF (ASCII-safe) =============
-def _latin(s: str) -> str:
+# ================= Unicode/ASCII text handling =============
+def _ascii_downgrade(s: str) -> str:
+    """Fallback mapping for core fonts (Helvetica). Keeps things readable."""
     if s is None:
         s = ""
-    s = (str(s)
-         .replace("₹", "Rs ")
-         .replace("—", "-").replace("–", "-").replace("•", "-")
-         .replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-         .replace("™", "(TM)"))
-    try:
-        return s.encode("latin-1", "replace").decode("latin-1")
-    except Exception:
-        return s
+    return (str(s)
+        .replace("₹", "Rs ")   # PDF safety
+        .replace("—", "-").replace("–", "-").replace("•", "-")
+        .replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+        .replace("™", "(TM)")
+    )
 
+def _use_unicode_fonts() -> bool:
+    return os.path.exists(FONT_REG) and os.path.exists(FONT_BLD)
+
+# ================ FPDF class =====================
 class PDF(FPDF):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_unicode = _use_unicode_fonts()
+        if self.use_unicode:
+            # Register TrueType fonts with Unicode support
+            self.add_font("DejaVu", "", FONT_REG, uni=True)
+            self.add_font("DejaVu", "B", FONT_BLD, uni=True)
+
+        # PDF metadata for better Explorer preview
+        self.set_title(f"{_brand_with_mark()} – Invoice/Payment Slip")
+        self.set_author("Achala Holidays Pvt. Ltd.")
+        self.set_creator("TravelaajKal – Streamlit")
+        self.set_subject("Invoice & Payment Slip")
+
+    def _txt(self, s: str) -> str:
+        return s if self.use_unicode else _ascii_downgrade(s)
+
     def header(self):
         # Outer border rectangle
         self.set_draw_color(150,150,150)
         self.rect(8, 8, 194, 281)
 
-        # Logo (enlarged)
+        # Logo
         x0 = 14
         try:
             if ORG_LOGO and os.path.exists(ORG_LOGO):
-                self.image(ORG_LOGO, x=x0, y=12, w=34)  # enlarged logo
+                self.image(ORG_LOGO, x=x0, y=12, w=34)
                 x0 = 52
         except Exception:
             x0 = 14
 
         # Company title & address
         self.set_xy(x0, 12)
-        self.set_font("Helvetica", "B", 14)
-        self.cell(0, 8, _latin(ORG["title"]), ln=1, align="C")
-        self.set_font("Helvetica", "", 10)
-        self.cell(0, 6, _latin(ORG["line1"]), ln=1, align="C")
-        self.cell(0, 6, _latin(ORG["line2"]), ln=1, align="C")
+        if self.use_unicode:
+            self.set_font("DejaVu", "B", 14)
+        else:
+            self.set_font("Helvetica", "B", 14)
+        self.cell(0, 8, self._txt(ORG["title"]), ln=1, align="C")
+
+        if self.use_unicode:
+            self.set_font("DejaVu", "", 10)
+        else:
+            self.set_font("Helvetica", "", 10)
+        self.cell(0, 6, self._txt(ORG["line1"]), ln=1, align="C")
+        self.cell(0, 6, self._txt(ORG["line2"]), ln=1, align="C")
         self.ln(2)
         self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
     def footer(self):
-        # rights line
         self.set_y(-22)
-        self.set_font("Helvetica", "", 8)
-        self.cell(0, 5, _latin(ORG["footer_rights"]), ln=1, align="C")
+        if self.use_unicode:
+            self.set_font("DejaVu", "", 8)
+        else:
+            self.set_font("Helvetica", "", 8)
+        self.cell(0, 5, self._txt(ORG["footer_rights"]), ln=1, align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
     out = pdf.output(dest="S")
@@ -269,30 +308,45 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
 
     left = 16
     pdf.set_x(left)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 9, _latin("INVOICE"), ln=1)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 13)
+    else:
+        pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 9, pdf._txt("INVOICE"), ln=1)
 
-    pdf.set_x(left)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _latin(f"Invoice Date: {datetime.now().strftime('%Y-%m-%d')}"), ln=1)
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 11)
+    else:
+        pdf.set_font("Helvetica", "", 11)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Invoice Date: {today_str}"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
     pdf.ln(2)
 
-    # Customer block (name line only on top; not repeated below)
-    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _latin("Bill To:"), ln=1)
-    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _latin(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
-    pdf.set_x(left); pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _latin(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
+    # Customer block
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 11)
+    else:
+        pdf.set_font("Helvetica", "B", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt("Bill To:"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
+
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 11)
+    else:
+        pdf.set_font("Helvetica", "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
     travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"Travel: {travel}"), ln=1)
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"Route: {_str(row.get('final_route'))}"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Travel: {travel}"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Route: {_str(row.get('final_route'))}"), ln=1)
     pdf.ln(2)
 
-    # Subject (no customer name)
-    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
-    pdf.multi_cell(0, 6, _latin(f"Subject: {subject}"))
+    # Subject
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 11)
+    else:
+        pdf.set_font("Helvetica", "B", 11)
+    pdf.multi_cell(0, 6, pdf._txt(f"Subject: {subject}"))
     pdf.ln(1)
 
     # Line item
@@ -306,123 +360,53 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     col1_w, col2_w = 130, 52
     th = 8
 
-    # header row
-    pdf.set_font("Helvetica", "B", 10)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 10)
+    else:
+        pdf.set_font("Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2,  y+th-2, _latin("Description"))
-    pdf.text(left+col1_w+2, y+th-2, _latin("Amount"))
+    pdf.text(left+2,  y+th-2, pdf._txt("Description"))
+    pdf.text(left+col1_w+2, y+th-2, pdf._txt("Amount"))
     pdf.ln(th)
 
-    # item
-    pdf.set_font("Helvetica", "", 10)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin(desc))
+    pdf.text(left+2, y+th-2, pdf._txt(desc))
     pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, _latin(_fmt_money(base)), align="R")
+    pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(base)), align="R")
     pdf.ln(th)
 
-    # discount (if any)
     if disc > 0:
         y = pdf.get_y()
         pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-        pdf.text(left+2, y+th-2, _latin("Less: Discount"))
+        pdf.text(left+2, y+th-2, pdf._txt("Less: Discount"))
         pdf.set_xy(left+col1_w, y)
-        pdf.cell(col2_w-2, th, _latin(f"- {_fmt_money(disc)}"), align="R")
+        pdf.cell(col2_w-2, th, pdf._txt(f"- {_fmt_money(disc)}"), align="R")
         pdf.ln(th)
 
-    # total
     y = pdf.get_y()
-    pdf.set_font("Helvetica", "B", 10)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 10)
+    else:
+        pdf.set_font("Helvetica", "B", 10)
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Total Payable"))
+    pdf.text(left+2, y+th-2, pdf._txt("Total Payable"))
     pdf.set_xy(left+col1_w, y)
-    pdf.cell(col2_w-2, th, _latin(_fmt_money(final)), align="R")
+    pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(final)), align="R")
     pdf.ln(th + 4)
 
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, _latin("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 9)
+    else:
+        pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5, pdf._txt("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
 
-    # signature block (enlarged)
-    pdf.ln(8)
-    sig_y = pdf.get_y()
-    if ORG_SIGN and os.path.exists(ORG_SIGN):
-        try:
-            pdf.image(ORG_SIGN, x=left+110, y=sig_y-4, w=55)  # enlarged signature
-        except Exception:
-            pass
-    pdf.set_y(sig_y + 20)
-    pdf.set_x(left+110)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(80, 6, _latin("Authorised Signatory"), ln=1, align="C")
-    return _pdf_bytes(pdf)
-
-# ------------- payment slip builder -------------
-def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
-    pdf = PDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=18)
-    pdf.add_page()
-
-    left = 16
-    pdf.set_x(left)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 9, _latin("PAYMENT SLIP"), ln=1)
-
-    pdf.set_x(left); pdf.set_font("Helvetica", "", 11)
-    slip_date = payment_date or row.get("booking_date")
-    slip_date_str = _str(slip_date)
-    pdf.cell(0, 6, _latin(f"Slip Date: {slip_date_str}"), ln=1)
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
-    pdf.ln(2)
-
-    # Customer block (name on top only)
-    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 6, _latin("Customer:"), ln=1)
-    pdf.set_x(left); pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _latin(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
-    pdf.set_x(left); pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _latin(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
-    travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
-    pdf.set_x(left); pdf.cell(0, 6, _latin(f"Travel: {travel}  |  Route: {_str(row.get('final_route'))}"), ln=1)
-    pdf.ln(2)
-
-    advance = int(row.get("advance_amount", 0))
-    final   = int(row.get("final_cost", 0))
-    bal     = max(final - advance, 0)
-
-    # table
-    col1_w, col2_w, th = 130, 52, 8
-    pdf.set_font("Helvetica", "B", 10)
-    y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2,  y+th-2, _latin("Item"))
-    pdf.text(left+col1_w+2, y+th-2, _latin("Amount"))
-    pdf.ln(th)
-
-    pdf.set_font("Helvetica", "", 10)
-    # row 1
-    y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Amount Paid (Advance)"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(advance)), align="R")
-    pdf.ln(th)
-    # row 2
-    y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Total Package Value"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(final)), align="R")
-    pdf.ln(th)
-    # row 3
-    y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
-    pdf.text(left+2, y+th-2, _latin("Balance Due"))
-    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, _latin(_fmt_money(bal)), align="R")
-    pdf.ln(th+4)
-
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, _latin(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
-
-    # signature block (enlarged)
+    # signature block
     pdf.ln(8)
     sig_y = pdf.get_y()
     if ORG_SIGN and os.path.exists(ORG_SIGN):
@@ -432,8 +416,116 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
             pass
     pdf.set_y(sig_y + 20)
     pdf.set_x(left+110)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(80, 6, _latin("Authorised Signatory"), ln=1, align="C")
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
+    pdf.cell(80, 6, pdf._txt("Authorised Signatory"), ln=1, align="C")
+    return _pdf_bytes(pdf)
+
+# ------------- payment slip builder -------------
+def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
+    pdf = PDF(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    left = 16
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 13)
+    else:
+        pdf.set_font("Helvetica", "B", 13)
+    pdf.set_x(left)
+    pdf.cell(0, 9, pdf._txt("PAYMENT SLIP"), ln=1)
+
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 11)
+    else:
+        pdf.set_font("Helvetica", "", 11)
+    slip_date = payment_date or row.get("booking_date")
+    if isinstance(slip_date, date):
+        slip_date_str = slip_date.strftime("%Y-%m-%d")
+    else:
+        slip_date_str = _str(slip_date)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Slip Date: {slip_date_str}"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"ACH ID: {_str(row.get('ach_id'))}"), ln=1)
+    pdf.ln(2)
+
+    # Customer
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 11)
+    else:
+        pdf.set_font("Helvetica", "B", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt("Customer:"), ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Customer Name: {_str(row.get('client_name'))}"), ln=1)
+
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 11)
+    else:
+        pdf.set_font("Helvetica", "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Mobile: {_str(row.get('client_mobile'))}"), ln=1)
+    travel = f"{_str(row.get('start_date'))} to {_str(row.get('end_date'))}"
+    pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Travel: {travel}  |  Route: {_str(row.get('final_route'))}"), ln=1)
+    pdf.ln(2)
+
+    advance = int(row.get("advance_amount", 0))
+    final   = int(row.get("final_cost", 0))
+    bal     = max(final - advance, 0)
+
+    col1_w, col2_w, th = 130, 52, 8
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "B", 10)
+    else:
+        pdf.set_font("Helvetica", "B", 10)
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
+    pdf.text(left+2,  y+th-2, pdf._txt("Item"))
+    pdf.text(left+col1_w+2, y+th-2, pdf._txt("Amount"))
+    pdf.ln(th)
+
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
+    # row 1
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
+    pdf.text(left+2, y+th-2, pdf._txt("Amount Paid (Advance)"))
+    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(advance)), align="R")
+    pdf.ln(th)
+    # row 2
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
+    pdf.text(left+2, y+th-2, pdf._txt("Total Package Value"))
+    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(final)), align="R")
+    pdf.ln(th)
+    # row 3
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
+    pdf.text(left+2, y+th-2, pdf._txt("Balance Due"))
+    pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(bal)), align="R")
+    pdf.ln(th+4)
+
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 9)
+    else:
+        pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5, pdf._txt(f"Payment received on: {slip_date_str}. This is a computer generated receipt."))
+
+    # signature block
+    pdf.ln(8)
+    sig_y = pdf.get_y()
+    if ORG_SIGN and os.path.exists(ORG_SIGN):
+        try:
+            pdf.image(ORG_SIGN, x=left+110, y=sig_y-4, w=55)
+        except Exception:
+            pass
+    pdf.set_y(sig_y + 20)
+    pdf.set_x(left+110)
+    if pdf.use_unicode:
+        pdf.set_font("DejaVu", "", 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
+    pdf.cell(80, 6, pdf._txt("Authorised Signatory"), ln=1, align="C")
     return _pdf_bytes(pdf)
 
 # ================= UI ===========================
@@ -497,7 +589,6 @@ with ub3:
     st.caption(" ")
     if st.button("💾 Save to DB"):
         _update_advance_and_booking(chosen_id, int(edit_adv), edit_bdate)
-        # refresh cache + row snapshot
         fetch_confirmed.clear()
         df = fetch_confirmed()
         row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
@@ -507,7 +598,7 @@ st.markdown("---")
 
 # Subject line WITHOUT customer name
 dn = _nights_days(row.get("start_date"), row.get("end_date"))
-default_subject = f"{dn} {_latin(_str(row.get('final_route')))} travel package"
+default_subject = f"{dn} {_str(row.get('final_route'))} travel package"
 
 st.subheader("🧾 Invoice")
 subject = st.text_input("Subject line for invoice", value=default_subject)
@@ -515,7 +606,7 @@ subject = st.text_input("Subject line for invoice", value=default_subject)
 c1, c2 = st.columns([1,1])
 with c1:
     if st.button("Generate Invoice PDF"):
-        inv_bytes = build_invoice_pdf(row, subject=_latin(subject))
+        inv_bytes = build_invoice_pdf(row, subject=subject)
         st.session_state["inv_pdf"] = inv_bytes
 
 with c2:
@@ -540,7 +631,8 @@ if "inv_pdf" in st.session_state:
         f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
     )
-    fname = f"Invoice_{_latin(_str(row.get('ach_id') or row.get('client_name') or 'TAK'))}.pdf"
+    # Prefer simple filenames for Explorer previews
+    fname = f"Invoice_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Invoice (PDF)",
         data=st.session_state["inv_pdf"],
@@ -557,7 +649,7 @@ if "slip_pdf" in st.session_state:
         f'<iframe src="data:application/pdf;base64,{b64s}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
     )
-    fname2 = f"PaymentSlip_{_latin(_str(row.get('ach_id') or row.get('client_name') or 'TAK'))}.pdf"
+    fname2 = f"PaymentSlip_{_str(row.get('ach_id') or row.get('client_name') or 'TAK')}.pdf"
     st.download_button(
         "⬇️ Download Payment Slip (PDF)",
         data=st.session_state["slip_pdf"],
