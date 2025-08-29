@@ -752,6 +752,14 @@ else:
 picked_client_name = ""
 picked_client_mobile = ""
 
+sel_client = st.session_state.get("sel_client", "--")
+sel_client = st.selectbox(
+    "Suggestions",
+    ["--"] + suggestions,
+    index=0,
+    key="sel_client"
+)
+
 if sel_client != "--":
     parts = [p.strip() for p in sel_client.split("—", 1)]
     if len(parts) == 2:
