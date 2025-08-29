@@ -162,9 +162,18 @@ user = _login()
 if not user:
     st.stop()
 
+# --- after login / role detection ---
 USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
-is_admin = (str(user).strip().lower() == "arpith")  # Arpith is admin
+
+# Current:
+# is_admin = (str(user).strip().lower() == "arpith")
+
+# Update to add a manager role for reassignment:
+is_admin = (str(user).strip().lower() == "arpith")
+is_manager = (str(user).strip() == "Kuldeep")
+can_reassign = is_admin or is_manager
+
 
 # =========================
 # Audit
@@ -497,17 +506,24 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
 # =============================================================================
 
 # Sidebar filters (admin can choose user)
-with st.sidebar:
-    if is_admin:
-        view_user = st.selectbox("Filter follow-ups by user", ["All users"] + ALL_USERS, index=0)
-        user_filter = None if view_user == "All users" else view_user
-        st.caption("Admin mode: view all or filter by user. You can record updates on behalf of a user.")
-    else:
-        st.caption("User mode: viewing your assigned follow-ups.")
-        view_user = user
-        user_filter = user
+# Old
+# if is_admin:
+#     st.markdown("### Reassign this follow-up")
+#     ...
 
-tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
+# New
+if can_reassign:
+    st.markdown("### Reassign this follow-up")
+    current_assignee = upd_doc.get("assigned_to")
+    candidates = [u for u in ALL_USERS if u != current_assignee] or ALL_USERS
+    to_user = st.selectbox("Move to user", candidates, key="reassign_to")
+    if st.button("➡️ Reassign now"):
+        try:
+            reassign_followup(chosen_id, from_user=user, to_user=to_user)
+            st.success(f"Moved to {to_user}.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not reassign: {e}")
 
 # =========================
 # TAB 1: Follow-ups
@@ -687,11 +703,20 @@ with tabs[0]:
     base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0)))
     disc_default = _to_int(exp_doc.get("discount", 0)) or max(0, _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0))) - _to_int(it_doc.get("package_after_referral", 0)))
 
-    if is_admin:
-        credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
-        credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
-    else:
-        credit_user_cost = None
+# Old
+# if is_admin:
+#     credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
+#     credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
+# else:
+#     credit_user_cost = None
+
+# New
+if is_admin or is_manager:
+    credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
+    credit_user_cost = None if credit_for_cost == "(keep existing)" else credit_for_cost
+else:
+    credit_user_cost = None
+
 
     c1c, c2c, c3c = st.columns(3)
     with c1c:
