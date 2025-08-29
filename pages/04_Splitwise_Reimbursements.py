@@ -2,50 +2,106 @@
 from __future__ import annotations
 
 from datetime import datetime, date
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
+import os
 
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 
-# ----------------------------
-# Page & constants
-# ----------------------------
+# =========================
+# Page
+# =========================
 st.set_page_config(page_title="Splitwise Reimbursements", layout="wide")
 st.title("🧾 Splitwise-style Reimbursements")
 
 CATEGORIES = ["Car", "Hotel", "Bhasmarathi", "Poojan", "PhotoFrame", "Other"]
+IST_TTL = 60  # short cache TTL so updates reflect quickly
 
-# ----------------------------
-# Secrets & Mongo
-# ----------------------------
-MONGO_URI = st.secrets["mongo_uri"]
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
-db = client["TAK_DB"]
+# =========================
+# Secrets & Mongo (parity)
+# =========================
+CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
+
+def _find_uri() -> Optional[str]:
+    for k in CAND_KEYS:
+        try:
+            v = st.secrets.get(k)
+        except Exception:
+            v = None
+        if v:
+            return v
+    for k in CAND_KEYS:
+        v = os.getenv(k)
+        if v:
+            return v
+    return None
+
+@st.cache_resource
+def _get_client() -> MongoClient:
+    uri = _find_uri()
+    if not uri:
+        st.error(
+            "Mongo connection is not configured.\n\n"
+            "Add one of these in **Manage app → Settings → Secrets** (recommended: `mongo_uri`)."
+        )
+        st.stop()
+    client = MongoClient(
+        uri,
+        appName="TAK_Splitwise",
+        maxPoolSize=100,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+        retryWrites=True,
+        tz_aware=True,
+    )
+    try:
+        client.admin.command("ping")
+    except ServerSelectionTimeoutError as e:
+        st.error(f"Could not connect to MongoDB. Details: {e}")
+        st.stop()
+    return client
+
+@st.cache_resource
+def get_db():
+    return _get_client()["TAK_DB"]
+
+db = get_db()
 col_itineraries = db["itineraries"]
 col_updates     = db["package_updates"]
-col_split       = db["expense_splitwise"]     # this page writes here
+col_split       = db["expense_splitwise"]   # this page writes here
 
-# ----------------------------
-# Users & login
-# ----------------------------
+# =========================
+# Users & login (parity)
+# =========================
 def load_users() -> dict:
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
+    # fallback to repo .streamlit/secrets.toml for dev
     try:
         try:
             import tomllib  # 3.11+
-        except Exception:  # pragma: no cover
+        except Exception:
             import tomli as tomllib
         with open(".streamlit/secrets.toml", "rb") as f:
             data = tomllib.load(f)
-        return data.get("users", {}) or {}
+        u = data.get("users", {})
+        if isinstance(u, dict) and u:
+            with st.sidebar:
+                st.warning(
+                    "Using users from repo .streamlit/secrets.toml. "
+                    "For production, set them in Manage app → Secrets."
+                )
+            return u
     except Exception:
-        return {}
+        pass
+    return {}
 
-ADMIN_USERS = set(st.secrets.get("admin_users", ["Arpith"]))
+# Admins/managers (Kuldeep included)
+ADMIN_USERS = set(st.secrets.get("admin_users", ["Arpith", "Kuldeep"]))
 
 def _login() -> Optional[str]:
     with st.sidebar:
@@ -59,7 +115,12 @@ def _login() -> Optional[str]:
 
     users_map = load_users()
     if not users_map:
-        st.error("Login not configured. Add `mongo_uri` and a [users] table in **Manage app → Secrets**.")
+        st.error(
+            "Login is not configured yet.\n\n"
+            "Add to **Manage app → Secrets**:\n"
+            'mongo_uri = "mongodb+srv://…"\n\n'
+            "[users]\nArpith = \"1234\"\nReena = \"5678\"\nTeena = \"7777\"\nKuldeep = \"8888\"\n"
+        )
         st.stop()
 
     st.markdown("### 🔐 Login")
@@ -68,7 +129,6 @@ def _login() -> Optional[str]:
         name = st.selectbox("User", list(users_map.keys()), key="login_user")
     with c2:
         pin = st.text_input("PIN", type="password", key="login_pin")
-
     if st.button("Sign in"):
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
@@ -83,13 +143,13 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
+# Audit
 from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Admin"), "04_Splitwise_Reimbursements")
+audit_pageview(st.session_state.get("user", "Unknown"), "04_Splitwise_Reimbursements")
 
-
-# ----------------------------
-# Helpers
-# ----------------------------
+# =========================
+# Helpers (parity)
+# =========================
 def _to_int(x, default=0):
     try:
         if x is None:
@@ -106,31 +166,9 @@ def norm_date(x):
     except Exception:
         return None
 
+@st.cache_data(ttl=IST_TTL, show_spinner=False)
 def all_employees() -> List[str]:
     return [e for e in sorted(load_users().keys()) if e]
-
-def confirmed_itineraries_df() -> pd.DataFrame:
-    """
-    Only itineraries that are CONFIRMED in package_updates.
-    """
-    # pull confirmed ids
-    upd = list(col_updates.find({"status":"confirmed"}, {"_id":0, "itinerary_id":1}))
-    if not upd:
-        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
-    ids = [str(u["itinerary_id"]) for u in upd if u.get("itinerary_id")]
-
-    its = list(col_itineraries.find(
-        {"_id": {"$in": [ObjectId(i) for i in ids if len(i)==24]}},
-        {"_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"start_date":1,"end_date":1,"final_route":1}
-    ))
-    for r in its:
-        r["itinerary_id"] = str(r["_id"])
-        r["start_date"] = norm_date(r.get("start_date"))
-        r["end_date"]   = norm_date(r.get("end_date"))
-    df = pd.DataFrame(its) if its else pd.DataFrame(columns=[
-        "itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"
-    ])
-    return df.drop(columns=["_id"], errors="ignore")
 
 def pack_label(r: pd.Series) -> str:
     return f"{(r.get('ach_id') or '').strip()} | {(r.get('client_name') or '').strip()} | {(r.get('client_mobile') or '').strip()} | {(r.get('itinerary_id') or '').strip()}"
@@ -158,9 +196,101 @@ def entry_to_row(d: dict) -> dict:
         "created_at": d.get("created_at"),
     }
 
-# ----------------------------
+# =========================
+# Data fetchers (fast)
+# =========================
+@st.cache_data(ttl=IST_TTL, show_spinner=False)
+def _confirmed_ids() -> List[str]:
+    """Return list of itinerary_ids that have status=confirmed."""
+    cur = col_updates.find({"status": "confirmed"}, {"_id": 0, "itinerary_id": 1})
+    return [str(d.get("itinerary_id")) for d in cur if d.get("itinerary_id")]
+
+@st.cache_data(ttl=IST_TTL, show_spinner=False)
+def confirmed_itineraries_df() -> pd.DataFrame:
+    """
+    Only itineraries that are CONFIRMED in package_updates.
+    Supports both ObjectId(_id) and legacy 'itinerary_id' string linkage.
+    """
+    ids = _confirmed_ids()
+    if not ids:
+        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
+
+    # Try to fetch by _id (ObjectId) for ids of len 24
+    obj_ids = [ObjectId(i) for i in ids if len(i) == 24]
+    docs_by_oid = []
+    if obj_ids:
+        docs_by_oid = list(col_itineraries.find(
+            {"_id": {"$in": obj_ids}},
+            {"_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"start_date":1,"end_date":1,"final_route":1}
+        ))
+
+    # Fallback: fetch by 'itinerary_id' string field (legacy data)
+    str_ids = [i for i in ids if len(i) != 24]
+    docs_by_str = []
+    if str_ids:
+        docs_by_str = list(col_itineraries.find(
+            {"itinerary_id": {"$in": str_ids}},
+            {"_id":1,"itinerary_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"start_date":1,"end_date":1,"final_route":1}
+        ))
+
+    # Normalize
+    all_docs: List[dict] = []
+    for r in docs_by_oid:
+        r["itinerary_id"] = str(r["_id"])
+        r["start_date"] = norm_date(r.get("start_date"))
+        r["end_date"]   = norm_date(r.get("end_date"))
+        r.pop("_id", None)
+        all_docs.append(r)
+    for r in docs_by_str:
+        # ensure itinerary_id present
+        r["itinerary_id"] = str(r.get("itinerary_id") or r.get("_id"))
+        r["start_date"] = norm_date(r.get("start_date"))
+        r["end_date"]   = norm_date(r.get("end_date"))
+        r.pop("_id", None)
+        all_docs.append(r)
+
+    if not all_docs:
+        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
+
+    # (Optional) make unique by itinerary_id (just in case)
+    df = pd.DataFrame(all_docs).drop_duplicates(subset=["itinerary_id"])
+    return df
+
+def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
+                  employee: Optional[str] = None, itinerary_id: Optional[str] = None) -> pd.DataFrame:
+    q: Dict = {}
+    if start and end:
+        q["date"] = {
+            "$gte": datetime.combine(start, datetime.min.time()),
+            "$lte": datetime.combine(end, datetime.max.time()),
+        }
+    if employee:
+        q["$or"] = [{"payer": employee}, {"employee": employee}]
+    if itinerary_id:
+        q["itinerary_id"] = str(itinerary_id)
+    cur = col_split.find(q, projection={"_id":1,"kind":1,"date":1,"payer":1,"employee":1,"customer_name":1,
+                                        "ach_id":1,"category":1,"subheader":1,"amount":1,"notes":1,"ref":1,
+                                        "itinerary_id":1,"created_by":1,"created_at":1}).sort("date", 1)
+    rows = [entry_to_row(d) for d in cur]
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=list(entry_to_row({}).keys()))
+
+def totals_for_employee(emp: str, start: Optional[date]=None, end: Optional[date]=None) -> Tuple[int,int,int]:
+    q_exp: Dict = {"kind":"expense","payer":emp}
+    q_pay: Dict = {"kind":"settlement","employee":emp}
+    if start and end:
+        span = {
+            "$gte": datetime.combine(start, datetime.min.time()),
+            "$lte": datetime.combine(end, datetime.max.time()),
+        }
+        q_exp["date"] = span
+        q_pay["date"] = span
+    exp_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_exp, {"amount":1}))
+    pay_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_pay, {"amount":1}))
+    return exp_sum, pay_sum, (exp_sum - pay_sum)
+
+# =========================
 # DB ops
-# ----------------------------
+# =========================
 def add_expense(
     *, payer: str, itinerary_id: str, customer_name: str, ach_id: str,
     category: str, subheader: str, amount: int, when: date, notes: str
@@ -192,39 +322,9 @@ def add_settlement(*, employee: str, amount: int, when: date, ref: str, notes: s
         "notes": notes or "",
     })
 
-def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
-                  employee: Optional[str] = None, itinerary_id: Optional[str] = None) -> pd.DataFrame:
-    q: Dict = {}
-    if start and end:
-        q["date"] = {
-            "$gte": datetime.combine(start, datetime.min.time()),
-            "$lte": datetime.combine(end, datetime.max.time()),
-        }
-    if employee:
-        q["$or"] = [{"payer": employee}, {"employee": employee}]
-    if itinerary_id:
-        q["itinerary_id"] = str(itinerary_id)
-    cur = col_split.find(q).sort("date", 1)
-    rows = [entry_to_row(d) for d in cur]
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=list(entry_to_row({}).keys()))
-
-def totals_for_employee(emp: str, start: Optional[date]=None, end: Optional[date]=None):
-    q_exp: Dict = {"kind":"expense","payer":emp}
-    q_pay: Dict = {"kind":"settlement","employee":emp}
-    if start and end:
-        span = {
-            "$gte": datetime.combine(start, datetime.min.time()),
-            "$lte": datetime.combine(end, datetime.max.time()),
-        }
-        q_exp["date"] = span
-        q_pay["date"] = span
-    exp_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_exp, {"amount":1}))
-    pay_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_pay, {"amount":1}))
-    return exp_sum, pay_sum, (exp_sum - pay_sum)
-
-# ----------------------------
+# =========================
 # Filters / controls
-# ----------------------------
+# =========================
 df_confirmed = confirmed_itineraries_df()
 
 with st.container():
@@ -239,7 +339,9 @@ with st.container():
             end = start
     with f3:
         emp_options = all_employees()
-        emp_filter = st.multiselect("Employees", options=emp_options, default=[user])
+        # default to current user selected, but allow multi
+        default_emp = [user] if user in emp_options else []
+        emp_filter = st.multiselect("Employees", options=emp_options, default=default_emp)
     with f4:
         search_txt = st.text_input("Search confirmed client/mobile/ACH", placeholder="Type to filter package list…")
 
@@ -260,9 +362,9 @@ def choose_package(label="Select confirmed package", key="pkg_pick"):
     row = options[options["itinerary_id"]==rid].iloc[0]
     return rid, row.get("client_name",""), row.get("ach_id","")
 
-# ----------------------------
+# =========================
 # KPIs for current user
-# ----------------------------
+# =========================
 st.subheader("My balances")
 exp_m, pay_m, bal_m = totals_for_employee(user, start, end)
 exp_all, pay_all, bal_all = totals_for_employee(user, None, None)
@@ -276,9 +378,9 @@ k6.metric("Balance (all time)", f"₹ {bal_all:,}")
 
 st.divider()
 
-# ----------------------------
+# =========================
 # Add expense
-# ----------------------------
+# =========================
 st.subheader("➕ Add expense")
 mode = st.radio("Expense type", ["Linked to confirmed package", "Other expense (no package)"], horizontal=True)
 
@@ -329,9 +431,9 @@ if submitted:
         st.success("Expense added.")
         st.rerun()
 
-# ----------------------------
+# =========================
 # Admin: settle balances
-# ----------------------------
+# =========================
 if is_admin:
     st.subheader("💵 Admin – Settle employee balance")
     with st.form("settlement_form", clear_on_submit=False):
@@ -356,9 +458,9 @@ if is_admin:
 
 st.divider()
 
-# ----------------------------
+# =========================
 # Package ledger (confirmed only)
-# ----------------------------
+# =========================
 st.subheader("📦 Package ledger (confirmed only)")
 iid_l, cust_l, ach_l = choose_package("Pick a confirmed package to view ledger", key="ledger_pick")
 if iid_l:
@@ -385,9 +487,9 @@ if iid_l:
 
 st.divider()
 
-# ----------------------------
+# =========================
 # Team balances table (period + all-time)
-# ----------------------------
+# =========================
 st.subheader("👥 Balances")
 search_emp = st.text_input("Search employee (optional)", key="emp_search")
 emps = emp_filter if emp_filter else all_employees()
@@ -417,9 +519,9 @@ st.dataframe(df_bal, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# ----------------------------
+# =========================
 # My entries (in selected period)
-# ----------------------------
+# =========================
 st.subheader("📜 My entries (in selected period)")
 df_me = fetch_entries(start, end, employee=user, itinerary_id=None)
 if df_me.empty:
