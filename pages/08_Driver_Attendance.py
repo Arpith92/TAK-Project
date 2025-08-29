@@ -1,0 +1,495 @@
+# pages/08_Driver_Attendance.py
+from __future__ import annotations
+
+# ==============================
+# Imports & setup
+# ==============================
+import os
+from datetime import datetime, date, time as dtime, timedelta
+from typing import Optional, List, Dict, Tuple
+
+import pandas as pd
+import streamlit as st
+from pymongo import MongoClient
+from bson import ObjectId
+from fpdf import FPDF  # fpdf2
+
+# Page
+st.set_page_config(page_title="Driver Attendance & Salary", layout="wide")
+st.title("🚖 Driver Attendance & Salary")
+
+TTL = 90  # short cache keeps UI snappy
+
+# ==============================
+# Admin gate (like your admin pages)
+# ==============================
+def require_admin() -> bool:
+    ADMIN_PASS_DEFAULT = "Arpith&92"
+    ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
+    with st.sidebar:
+        st.markdown("### Admin access")
+        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
+    ok = ((p or "").strip() == ADMIN_PASS.strip())
+    st.session_state["is_admin"] = ok
+    st.session_state["user"] = "Admin" if ok else st.session_state.get("user", "Driver")
+    return ok
+
+# Let page show both views: if admin not authenticated, we show Driver self-entry only
+is_admin = require_admin()
+
+# ==============================
+# Mongo
+# ==============================
+CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
+
+def _find_uri() -> Optional[str]:
+    for k in CAND_KEYS:
+        try:
+            v = st.secrets.get(k)
+        except Exception:
+            v = None
+        if v: return v
+    for k in CAND_KEYS:
+        v = os.getenv(k)
+        if v: return v
+    return None
+
+@st.cache_resource
+def _get_client() -> MongoClient:
+    uri = _find_uri()
+    if not uri:
+        st.error("Mongo connection is not configured. Add `mongo_uri` in Secrets.")
+        st.stop()
+    cli = MongoClient(uri, appName="TAK_DriverAttendance", serverSelectionTimeoutMS=8000, connectTimeoutMS=8000, tz_aware=True)
+    cli.admin.command("ping")
+    return cli
+
+DB = _get_client()["TAK_DB"]
+col_att = DB["driver_attendance"]   # one doc per driver+date
+col_adv = DB["driver_advances"]     # arbitrary advances
+# optional audit
+try:
+    from tak_audit import audit_pageview
+    audit_pageview(st.session_state.get("user", "Unknown"), page="08_Driver_Attendance")
+except Exception:
+    pass
+
+# ==============================
+# Constants / helpers
+# ==============================
+DRIVERS = ["Priyansh"]  # extend later
+CARS = ["TAK Sedan", "TAK Ertiga"]
+BASE_SALARY = 12000
+LEAVE_DEDUCT = 400
+OVERTIME_ADD = 300  # for each counted unit: overnight_outstation, overnight_client, bhasmarathi
+
+ORG_LOGO = ".streamlit/logo.png"
+ORG_SIGN = ".streamlit/signature.png"
+FONT_REG = ".streamlit/DejaVuSans.ttf"
+FONT_BLD = ".streamlit/DejaVuSans-Bold.ttf"
+
+def _to_int(x, default=0) -> int:
+    try:
+        if x is None: return default
+        return int(round(float(str(x).replace(",", ""))))
+    except Exception:
+        return default
+
+def _d(x) -> Optional[date]:
+    try:
+        if x is None or pd.isna(x): return None
+        return pd.to_datetime(x).date()
+    except Exception:
+        return None
+
+def month_bounds(d: date) -> Tuple[date, date]:
+    first = d.replace(day=1)
+    next_first = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last = next_first - timedelta(days=1)
+    return first, last
+
+def inr(n: int) -> str:
+    return f"₹ {int(n):,}"
+
+# ==============================
+# Cached loaders
+# ==============================
+@st.cache_data(ttl=TTL, show_spinner=False)
+def load_attendance(driver: str, start: date, end: date) -> pd.DataFrame:
+    cur = col_att.find(
+        {"driver": driver, "date": {"$gte": datetime.combine(start, dtime.min),
+                                    "$lte": datetime.combine(end,   dtime.max)}},
+        {"_id":0}
+    ).sort("date", 1)
+    rows = []
+    for r in cur:
+        rows.append({
+            "date": _d(r.get("date")),
+            "driver": r.get("driver",""),
+            "car": r.get("car",""),
+            "in_time": r.get("in_time",""),
+            "out_time": r.get("out_time",""),
+            "status": r.get("status","Present"),  # Present / Leave
+            "outstation_overnight": bool(r.get("outstation_overnight", False)),
+            "overnight_client": bool(r.get("overnight_client", False)),
+            "overnight_client_name": r.get("overnight_client_name",""),
+            "bhasmarathi": bool(r.get("bhasmarathi", False)),
+            "bhas_client_name": r.get("bhas_client_name",""),
+            "notes": r.get("notes",""),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        "date","driver","car","in_time","out_time","status",
+        "outstation_overnight","overnight_client","overnight_client_name",
+        "bhasmarathi","bhas_client_name","notes"
+    ])
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def load_advances(driver: str, start: date, end: date) -> pd.DataFrame:
+    cur = col_adv.find(
+        {"driver": driver, "date": {"$gte": datetime.combine(start, dtime.min),
+                                    "$lte": datetime.combine(end,   dtime.max)}},
+        {"_id":0}
+    ).sort("date", 1)
+    rows = [{"date": _d(r.get("date")), "driver": r.get("driver",""),
+             "amount": _to_int(r.get("amount",0)), "note": r.get("note","")} for r in cur]
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["date","driver","amount","note"])
+
+# ==============================
+# DB upserts
+# ==============================
+def upsert_attendance(
+    *, driver: str, day: date, car: str,
+    in_time: str, out_time: str, status: str,
+    outstation_overnight: bool, overnight_client: bool, overnight_client_name: str,
+    bhasmarathi: bool, bhas_client_name: str, notes: str
+):
+    key_dt = datetime.combine(day, dtime.min)
+    payload = {
+        "driver": driver,
+        "date": key_dt,
+        "car": car,
+        "in_time": in_time,
+        "out_time": out_time,
+        "status": status,
+        "outstation_overnight": bool(outstation_overnight),
+        "overnight_client": bool(overnight_client),
+        "overnight_client_name": overnight_client_name or "",
+        "bhasmarathi": bool(bhasmarathi),
+        "bhas_client_name": bhas_client_name or "",
+        "notes": notes or "",
+        "updated_at": datetime.utcnow(),
+    }
+    col_att.update_one({"driver": driver, "date": key_dt}, {"$set": payload}, upsert=True)
+
+def add_advance(*, driver: str, day: date, amount: int, note: str):
+    col_adv.insert_one({
+        "driver": driver,
+        "date": datetime.combine(day, dtime.min),
+        "amount": int(amount),
+        "note": note or "",
+        "created_at": datetime.utcnow(),
+    })
+
+def bulk_upsert_range(
+    *, driver: str, start: date, end: date,
+    status: str, mark_outstation: bool, mark_overnight_client: bool, mark_bhas: bool
+):
+    cur = start
+    while cur <= end:
+        upsert_attendance(
+            driver=driver, day=cur, car="", in_time="", out_time="", status=status,
+            outstation_overnight=mark_outstation,
+            overnight_client=mark_overnight_client,
+            overnight_client_name="",
+            bhasmarathi=mark_bhas, bhas_client_name="",
+            notes="(bulk update)"
+        )
+        cur += timedelta(days=1)
+
+# ==============================
+# Salary calculator
+# ==============================
+def calc_salary(df_att: pd.DataFrame, df_adv: pd.DataFrame, month_start: date, month_end: date) -> dict:
+    days_in_month = (month_end - month_start).days + 1
+    leave_days = 0 if df_att.empty else int((df_att["status"] == "Leave").sum())
+    # Overtime units (each 300)
+    ot_units = 0
+    if not df_att.empty:
+        ot_units += int(df_att["outstation_overnight"].fillna(False).sum())
+        ot_units += int(df_att["overnight_client"].fillna(False).sum())
+        ot_units += int(df_att["bhasmarathi"].fillna(False).sum())
+
+    leave_ded = leave_days * LEAVE_DEDUCT
+    overtime_amt = ot_units * OVERTIME_ADD
+    advances = 0 if df_adv.empty else int(df_adv["amount"].sum())
+
+    gross = BASE_SALARY - leave_ded + overtime_amt
+    net = gross - advances
+
+    return {
+        "days_in_month": days_in_month,
+        "leave_days": leave_days,
+        "ot_units": ot_units,
+        "leave_ded": leave_ded,
+        "overtime_amt": overtime_amt,
+        "advances": advances,
+        "gross": gross,
+        "net": net,
+    }
+
+# ==============================
+# PDF Slip
+# ==============================
+def _use_unicode_fonts() -> bool:
+    return os.path.exists(FONT_REG) and os.path.exists(FONT_BLD)
+
+class PDF(FPDF):
+    def __init__(self):
+        super().__init__(format="A4")
+        self.use_unicode = _use_unicode_fonts()
+        if self.use_unicode:
+            self.add_font("DejaVu", "", FONT_REG, uni=True)
+            self.add_font("DejaVu", "B", FONT_BLD, uni=True)
+        self.set_auto_page_break(auto=True, margin=18)
+        self.set_title("Driver Salary Statement")
+        self.set_author("Achala Holidays Pvt. Ltd.")
+
+    def header(self):
+        self.set_draw_color(150,150,150)
+        self.rect(8, 8, 194, 281)
+        if ORG_LOGO and os.path.exists(ORG_LOGO):
+            try: self.image(ORG_LOGO, x=14, y=12, w=28)
+            except Exception: pass
+        self.set_xy(50, 12)
+        self.set_font("DejaVu" if self.use_unicode else "Helvetica", "B", 14)
+        self.cell(0, 7, "ACHALA HOLIDAYS PRIVATE LIMITED", align="C", ln=1)
+        self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
+        self.cell(0, 6, "Salary Statement", align="C", ln=1)
+        self.ln(2)
+        self.set_draw_color(0,0,0); self.line(12, self.get_y(), 198, self.get_y()); self.ln(4)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 8)
+        self.cell(0, 5, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=1, align="C")
+
+def build_salary_pdf(
+    *, emp_name: str, month_label: str, period_label: str, calc: dict
+) -> bytes:
+    pdf = PDF()
+    pdf.add_page()
+    left = 16
+    col1_w, col2_w, col3_w = 90, 30, 40
+    th = 8
+
+    # Title block
+    pdf.set_x(left)
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 12)
+    pdf.cell(0, 7, f"{month_label}  (Salary Statement {period_label})", ln=1)
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, f"EMP NAME:  {emp_name}", ln=1)
+    pdf.ln(2)
+
+    # Table Head
+    y = pdf.get_y()
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
+    pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th); pdf.rect(left+col1_w+col2_w, y, col3_w, th)
+    pdf.text(left+2, y+th-2, "Particulars"); pdf.text(left+col1_w+2, y+th-2, "Units/Days")
+    pdf.text(left+col1_w+col2_w+2, y+th-2, "Amount")
+    pdf.ln(th)
+
+    def row(lbl, units, amt, bold=False):
+        y = pdf.get_y()
+        pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B" if bold else "", 10)
+        pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th); pdf.rect(left+col1_w+col2_w, y, col3_w, th)
+        pdf.set_xy(left+2, y); pdf.cell(col1_w-4, th, lbl)
+        pdf.set_xy(left+col1_w, y); pdf.cell(col2_w-2, th, f"{units}", align="R")
+        pdf.set_xy(left+col1_w+col2_w, y); pdf.cell(col3_w-2, th, f"{inr(amt)}", align="R")
+        pdf.ln(th)
+
+    # Rows
+    row("Total Days in Month", calc["days_in_month"], 0)
+    row("Salary (Base)", "-", BASE_SALARY)
+    row("Total Leave (₹400/day)", calc["leave_days"], calc["leave_ded"])
+    row("Over-time (₹300/unit)", calc["ot_units"], calc["overtime_amt"])
+    row("Advances (deduct)", "-", -calc["advances"])
+    pdf.ln(2)
+    row("Total Salary (Gross)", "-", calc["gross"], bold=True)
+    row("Net Payable", "-", calc["net"], bold=True)
+
+    # Signature
+    pdf.ln(10)
+    sig_w = 50
+    sig_x = pdf.w - 16 - sig_w
+    sig_y = pdf.get_y()
+    if ORG_SIGN and os.path.exists(ORG_SIGN):
+        try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
+        except Exception: pass
+    pdf.set_xy(sig_x, sig_y + 18)
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
+    pdf.cell(sig_w, 6, "Authorised Signatory", ln=1, align="C")
+
+    out = pdf.output(dest="S")
+    return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
+
+# ==============================
+# UI – Tabs: Driver / Admin
+# ==============================
+tab_driver, tab_admin = st.tabs(["Driver Entry & My Salary", "Admin Panel"]) if is_admin else (st.container(), None)
+
+# ---------------- DRIVER VIEW ----------------
+with tab_driver:
+    st.subheader("Driver – Daily Entry")
+    driver = st.selectbox("Driver", DRIVERS, index=0)
+    day = st.date_input("Date", value=date.today())
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        car = st.selectbox("Car", [""] + CARS, index=0)
+    with c2:
+        in_time = st.text_input("In time (e.g., 08:00)")
+    with c3:
+        out_time = st.text_input("Out time (e.g., 20:30)")
+
+    c4, c5 = st.columns(2)
+    with c4:
+        status = st.selectbox("Status", ["Present", "Leave"], index=0)
+    with c5:
+        outstation_overnight = st.checkbox("Overnight – Outstation stay", value=False)
+
+    c6, c7 = st.columns(2)
+    with c6:
+        overnight_client = st.checkbox("Overnight – Client pickup/drop (post-midnight)", value=False)
+        overnight_client_name = st.text_input("Client (for overnight-client)", value="", disabled=(not overnight_client))
+    with c7:
+        bhasmarathi = st.checkbox("Bhasmarathi duty", value=False)
+        bhas_client = st.text_input("Bhasmarathi client", value="", disabled=(not bhasmarathi))
+
+    notes = st.text_area("Notes (optional)")
+
+    if st.button("💾 Save today’s entry"):
+        upsert_attendance(
+            driver=driver, day=day, car=car, in_time=in_time, out_time=out_time, status=status,
+            outstation_overnight=outstation_overnight,
+            overnight_client=overnight_client, overnight_client_name=overnight_client_name,
+            bhasmarathi=bhasmarathi, bhas_client_name=bhas_client, notes=notes
+        )
+        load_attendance.clear()
+        st.success("Saved.")
+        st.experimental_rerun()
+
+    st.divider()
+    st.subheader("My Salary (this month)")
+    mstart, mend = month_bounds(date.today())
+    df_att = load_attendance(driver, mstart, mend)
+    df_adv = load_advances(driver, mstart, mend)
+    calc = calc_salary(df_att, df_adv, mstart, mend)
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Days in month", calc["days_in_month"])
+    k2.metric("Leave days", calc["leave_days"])
+    k3.metric("OT units", calc["ot_units"])
+    k4.metric("Base", inr(BASE_SALARY))
+    k5.metric("Deductions", inr(calc["leave_ded"] + calc["advances"]))
+    k6.metric("Net Pay", inr(calc["net"]))
+
+    with st.expander("Show my entries (this month)"):
+        st.dataframe(df_att.sort_values("date"), use_container_width=True, hide_index=True)
+    with st.expander("Advances (this month)"):
+        st.dataframe(df_adv.sort_values("date"), use_container_width=True, hide_index=True)
+
+# ---------------- ADMIN VIEW ----------------
+if is_admin and tab_admin is not None:
+    with tab_admin:
+        st.subheader("Admin — Bulk Update & Salary")
+
+        # Filters
+        a1, a2 = st.columns(2)
+        with a1:
+            admin_driver = st.selectbox("Driver", DRIVERS, index=0, key="adm_driver")
+        with a2:
+            ref_month = st.date_input("Salary month anchor", value=date.today())
+        mstart, mend = month_bounds(ref_month)
+        st.caption(f"Period: **{mstart} → {mend}**")
+
+        # Bulk update
+        st.markdown("#### Bulk mark days")
+        b1, b2 = st.columns(2)
+        with b1:
+            bfrom = st.date_input("From date", value=mstart)
+        with b2:
+            bto = st.date_input("To date", value=mend)
+            if bto < bfrom: bto = bfrom
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            status_sel = st.selectbox("Status", ["Present","Leave"], index=0)
+        with c2:
+            mark_outstation = st.checkbox("Overnight – Outstation", value=False)
+        with c3:
+            mark_overnight_client = st.checkbox("Overnight – Client", value=False)
+        with c4:
+            mark_bhas = st.checkbox("Bhasmarathi", value=False)
+
+        if st.button("🚀 Apply bulk"):
+            bulk_upsert_range(
+                driver=admin_driver, start=bfrom, end=bto,
+                status=status_sel, mark_outstation=mark_outstation,
+                mark_overnight_client=mark_overnight_client, mark_bhas=mark_bhas
+            )
+            load_attendance.clear()
+            st.success("Bulk update done.")
+
+        st.divider()
+        st.markdown("#### Add Advance (deduct from salary)")
+        ad1, ad2, ad3 = st.columns(3)
+        with ad1:
+            adv_date = st.date_input("Advance date", value=mstart)
+        with ad2:
+            adv_amt = st.number_input("Amount (₹)", min_value=0, step=100, value=0)
+        with ad3:
+            adv_note = st.text_input("Note", "")
+        if st.button("➕ Add advance"):
+            if adv_amt > 0:
+                add_advance(driver=admin_driver, day=adv_date, amount=int(adv_amt), note=adv_note)
+                load_advances.clear()
+                st.success("Advance added.")
+            else:
+                st.warning("Enter amount > 0")
+
+        st.divider()
+        st.subheader("Review & Generate Salary Slip")
+        df_att_m = load_attendance(admin_driver, mstart, mend)
+        df_adv_m = load_advances(admin_driver, mstart, mend)
+        calc_m = calc_salary(df_att_m, df_adv_m, mstart, mend)
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Leaves", calc_m["leave_days"])
+        k2.metric("OT units", calc_m["ot_units"])
+        k3.metric("Advances", inr(calc_m["advances"]))
+        k4.metric("Net Pay", inr(calc_m["net"]))
+
+        with st.expander("Attendance (month)"):
+            st.dataframe(df_att_m.sort_values("date"), use_container_width=True, hide_index=True)
+        with st.expander("Advances (month)"):
+            st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
+
+        # PDF
+        month_label = f"{mstart.strftime('%B-%Y')}"
+        period_label = f"{mstart.strftime('%d-%B-%Y')} to {mend.strftime('%d-%B-%Y')}"
+        if st.button("📄 Generate Salary PDF"):
+            pdf_bytes = build_salary_pdf(
+                emp_name=admin_driver, month_label=month_label,
+                period_label=period_label, calc=calc_m
+            )
+            st.session_state["drv_pdf"] = pdf_bytes
+            st.success("PDF ready below.")
+
+        if "drv_pdf" in st.session_state:
+            b = st.session_state["drv_pdf"]
+            st.download_button(
+                "⬇️ Download Salary Slip (PDF)",
+                data=b,
+                file_name=f"Salary_{admin_driver}_{mstart.strftime('%Y_%m')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
