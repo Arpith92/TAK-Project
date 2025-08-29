@@ -83,7 +83,7 @@ col_expenses    = db["expenses"]
 
 # ================= Org / assets =================
 ORG = {
-    "title": "TravelaajKal™ – Achala Holidays Pvt. Ltd",
+    "title": "TravelaajKal® – Achala Holidays Pvt. Ltd",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
     "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com | Mob: +91-7509612798" ,
     
