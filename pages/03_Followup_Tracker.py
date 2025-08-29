@@ -69,7 +69,7 @@ col_followups   = db["followups"]
 col_expenses    = db["expenses"]
 
 # =========================
-# Users + login  (UPDATED)
+# Users + login  (robust)
 # =========================
 def load_users() -> dict:
     users = st.secrets.get("users", None)
@@ -235,9 +235,7 @@ def _compute_incentive(final_amt: int) -> int:
     return 0
 
 def _sync_cost_to_updates(iid: str, final_cost: int, base: int, disc: int) -> None:
-    """
-    Mirror cost fields into package_updates so dashboards/pages that read updates see the numbers.
-    """
+    """Mirror cost fields into package_updates so dashboards/pages that read updates see the numbers."""
     col_updates.update_one(
         {"itinerary_id": str(iid)},
         {"$set": {
@@ -250,7 +248,42 @@ def _sync_cost_to_updates(iid: str, final_cost: int, base: int, disc: int) -> No
         upsert=True,
     )
 
-# ======== NEW: Auto-confirm other packages (same mobile) ========
+# =========================
+# Assignment heal from itinerary.representative
+# =========================
+def _ensure_assignment_from_rep(iid: str, actor_user: str):
+    """If itinerary has `representative` and updates.assigned_to mismatches/missing, fix it."""
+    it = _get_itinerary(iid, {"representative": 1, "client_name":1, "client_mobile":1, "ach_id":1})
+    rep = (it.get("representative") or "").strip()
+    if not rep:
+        return
+    upd = col_updates.find_one({"itinerary_id": str(iid)}, {"_id":1, "assigned_to":1, "status":1})
+    if not upd:
+        # create followup doc pointing to representative
+        col_updates.update_one(
+            {"itinerary_id": str(iid)},
+            {"$set": {"status": "followup", "assigned_to": rep, "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
+        col_followups.insert_one({
+            "itinerary_id": str(iid),
+            "created_at": datetime.utcnow(),
+            "created_by": actor_user,
+            "status": "followup",
+            "comment": f"Auto-assigned from itinerary representative {rep}",
+            "credited_to": rep,
+            "client_name": it.get("client_name",""),
+            "client_mobile": it.get("client_mobile",""),
+            "ach_id": it.get("ach_id",""),
+        })
+    else:
+        if upd.get("assigned_to") != rep and upd.get("status") != "confirmed":
+            col_updates.update_one(
+                {"itinerary_id": str(iid)},
+                {"$set": {"assigned_to": rep, "updated_at": datetime.utcnow()}}
+            )
+
+# ======== Auto-confirm other packages (same mobile) ========
 def _auto_confirm_other_packages(current_iid: str, credit_user: str, booking_date: Optional[date], actor_user: str):
     """When one itinerary is confirmed, auto-confirm all *other* itineraries with the same client_mobile."""
     base_doc = _get_itinerary(current_iid, {"client_mobile":1, "client_name":1, "ach_id":1})
@@ -267,15 +300,15 @@ def _auto_confirm_other_packages(current_iid: str, credit_user: str, booking_dat
     if not other_ids:
         return
 
-    # We only auto-confirm those that are not already confirmed/cancelled
+    # Only auto-confirm those not already confirmed/cancelled
     existing_upds = list(col_updates.find({"itinerary_id": {"$in": other_ids}}, {"itinerary_id":1, "status":1}))
     status_map = {str(u.get("itinerary_id")): u.get("status") for u in existing_upds}
 
     for oid in other_ids:
         if status_map.get(oid) in ("confirmed", "cancelled"):
-            continue  # skip already finalised
+            continue
 
-        # Compute cost for that itinerary (from expenses if available)
+        # Cost for that itinerary
         fc = _final_cost_for(oid)
         exp_doc = col_expenses.find_one({"itinerary_id": str(oid)},
                                         {"base_package_cost":1,"discount":1,"final_package_cost":1,"package_cost":1}) or {}
@@ -445,8 +478,10 @@ def upsert_update_status(
 
     final_status = status if status in ("followup","cancelled") else "confirmed"
     upd = {"itinerary_id": str(iid), "status": final_status, "updated_at": datetime.utcnow()}
+
     if final_status == "followup":
         upd["assigned_to"] = credit_user
+
     elif final_status == "confirmed":
         if booking_date: upd["booking_date"] = datetime.combine(booking_date, dtime.min)
         if advance_amount is not None: upd["advance_amount"] = int(advance_amount)
@@ -470,7 +505,7 @@ def upsert_update_status(
             "discount": int(disc_amt),
         })
 
-        # NEW: auto-confirm other packages for the same mobile
+        # auto-confirm other packages for the same mobile
         _auto_confirm_other_packages(current_iid=str(iid),
                                      credit_user=credit_user,
                                      booking_date=booking_date,
@@ -530,12 +565,29 @@ if is_admin or is_manager:
     if not df_over.empty:
         st.markdown("### 👥 Follow-ups by assignee")
         st.dataframe(df_over.rename(columns={"assigned_to":"User"}), use_container_width=True, hide_index=True)
+
+    # Admin tools
+    with st.expander("🧰 Admin tools"):
+        if st.button("Resync assignments from representatives (recent 500)"):
+            try:
+                recent_its = list(col_itineraries.find({}, {"_id":1}).sort([("_id", -1)]).limit(500))
+                fixed = 0
+                for r in recent_its:
+                    iid = str(r["_id"])
+                    _ensure_assignment_from_rep(iid, actor_user=user)
+                    fixed += 1
+                fetch_assigned_followups_raw.clear()
+                st.success(f"Resynced assignment on ~{fixed} itineraries.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to resync: {e}")
+
     st.divider()
 
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages"])
 
 # =========================
-# TAB 1: Follow-ups
+# TAB 1: Follow-ups (dedup by mobile)
 # =========================
 with tabs[0]:
     df_raw = fetch_assigned_followups_raw(user_filter)
@@ -628,6 +680,13 @@ with tabs[0]:
 
     if not chosen_id:
         st.stop()
+
+    # Auto-heal assignment mismatch from itinerary.representative
+    try:
+        _ensure_assignment_from_rep(chosen_id, actor_user=user)
+        st.caption("✅ Assignment checked against itinerary representative.")
+    except Exception:
+        pass
 
     st.divider()
     st.subheader("Details & Update")
