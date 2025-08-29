@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import os
 import io
+import math
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
@@ -165,11 +166,14 @@ USERS_MAP = load_users()
 ALL_USERS = list(USERS_MAP.keys())
 is_admin = (str(user).strip().lower() == "arpith")  # Arpith is admin
 
-from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Admin"), "06_Invoice_and_Payment")
-
-from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), page="03_Followup_Tracker")  # change per page
+# =========================
+# Audit
+# =========================
+try:
+    from tak_audit import audit_pageview
+    audit_pageview(st.session_state.get("user", "Unknown"), page="03_Followup_Tracker")
+except Exception:
+    pass
 
 # =========================
 # Helpers (aligned across pages)
@@ -219,12 +223,13 @@ def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
         doc = col_itineraries.find_one({"itinerary_id": str(iid)}, projection)
     return doc or {}
 
-# -------- Final cost logic (base − discount) ----------
+# -------- Final cost logic (new -> old fallbacks) ----------
 def _final_cost_for(iid: str) -> int:
     """
-    Final cost = base_package_cost - discount, preferred explicit 'final_package_cost' in expenses.
-    Falls back to itinerary.package_cost if no expense record exists.
-    Back-compat: if only 'package_cost' exists in expenses, treat as final.
+    Priority:
+    1) expenses.final_package_cost
+    2) expenses.base_package_cost - expenses.discount (or expenses.package_cost legacy)
+    3) itinerary.package_total / package_after_referral / (legacy package_cost - discount)
     """
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
@@ -242,10 +247,18 @@ def _final_cost_for(iid: str) -> int:
     if "package_cost" in exp:
         return _to_int(exp.get("package_cost", 0))
 
-    it = _get_itinerary(iid, {"package_cost": 1, "discount": 1})
-    base = _to_int(it.get("package_cost", 0))
-    disc = _to_int(it.get("discount", 0))
-    return max(0, base - disc)
+    it = _get_itinerary(iid, {
+        "package_total":1, "package_after_referral":1, "package_cost":1, "discount":1
+    })
+    if it:
+        pkg_total = _to_int(it.get("package_total", it.get("package_cost", 0)))
+        pkg_after = _to_int(it.get("package_after_referral", 0))
+        if pkg_after > 0:
+            return pkg_after
+        disc = _to_int(it.get("discount", 0))
+        return max(0, pkg_total - disc)
+
+    return 0
 
 def _compute_incentive(final_amt: int) -> int:
     if 5000 < final_amt < 20000:
@@ -365,7 +378,7 @@ def reassign_followup(iid: str, from_user: str, to_user: str) -> None:
         "comment": f"Reassigned from {from_user} to {to_user}",
         "next_followup_on": next_dt
     }
-    # enrich with client meta (for better trail queries)
+    # enrich with client meta
     base = _get_itinerary(iid, {"client_name":1,"client_mobile":1,"ach_id":1})
     if base:
         log_doc.update({
@@ -452,7 +465,7 @@ def upsert_update_status(
 
 def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_user: str, credit_user: Optional[str]=None) -> None:
     """
-    Persist base, discount, and final cost. Also overwrite legacy 'package_cost' with final for consistency.
+    Persist base, discount, and final cost. Overwrite legacy 'package_cost' with final for consistency.
     If already confirmed, recompute incentive using the final cost.
     """
     base = _to_int(base_amount)
@@ -464,12 +477,12 @@ def save_final_package_cost(iid: str, base_amount: int, discount: int, actor_use
         "base_package_cost": int(base),
         "discount": int(disc),
         "final_package_cost": int(final_cost),
-        "package_cost": int(final_cost),  # keep legacy key aligned everywhere
+        "package_cost": int(final_cost),  # legacy key aligned
         "saved_at": datetime.utcnow(),
     }
     col_expenses.update_one({"itinerary_id": str(iid)}, {"$set": doc}, upsert=True)
 
-    # If confirmed, refresh incentive (credit to explicit user if provided)
+    # Refresh incentive if confirmed
     upd = col_updates.find_one({"itinerary_id": str(iid)}, {"status": 1, "rep_name": 1})
     if upd and upd.get("status") == "confirmed":
         inc = _compute_incentive(int(final_cost))
@@ -670,8 +683,9 @@ with tabs[0]:
         {"itinerary_id": str(chosen_id)},
         {"base_package_cost":1, "discount":1, "final_package_cost":1, "package_cost":1}
     ) or {}
-    base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(it_doc.get("package_cost", 0))
-    disc_default = _to_int(exp_doc.get("discount", 0))
+    # fallback to itinerary if expenses not set
+    base_default = _to_int(exp_doc.get("base_package_cost", 0)) or _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0)))
+    disc_default = _to_int(exp_doc.get("discount", 0)) or max(0, _to_int(it_doc.get("package_total", it_doc.get("package_cost", 0))) - _to_int(it_doc.get("package_after_referral", 0)))
 
     if is_admin:
         credit_for_cost = st.selectbox("Credit incentive to (on confirm)", ["(keep existing)"] + ALL_USERS)
