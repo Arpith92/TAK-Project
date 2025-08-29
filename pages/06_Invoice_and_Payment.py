@@ -85,7 +85,8 @@ col_expenses    = db["expenses"]
 ORG = {
     "title": "TravelaajKal™ – Achala Holidays Pvt. Ltd",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
-    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com",
+    "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com" | Mob: ,
+    
     "footer_rights": "All the rights reserved by TravelAajkal 2025-26",
 }
 # Put your files in .streamlit/
