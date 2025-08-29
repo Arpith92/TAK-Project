@@ -748,35 +748,35 @@ else:
 
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
 
-# always define first to avoid NameError
-picked_client_name = ""
-picked_client_mobile = ""
+# ---- SEARCH parsing & loaders (run only when in Search mode) ----
+if mode == "Search itinerary":
+    loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
 
-sel_client = st.selectbox(
-    "Suggestions",
-    ["--"] + suggestions,
-    index=0,
-    key="sel_client"
-)
+    # Safe defaults
+    picked_client_name = ""
+    picked_client_mobile = ""
 
-if sel_client != "--":
-    parts = [p.strip() for p in sel_client.split("—", 1)]
-    if len(parts) == 2:
-        picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
-    else:
-        if parts and parts[0].isdigit():
-            picked_client_mobile = parts[0]
+    # Single, stable selectbox; guard if suggestions isn't defined
+    sel_client = st.selectbox(
+        "Suggestions",
+        ["--"] + (suggestions if 'suggestions' in locals() else []),
+        index=0,
+        key="sel_client"
+    )
+
+    if sel_client != "--":
+        parts = [p.strip() for p in sel_client.split("—", 1)]
+        if len(parts) == 2:
+            picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
         else:
-            picked_client_name = parts[0]
+            if parts and parts[0].isdigit():
+                picked_client_mobile = parts[0]
+            else:
+                picked_client_name = parts[0]
 
-# --- After parsing sel_client into picked_client_name / picked_client_mobile
-picked_client_name = picked_client_name or ""
-picked_client_mobile = picked_client_mobile or ""
-
-
-# --- After parsing sel_client into picked_client_name / picked_client_mobile
-picked_client_name = picked_client_name or ""
-picked_client_mobile = picked_client_mobile or ""
+    # Normalize strings
+    picked_client_name = picked_client_name or ""
+    picked_client_mobile = picked_client_mobile or ""
 
 if picked_client_mobile:
     # Fetch ONLY this client's docs (name + mobile), newest first
