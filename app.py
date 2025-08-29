@@ -211,8 +211,6 @@ TARGET_COLS = ["Date","Time","Code","Car Type","Hotel Type","Stay City","Room Ty
 _EDITOR_KEY = "editor_widget"
 _MODEL_KEY  = "editor_model"
 _SEARCH_DOC_KEY = "search_loaded_doc"
-_LOADED_DOC_ID_KEY = "_loaded_doc_id"
-_MODEL_FOR_DOC_ID_KEY = "_model_for_doc_id"
 
 def _blank_df(n_rows: int, start: _date) -> pd.DataFrame:
     return pd.DataFrame({
@@ -235,7 +233,8 @@ def _seed_editor_model(n_rows: int, start: _date):
 def _apply_dates_days(n_rows: int, start: _date):
     df = st.session_state.get(_MODEL_KEY)
     if df is None:
-        _seed_editor_model(n_rows, start); return
+        _seed_editor_model(n_rows, start)
+        return
     cur = len(df)
     if cur < n_rows:
         add = _blank_df(n_rows - cur, start + timedelta(days=cur))
@@ -250,24 +249,16 @@ def _ensure_numeric_costs(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0.0)
     return df
 
-def _editor_sync():
-    raw = st.session_state.get(_EDITOR_KEY, None)
-    if raw is None: return
-
-    if isinstance(raw, pd.DataFrame):
-        df = raw.copy()
-    elif isinstance(raw, list):
-        df = pd.DataFrame(raw)
-    elif isinstance(raw, dict):
-        if "data" in raw and isinstance(raw["data"], list):
-            df = pd.DataFrame(raw["data"])
-        else:
-            try:
-                df = pd.DataFrame.from_dict(raw)
-            except Exception:
-                return
+def _normalize_to_model(df_like) -> pd.DataFrame:
+    """Ensure the editor's return value becomes a clean model DF with correct dtypes."""
+    if isinstance(df_like, pd.DataFrame):
+        df = df_like.copy()
+    elif isinstance(df_like, list):
+        df = pd.DataFrame(df_like)
+    elif isinstance(df_like, dict):
+        df = pd.DataFrame(df_like.get("data", df_like))
     else:
-        return
+        return st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS))
 
     for c in TARGET_COLS:
         if c not in df.columns:
@@ -275,10 +266,10 @@ def _editor_sync():
 
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-    for c in ["Pkg-Car Cost", "Pkg-Hotel Cost", "Act-Car Cost", "Act-Hotel Cost"]:
+    for c in ["Pkg-Car Cost","Pkg-Hotel Cost","Act-Car Cost","Act-Hotel Cost"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    st.session_state[_MODEL_KEY] = df[TARGET_COLS].copy()
+    return df[TARGET_COLS].copy()
 
 # ---------- dropdown options ----------
 stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique().tolist()) if "Stay City" in stay_city_df.columns else []
@@ -298,11 +289,14 @@ if not user: st.stop()
 
 # ---------- Mode ----------
 st.subheader("Mode")
-mode = st.radio("Choose what you want to do",
-                ["Create new itinerary", "Search itinerary"],
-                horizontal=True, label_visibility="collapsed")
+mode = st.radio(
+    "Choose what you want to do",
+    ["Create new itinerary", "Search itinerary"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
-# ---------- referral helpers ----------
+# ---------- referral choices ----------
 def _load_client_refs() -> list[str]:
     try:
         cur = col_it.aggregate([
@@ -318,7 +312,8 @@ def _load_client_refs() -> list[str]:
         return []
 
 def _client_suggestions(prefix: str) -> list[str]:
-    if not prefix: return []
+    if not prefix:
+        return []
     try:
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
@@ -344,7 +339,8 @@ def _client_suggestions(prefix: str) -> list[str]:
 #                      CREATE NEW
 # =========================================================
 if mode == "Create new itinerary":
-    # defaults
+
+    # defaults for header fields
     st.session_state.setdefault("k_client_name", "")
     st.session_state.setdefault("k_mobile", "")
     st.session_state.setdefault("k_rep", "-- Select --")
@@ -378,21 +374,28 @@ if mode == "Create new itinerary":
         _apply_dates_days(int(days), start_date)
         st.success("Dates & rows applied. You can edit the table now.")
 
+    # Ensure model exists first time
     if _MODEL_KEY not in st.session_state:
         _seed_editor_model(int(days), start_date)
 
     # Bhas outside table
     bhc1, bhc2, bhc3 = st.columns(3)
-    with bhc1: bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], key="k_bhas_req")
-    with bhc2: bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], key="k_bhas_type")
-    with bhc3: bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, step=1, key="k_bhas_pax", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc1:
+        bhas_required = st.selectbox("Bhasmarathi required?", ["No","Yes"], key="k_bhas_req")
+    with bhc2:
+        bhas_type = st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], key="k_bhas_type")
+    with bhc3:
+        bhas_persons = st.number_input("Persons for Bhasmarathi", min_value=0, step=1, key="k_bhas_pax", disabled=(st.session_state["k_bhas_req"]=="No"))
 
     bhc4, bhc5 = st.columns(2)
-    with bhc4: bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, key="k_bhas_pkg", disabled=(st.session_state["k_bhas_req"]=="No"))
-    with bhc5: bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc4:
+        bhas_unit_pkg = st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, key="k_bhas_pkg", disabled=(st.session_state["k_bhas_req"]=="No"))
+    with bhc5:
+        bhas_unit_actual = st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, key="k_bhas_act", disabled=(st.session_state["k_bhas_req"]=="No"))
 
     # ---------- Line items table ----------
     st.markdown("### Fill line items")
+
     col_cfg = {
         "Date": st.column_config.DateColumn("Date", disabled=True),
         "Time": st.column_config.SelectboxColumn("Time", options=time_options),
@@ -406,16 +409,21 @@ if mode == "Create new itinerary":
         "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
         "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
     }
-    st.data_editor(
-        st.session_state[_MODEL_KEY],
-        key=_EDITOR_KEY, use_container_width=True,
-        num_rows="fixed", hide_index=True,
-        column_config=col_cfg, on_change=_editor_sync,
-    )
-    _editor_sync()
 
-    # --- Live totals preview ---
+    # KEY: read the return value, then normalize into the model
+    edited_df = st.data_editor(
+        st.session_state[_MODEL_KEY],
+        key=_EDITOR_KEY,
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=True,
+        column_config=col_cfg,
+    )
+    st.session_state[_MODEL_KEY] = _normalize_to_model(edited_df)
+
+    # --- Live totals preview (before Generate) ---
     df_prev = st.session_state.get(_MODEL_KEY, pd.DataFrame(columns=TARGET_COLS)).copy()
+
     pkg_car   = pd.to_numeric(df_prev.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
     pkg_hotel = pd.to_numeric(df_prev.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
     act_car   = pd.to_numeric(df_prev.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
@@ -439,30 +447,43 @@ if mode == "Create new itinerary":
 
     badge_color = "#16a34a" if preview_profit >= 4000 else "#dc2626"
     hint = "" if preview_profit >= 4000 else " • Keep profit margin ≥ ₹4,000"
-    ref_html = (f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
-                f'After Referral (10%): <b>₹{in_locale(preview_after_ref)}</b></div>') if has_ref else ""
-    totals_html = ('<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">'
-                   f'<div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">'
-                   f'Package Cost: <b>₹{in_locale(preview_package)}</b></div>'
-                   f'{ref_html}'
-                   f'<div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">'
-                   f'Actual Cost: <b>₹{in_locale(preview_actual)}</b></div>'
-                   f'<div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">'
-                   f'Profit: <b>₹{in_locale(preview_profit)}</b>{hint}</div>'
-                   '</div>')
+
+    ref_html = (
+        f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
+        f'After Referral (10%): <b>₹{in_locale(preview_after_ref)}</b></div>'
+    ) if has_ref else ""
+
+    totals_html = (
+        '<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">'
+        f'<div style="padding:8px 12px; border-radius:8px; background:#0ea5e9; color:white;">'
+        f'Package Cost: <b>₹{in_locale(preview_package)}</b></div>'
+        f'{ref_html}'
+        f'<div style="padding:8px 12px; border-radius:8px; background:#475569; color:white;">'
+        f'Actual Cost: <b>₹{in_locale(preview_actual)}</b></div>'
+        f'<div style="padding:8px 12px; border-radius:8px; background:{badge_color}; color:white;">'
+        f'Profit: <b>₹{in_locale(preview_profit)}</b>{hint}</div>'
+        '</div>'
+    )
     st.markdown(totals_html, unsafe_allow_html=True)
+    st.markdown("")
 
     # ---------- Generate & save ----------
     if st.button("✅ Generate itinerary & save (rev 1 for new / next rev for existing)", use_container_width=True):
-        if not client_name: st.error("Enter **Client Name**."); st.stop()
-        if not is_valid_mobile(client_mobile_raw): st.error("Enter a valid **10-digit** mobile."); st.stop()
-        if rep == "-- Select --": st.error("Select **Representative**."); st.stop()
+        if not client_name:
+            st.error("Enter **Client Name**."); st.stop()
+        if not is_valid_mobile(client_mobile_raw):
+            st.error("Enter a valid **10-digit** mobile."); st.stop()
+        if rep == "-- Select --":
+            st.error("Select **Representative**."); st.stop()
 
         client_mobile = "".join(ch for ch in client_mobile_raw if ch.isdigit())
         base = st.session_state[_MODEL_KEY].copy()
-        if base.empty: st.error("No rows to save. Apply dates & days and fill the table."); st.stop()
+
+        if base.empty:
+            st.error("No rows to save. Apply dates & days and fill the table."); st.stop()
         base["Date"] = [start_date + dt.timedelta(days=i) for i in range(len(base))]
 
+        # totals
         pkg_car   = pd.to_numeric(base.get("Pkg-Car Cost", 0), errors="coerce").fillna(0).sum()
         pkg_hotel = pd.to_numeric(base.get("Pkg-Hotel Cost", 0), errors="coerce").fillna(0).sum()
         act_car   = pd.to_numeric(base.get("Act-Car Cost", 0), errors="coerce").fillna(0).sum()
@@ -476,23 +497,34 @@ if mode == "Create new itinerary":
         profit_total  = int(total_package - total_actual)
         after_ref     = int(round(total_package * 0.9)) if has_ref else total_package
 
+        # meta / text
         dates_series   = pd.to_datetime(base["Date"], errors="coerce")
+        start_date_calc = dates_series.min().date()
         end_date_calc   = dates_series.max().date()
-        route_parts = [r for r in ( _code_to_route(c) for c in base["Code"]) if r]
+        total_days_calc = base.shape[0]
+        total_nights    = max(total_days_calc - 1, 0)
+
+        # route
+        route_parts = []
+        for r in base["Code"]:
+            rt = _code_to_route(r)
+            if rt: route_parts.append(rt)
         route_raw  = "-".join(route_parts).replace(" -","-").replace("- ","-")
         route_list = [x for x in route_raw.split("-") if x]
         final_route = "-".join([route_list[i] for i in range(len(route_list)) if i == 0 or route_list[i] != route_list[i-1]])
+
         car_types   = "-".join(pd.Series(base.get("Car Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
         hotel_types = "-".join(pd.Series(base.get("Hotel Type", [])).dropna().astype(str).replace("","").unique().tolist()).strip("-")
 
+        # Bhas desc
         bhas_desc_str = ""
         if bhas_required == "Yes":
             mm = bhas_df.loc[bhas_df["Bhasmarathi Type"].astype(str) == str(st.session_state.get("k_bhas_type","V-BH")), "Description"]
             if not mm.empty: bhas_desc_str = str(mm.iloc[0])
 
-        total_days_calc = base.shape[0]; total_nights = max(total_days_calc - 1, 0)
         night_txt  = "Night" if total_nights == 1 else "Nights"
         person_txt = "Person" if total_pax == 1 else "Persons"
+
         greet = f"Greetings from TravelAajkal,\n\n*Client Name: {client_name}*\n\n"
         plan  = f"*Plan:- {total_days_calc}Days and {total_nights}{night_txt} {final_route} for {total_pax} {person_txt}*"
 
@@ -510,40 +542,56 @@ if mode == "Create new itinerary":
         details_bits = [x for x in [car_types or None, hotel_types or None, bhas_desc_str or None] if x]
         details_line = "(" + ",".join(details_bits) + ")" if details_bits else ""
         itinerary_text += f"\n*Package cost: ₹{in_locale(total_package)}/-*\n"
-        if has_ref: itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
+        if has_ref:
+            itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
         itinerary_text += f"{details_line}"
 
         exclusions = "*Exclusions:-*\n" + "\n".join([
-            "1. Any meals/beverages not specified.","2. Entry fees unless included.","3. Travel insurance.",
-            "4. Personal shopping/tips.","5. Early check-in/late check-out subject to availability.",
-            "6. Natural events/roadblocks/personal itinerary changes.","7. Extra sightseeing not listed."
+            "1. Any meals/beverages not specified.",
+            "2. Entry fees unless included.",
+            "3. Travel insurance.",
+            "4. Personal shopping/tips.",
+            "5. Early check-in/late check-out subject to availability.",
+            "6. Natural events/roadblocks/personal itinerary changes.",
+            "7. Extra sightseeing not listed."
         ])
         notes = "\n*Important Notes:-*\n" + "\n".join([
             "1. Any attractions not in itinerary will be chargeable.",
             "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
-            "3. Bhasm-Aarti tickets at actuals; subject to availability/cancellations.",
+            "3. Bhasm-Aarti: tickets at actuals; subject to availability/cancellations.",
             "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
             "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
         ])
-        cxl = ("*Cancellation Policy:-*\n"
-               "1. 30+ days → 20% of advance deducted.\n"
-               "2. 15–29 days → 50% of advance deducted.\n"
-               "3. <15 days → No refund on advance.\n"
-               "4. No refund for no-shows/early departures.\n"
-               "5. One-time reschedule allowed ≥15 days prior, subject to availability.\n")
+        cxl = (
+            "*Cancellation Policy:-*\n"
+            "1. 30+ days → 20% of advance deducted.\n"
+            "2. 15–29 days → 50% of advance deducted.\n"
+            "3. <15 days → No refund on advance.\n"
+            "4. No refund for no-shows/early departures.\n"
+            "5. One-time reschedule allowed ≥15 days prior, subject to availability.\n"
+        )
         pay = "*Payment Terms:-*\n50% advance and remaining 50% after arrival at Ujjain.\n"
-        acct = ("For booking confirmation, please make the advance payment to the company's current account provided below.\n\n"
-                "*Company Account details:-*\n"
-                "Account Name: ACHALA HOLIDAYS PVT LTD\nBank: Axis Bank\nAccount No: 923020071937652\n"
-                "IFSC Code: UTIB0000329\nMICR Code: 452211003\nBranch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010\n\n"
-                "Regards,\nTeam TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
-                "Visit: www.travelaajkal.com • IG: @travelaaj_kal\nDPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n")
+        acct = (
+            "For booking confirmation, please make the advance payment to the company's current account provided below.\n\n"
+            "*Company Account details:-*\n"
+            "Account Name: ACHALA HOLIDAYS PVT LTD\n"
+            "Bank: Axis Bank\n"
+            "Account No: 923020071937652\n"
+            "IFSC Code: UTIB0000329\n"
+            "MICR Code: 452211003\n"
+            "Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010\n\n"
+            "Regards,\n"
+            "Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
+            "Visit: www.travelaajkal.com • IG: @travelaaj_kal\n"
+            "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
+        )
 
         final_output = itinerary_text + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
         rows_serialized = base.copy()
         rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
+        # next revision
         start_key = str(start_date)
         try:
             mx = -1
@@ -586,6 +634,7 @@ if mode == "Create new itinerary":
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
+
         try:
             col_it.insert_one(record)
             st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
@@ -602,88 +651,73 @@ if mode == "Create new itinerary":
 # =========================================================
 else:
     st.markdown("### Search itinerary")
-    q = st.text_input("Type client name or mobile (1 character shows suggestions)", key="search_q",
-                      placeholder="e.g., Gaurav or 9576226271")
+    q = st.text_input("Type client name or mobile (1 character shows suggestions)", key="search_q", placeholder="e.g., Gaurav or 9576226271")
     suggestions = _client_suggestions(q.strip()) if q.strip() else []
     sel_client = st.selectbox("Suggestions", ["--"] + suggestions, index=0)
-
-    # Reset when suggestion changes
-    if sel_client != st.session_state.get("_last_sel_client"):
-        st.session_state["_last_sel_client"] = sel_client
-        for k in (_SEARCH_DOC_KEY, _MODEL_KEY, _LOADED_DOC_ID_KEY, _MODEL_FOR_DOC_ID_KEY):
-            st.session_state.pop(k, None)
 
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
     picked_client_mobile = ""
     picked_client_name = ""
 
     if sel_client != "--":
-        parts = [p.strip() for p in sel_client.split("—", 1)]
-        if len(parts) == 2:
-            picked_client_name, picked_client_mobile = parts[0], parts[1]
+        parts = [p.strip() for p in sel_client.split("—",1)]
+        if len(parts)==2:
+            picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
         else:
-            picked_client_mobile = parts[0] if parts and parts[0].isdigit() else ""
-            picked_client_name = "" if picked_client_mobile else parts[0]
-
-        if picked_client_mobile:
-            docs = list(
-                col_it.find({"client_mobile": picked_client_mobile}, {})
-                .sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
-            )
-            if docs:
-                labels = [
-                    f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • "
-                    f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
-                    for d in docs
-                ]
-                rev_key = f"rev_pick_{picked_client_mobile}"
-                selected_idx = st.selectbox("Pick a start date & revision",
-                                            options=list(range(len(labels))),
-                                            format_func=lambda i: labels[i],
-                                            index=0, key=rev_key)
-                if st.button("Load this package", key=f"load_{picked_client_mobile}", use_container_width=False):
-                    st.session_state[_SEARCH_DOC_KEY] = docs[selected_idx]
-                    st.session_state[_LOADED_DOC_ID_KEY] = str(docs[selected_idx].get("_id",""))
-                    # Force the model to rebuild for this doc on the next block
-                    st.session_state.pop(_MODEL_KEY, None)
-                    st.session_state.pop(_MODEL_FOR_DOC_ID_KEY, None)
-                    st.rerun()
+            if parts and parts[0].isdigit():
+                picked_client_mobile = parts[0]
             else:
-                st.info("No itineraries found for this number yet.")
+                picked_client_name = parts[0]
+
+    if picked_client_mobile:
+        docs = list(
+            col_it.find({"client_mobile": picked_client_mobile}, {})
+            .sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
+        )
+        if docs:
+            labels = [
+                f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • "
+                f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
+                for d in docs
+            ]
+            rev_key = f"rev_pick_{picked_client_mobile}"
+            selected_idx = st.selectbox(
+                "Pick a start date & revision",
+                options=list(range(len(labels))),
+                format_func=lambda i: labels[i],
+                index=0,
+                key=rev_key,
+            )
+            if st.button("Load this package", use_container_width=False, key=f"load_{picked_client_mobile}"):
+                loaded_doc = docs[int(selected_idx)]
+                st.session_state[_SEARCH_DOC_KEY] = loaded_doc
+                # seed model for this doc on first load
+                rows = loaded_doc.get("rows") or []
+                df = pd.DataFrame(rows)
+                for c in TARGET_COLS:
+                    if c not in df.columns:
+                        df[c] = 0 if "Cost" in c else ""
+                df = _ensure_numeric_costs(df).reset_index(drop=True)
+                start_date = dt.date.fromisoformat(str(loaded_doc.get("start_date")))
+                for i in range(len(df)):
+                    df.at[i, "Date"] = start_date + dt.timedelta(days=i)
+                st.session_state[_MODEL_KEY] = df[TARGET_COLS]
+                st.rerun()
+        else:
+            st.info("No itineraries found for this number yet.")
 
     if loaded_doc:
-        # One-time builder from the loaded doc (and whenever a different doc is chosen)
-        def _rows_from_doc(doc: dict, start: dt.date) -> pd.DataFrame:
-            rows = doc.get("rows") or []
-            df = pd.DataFrame(rows)
-            for c in TARGET_COLS:
-                if c not in df.columns:
-                    df[c] = 0.0 if "Cost" in c else ""
-            df = _ensure_numeric_costs(df).reset_index(drop=True)
-            for i in range(len(df)):
-                df.at[i, "Date"] = start + dt.timedelta(days=i)
-            return df[TARGET_COLS]
-
-        current_doc_id = str(loaded_doc.get("_id",""))
-        model_built_for = st.session_state.get(_MODEL_FOR_DOC_ID_KEY)
-
-        start_date = dt.date.fromisoformat(str(loaded_doc.get("start_date")))
-        if (_MODEL_KEY not in st.session_state) or (model_built_for != current_doc_id):
-            st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
-            st.session_state[_MODEL_FOR_DOC_ID_KEY] = current_doc_id
-
-        # Header fields
         client_name = loaded_doc.get("client_name","")
         client_mobile = loaded_doc.get("client_mobile","")
         rep = loaded_doc.get("representative","-- Select --")
         total_pax = int(loaded_doc.get("total_pax",1) or 1)
+        start_date = dt.date.fromisoformat(str(loaded_doc.get("start_date")))
+        days = int(loaded_doc.get("total_days", len(loaded_doc.get("rows",[])) or 1))
 
         c0, c1, c2, c3 = st.columns([1.6,1,1,1])
         with c0: st.text_input("Client Name*", value=client_name, key="s_client_name")
         with c1: st.text_input("Client mobile (10 digits)*", value=client_mobile, key="s_mobile", disabled=True)
-        with c2: st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"],
-                              index=max(0, ["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(rep)
-                                        if rep in ["Arpith","Reena","Kuldeep","Teena"] else 0), key="s_rep")
+        with c2: st.selectbox("Representative*", ["-- Select --","Arpith","Reena","Kuldeep","Teena"], index=max(0, ["-- Select --","Arpith","Reena","Kuldeep","Teena"].index(rep) if rep in ["Arpith","Reena","Kuldeep","Teena"] else 0), key="s_rep")
         with c3: st.number_input("Total Pax*", min_value=1, step=1, value=total_pax, key="s_pax")
 
         # Bhas
@@ -695,20 +729,32 @@ else:
 
         bhc1, bhc2, bhc3 = st.columns(3)
         with bhc1: st.selectbox("Bhasmarathi required?", ["No","Yes"], index=(1 if bhas_required=="Yes" else 0), key="s_breq")
-        with bhc2: st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"],
-                                index=max(0, ["V-BH","P-BH","BH"].index(bhas_type)
-                                         if bhas_type in ["V-BH","P-BH","BH"] else 0),
-                                key="s_btype")
+        with bhc2: st.selectbox("Bhasmarathi Type", ["V-BH","P-BH","BH"], index=max(0, ["V-BH","P-BH","BH"].index(bhas_type) if bhas_type in ["V-BH","P-BH","BH"] else 0), key="s_btype")
         with bhc3: st.number_input("Persons for Bhasmarathi", min_value=0, step=1, value=bhas_persons, key="s_bpax")
+
         bhc4, bhc5 = st.columns(2)
         with bhc4: st.number_input("Bhasmarathi unit cost (Package)", min_value=0, step=100, value=bhas_unit_pkg, key="s_bpkg")
         with bhc5: st.number_input("Bhasmarathi unit cost (Actual)", min_value=0, step=100, value=bhas_unit_actual, key="s_bact")
 
+        # If table not in state (first run after load), seed it
+        if _MODEL_KEY not in st.session_state:
+            rows = loaded_doc.get("rows") or []
+            df = pd.DataFrame(rows)
+            for c in TARGET_COLS:
+                if c not in df.columns:
+                    df[c] = 0 if "Cost" in c else ""
+            df = _ensure_numeric_costs(df).reset_index(drop=True)
+            for i in range(len(df)):
+                df.at[i, "Date"] = start_date + dt.timedelta(days=i)
+            st.session_state[_MODEL_KEY] = df[TARGET_COLS]
+
         st.markdown("### Fill line items")
-        st.data_editor(
+        edited_df = st.data_editor(
             st.session_state[_MODEL_KEY],
-            key=_EDITOR_KEY, use_container_width=True,
-            num_rows="fixed", hide_index=True,
+            key=_EDITOR_KEY,
+            use_container_width=True,
+            num_rows="fixed",
+            hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", disabled=True),
                 "Time": st.column_config.SelectboxColumn("Time", options=time_options),
@@ -722,17 +768,11 @@ else:
                 "Act-Car Cost": st.column_config.NumberColumn("Act-Car Cost", min_value=0.0, step=100.0),
                 "Act-Hotel Cost": st.column_config.NumberColumn("Act-Hotel Cost", min_value=0.0, step=100.0),
             },
-            on_change=_editor_sync,
         )
-        _editor_sync()
-
-        # Optional: reload rows (discard edits)
-        if st.button("↺ Reload rows from this revision (discard table edits)"):
-            st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
-            st.session_state[_MODEL_FOR_DOC_ID_KEY] = current_doc_id
-            st.rerun()
+        st.session_state[_MODEL_KEY] = _normalize_to_model(edited_df)
 
         if st.button("🔁 Update itinerary (save as next revision)", use_container_width=True):
+            # next rev
             mx = -1
             for ddoc in col_it.find({"client_mobile": client_mobile, "start_date": str(start_date)}, {"revision_num":1}):
                 mx = max(mx, int(ddoc.get("revision_num", 0) or 0))
@@ -775,7 +815,7 @@ else:
                 "bhasmarathi_pkg_total": int(bhas_pkg_total),
                 "bhasmarathi_actual_total": int(bhas_actual_total),
                 "package_total": int(total_package),
-                "package_after_referral": int(total_package),
+                "package_after_referral": int(total_package),  # referral not tracked here
                 "actual_total": int(total_actual),
                 "profit_total": int(profit_total),
                 "rows": rows_serialized.to_dict(orient="records"),
@@ -794,15 +834,17 @@ else:
                 st.error(f"Could not save itinerary: {e}")
 
     st.divider()
-    st.caption("Tip: Type just one character to see suggestions. Table values from the picked revision load once; use the reload button to discard edits.")
+    st.caption("Tip: Type just one character to see suggestions. All table values from the selected revision are loaded and editable.")
 
-# ============= Shared: preview & download =============
+# ============= Shared: show preview & download if available =============
 if "last_preview_text" in st.session_state:
     text = str(st.session_state.get("last_preview_text", ""))
+
     meta = st.session_state.get("last_generated_meta", {}) or {}
     client = str(meta.get("client", "") or "")
     mobile = str(meta.get("mobile", "") or "")
     rev = str(meta.get("rev", "") or "")
+
     st.success(f"Generated for {client} ({mobile}) • rev {rev}")
     st.markdown("### Preview of generated itinerary")
     st.text_area("Copy from here", value=text, height=420, key="itinerary_preview")
@@ -814,4 +856,11 @@ if "last_preview_text" in st.session_state:
 
     today_str = str(dt.date.today())
     fname = f"itinerary_{_slug(client)}_{_slug(mobile)}_{today_str}.txt"
-    st.download_button("⬇️ Download itinerary as .txt", data=text, file_name=fname, mime="text/plain", use_container_width=True)
+
+    st.download_button(
+        label="⬇️ Download itinerary as .txt",
+        data=text,
+        file_name=fname,
+        mime="text/plain",
+        use_container_width=True,
+    )
