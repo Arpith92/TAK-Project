@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import os, base64
 from datetime import datetime, date
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, List
 
 import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 from fpdf import FPDF
 
 # ================= Page config =================
 st.set_page_config(page_title="Invoice & Payment Slip", layout="wide")
 st.title("🧾 Invoice & Payment Slip (Confirmed packages only)")
+
+TTL = 90  # small cache, keeps the page snappy
 
 # ================= Admin gate ==================
 def require_admin():
@@ -38,22 +41,40 @@ def _find_uri() -> Optional[str]:
             v = st.secrets.get(k)
         except Exception:
             v = None
-        if v: return v
+        if v:
+            return v
     for k in CAND_KEYS:
         v = os.getenv(k)
-        if v: return v
+        if v:
+            return v
     return None
 
 @st.cache_resource
 def _get_client() -> MongoClient:
-    uri = _find_uri() or st.secrets["mongo_uri"]
-    client = MongoClient(uri, appName="TAK_InvoiceSlip", serverSelectionTimeoutMS=6000, tz_aware=True)
-    client.admin.command("ping")
+    uri = _find_uri()
+    if not uri:
+        st.error(
+            "Mongo connection is not configured.\n\n"
+            "Add one of these in **Manage app → Settings → Secrets** (recommended: `mongo_uri`)."
+        )
+        st.stop()
+    client = MongoClient(
+        uri,
+        appName="TAK_InvoiceSlip",
+        serverSelectionTimeoutMS=6000,
+        connectTimeoutMS=6000,
+        retryWrites=True,
+        tz_aware=True,
+    )
+    try:
+        client.admin.command("ping")
+    except ServerSelectionTimeoutError as e:
+        st.error(f"Could not connect to MongoDB. Details: {e}")
+        st.stop()
     return client
 
 from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), page="06_Invoice_and_Payment")  # change per page
-
+audit_pageview(st.session_state.get("user", "Unknown"), page="06_Invoice_and_Payment")
 
 db = _get_client()["TAK_DB"]
 col_itineraries = db["itineraries"]
@@ -72,64 +93,78 @@ ORG_LOGO = ".streamlit/logo.jpg"
 ORG_SIGN = ".streamlit/signature.png"   # update to your file name if different
 
 # ================= Helpers =====================
-def _to_int(x, default=0):
+def _to_int(x, default=0) -> int:
     try:
-        if x is None: return default
+        if x is None:
+            return default
         return int(float(str(x).replace(",", "")))
     except Exception:
         return default
 
 def _safe_date(x) -> Optional[date]:
     try:
-        if pd.isna(x): return None
+        if x is None or pd.isna(x):
+            return None
         return pd.to_datetime(x).date()
     except Exception:
         return None
 
-def _str(x): return "" if x is None else str(x)
+def _str(x) -> str:
+    return "" if x is None else str(x)
 
 def _fmt_money(n: int) -> str:
-    # ASCII only (no unicode rupee)
-    return f"Rs {int(n):,}"
+    return f"Rs {int(n):,}"  # ASCII (no unicode rupee for PDF safety)
 
 def _nights_days(start: Optional[date], end: Optional[date]) -> str:
     if not start or not end:
         return ""
     try:
         days = (end - start).days + 1
-        if days < 1: days = 1
+        if days < 1:
+            days = 1
         nights = max(days - 1, 0)
         return f"{days} days {nights} nights"
     except Exception:
         return ""
 
 def _final_cost(iid: str) -> Dict[str, int]:
+    """
+    Final cost preference:
+      1) expenses.final_package_cost
+      2) expenses.base_package_cost - expenses.discount
+      3) itinerary.package_cost - itinerary.discount
+    """
     exp = col_expenses.find_one(
         {"itinerary_id": str(iid)},
         {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}
     ) or {}
+
     if "final_package_cost" in exp:
         return {
             "base": _to_int(exp.get("base_package_cost", exp.get("package_cost", 0))),
             "discount": _to_int(exp.get("discount", 0)),
             "final": _to_int(exp.get("final_package_cost", 0))
         }
+
     base = _to_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
     disc = _to_int(exp.get("discount", 0))
     if base or disc:
         return {"base": base, "discount": disc, "final": max(0, base - disc)}
+
     it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost":1,"discount":1}) or {}
     base2 = _to_int(it.get("package_cost", 0))
     disc2 = _to_int(it.get("discount", 0))
     return {"base": base2, "discount": disc2, "final": max(0, base2 - disc2)}
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=TTL, show_spinner=False)
 def fetch_confirmed() -> pd.DataFrame:
+    # itineraries (essentials)
     its = list(col_itineraries.find({}, {
         "_id":1, "ach_id":1, "client_name":1, "client_mobile":1,
         "final_route":1, "total_pax":1, "start_date":1, "end_date":1
     }))
-    if not its: return pd.DataFrame()
+    if not its:
+        return pd.DataFrame()
     for r in its:
         r["itinerary_id"] = str(r["_id"])
         r["start_date"] = _safe_date(r.get("start_date"))
@@ -137,6 +172,7 @@ def fetch_confirmed() -> pd.DataFrame:
         r.pop("_id", None)
     df_i = pd.DataFrame(its)
 
+    # confirmed updates
     ups = list(col_updates.find({"status":"confirmed"}, {
         "_id":0, "itinerary_id":1, "status":1, "booking_date":1,
         "advance_amount":1, "rep_name":1, "incentive":1
@@ -144,11 +180,14 @@ def fetch_confirmed() -> pd.DataFrame:
     if not ups:
         return pd.DataFrame()
     for u in ups:
+        u["itinerary_id"] = str(u.get("itinerary_id"))
         u["booking_date"]   = _safe_date(u.get("booking_date"))
         u["advance_amount"] = _to_int(u.get("advance_amount", 0))
     df_u = pd.DataFrame(ups)
 
     df = df_i.merge(df_u, on="itinerary_id", how="inner")
+
+    # enrich final cost snapshot
     bases, discs, finals = [], [], []
     for iid in df["itinerary_id"]:
         c = _final_cost(iid)
@@ -156,11 +195,24 @@ def fetch_confirmed() -> pd.DataFrame:
     df["base_amount"] = bases
     df["discount"]    = discs
     df["final_cost"]  = finals
+
     return df
+
+def _update_advance_and_booking(iid: str, adv: int, bdate: Optional[date]) -> None:
+    payload = {
+        "itinerary_id": str(iid),
+        "status": "confirmed",   # keep it confirmed
+        "advance_amount": int(adv),
+        "updated_at": datetime.utcnow(),
+    }
+    if bdate:
+        payload["booking_date"] = datetime.combine(bdate, datetime.min.time())
+    col_updates.update_one({"itinerary_id": str(iid)}, {"$set": payload}, upsert=True)
 
 # ================= FPDF (ASCII-safe) =============
 def _latin(s: str) -> str:
-    if s is None: s = ""
+    if s is None:
+        s = ""
     s = (str(s)
          .replace("₹", "Rs ")
          .replace("—", "-").replace("–", "-").replace("•", "-")
@@ -242,7 +294,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.multi_cell(0, 6, _latin(f"Subject: {subject}"))
     pdf.ln(1)
 
-    # Description for line item
+    # Line item
     days_nights = _nights_days(row.get("start_date"), row.get("end_date"))
     base  = int(row.get("base_amount", 0))
     disc  = int(row.get("discount", 0))
@@ -427,9 +479,35 @@ if not chosen_id:
 
 row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
 
+# --- Small admin utility: keep DB in sync before we make a slip ---
+st.subheader("🛠️ Update booking/advance (optional, saves to DB)")
+ub1, ub2, ub3 = st.columns([1,1,1])
+with ub1:
+    booked_on = row.get("booking_date") or date.today()
+    if not isinstance(booked_on, date):
+        try:
+            booked_on = pd.to_datetime(booked_on).date()
+        except Exception:
+            booked_on = date.today()
+    edit_bdate = st.date_input("Booking date", value=booked_on)
+with ub2:
+    edit_adv = st.number_input("Advance amount (₹)", min_value=0, step=500, value=int(row.get("advance_amount", 0)))
+with ub3:
+    st.caption(" ")
+    if st.button("💾 Save to DB"):
+        _update_advance_and_booking(chosen_id, int(edit_adv), edit_bdate)
+        # refresh cache + row snapshot
+        fetch_confirmed.clear()
+        df = fetch_confirmed()
+        row = df[df["itinerary_id"] == chosen_id].iloc[0].to_dict()
+        st.success("Saved. Refreshed values will reflect in Payment Slip.")
+
+st.markdown("---")
+
 # Subject line WITHOUT customer name
 dn = _nights_days(row.get("start_date"), row.get("end_date"))
 default_subject = f"{dn} {_latin(_str(row.get('final_route')))} travel package"
+
 st.subheader("🧾 Invoice")
 subject = st.text_input("Subject line for invoice", value=default_subject)
 
@@ -461,10 +539,11 @@ if "inv_pdf" in st.session_state:
         f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
     )
+    fname = f"Invoice_{_latin(_str(row.get('ach_id') or row.get('client_name') or 'TAK'))}.pdf"
     st.download_button(
         "⬇️ Download Invoice (PDF)",
         data=st.session_state["inv_pdf"],
-        file_name=f"Invoice_{_latin(_str(row.get('ach_id')))}.pdf",
+        file_name=fname,
         mime="application/pdf",
         use_container_width=True,
     )
@@ -477,10 +556,11 @@ if "slip_pdf" in st.session_state:
         f'<iframe src="data:application/pdf;base64,{b64s}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
         height=620,
     )
+    fname2 = f"PaymentSlip_{_latin(_str(row.get('ach_id') or row.get('client_name') or 'TAK'))}.pdf"
     st.download_button(
         "⬇️ Download Payment Slip (PDF)",
         data=st.session_state["slip_pdf"],
-        file_name=f"PaymentSlip_{_latin(_str(row.get('ach_id')))}.pdf",
+        file_name=fname2,
         mime="application/pdf",
         use_container_width=True,
     )
