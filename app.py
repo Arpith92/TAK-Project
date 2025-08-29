@@ -847,9 +847,12 @@ if mode == "Create new itinerary":
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
-        try:
+try:
     res = col_it.insert_one(record)  # <= keep the result to get the id
-    inserted_id = str(res.inserted_id)
+    new_id = str(res.inserted_id)
+    st.success(f"Package saved with ID: {new_id}")
+except Exception as e:
+    st.error(f"Error saving package: {e}")
 
     # ⬇️ Immediately reflect assignment & cost for visibility in other pages
     upsert_update_from_rep(inserted_id, rep, actor_user=user)
