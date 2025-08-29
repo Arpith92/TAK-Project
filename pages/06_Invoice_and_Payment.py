@@ -297,26 +297,33 @@ class PDF(FPDF):
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
-    # ---------- Footer (centered signature above text) ----------
+    # ---------- Footer (signature top-right over label; rights lifted) ----------
     def footer(self):
-        # place signature image centered ~28mm from bottom
-        self.set_y(-32)
+        right_margin = 16
+        img_w = 50
+        # signature image at top-right of footer block
+        self.set_y(-36)
         if ORG_SIGN and os.path.exists(ORG_SIGN):
             try:
-                img_w = 50  # adjust as needed
-                page_w = self.w
-                x = (page_w - img_w) / 2
-                self.image(ORG_SIGN, x=x, y=self.get_y()-8, w=img_w)
+                x = self.w - right_margin - img_w
+                self.image(ORG_SIGN, x=x, y=self.get_y(), w=img_w)
+                # label centered under the image
+                self.set_xy(x, self.get_y() + 14)  # ~just below signature
+                self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
+                self.cell(img_w, 6, self._txt("Authorised Signatory"), ln=1, align="C")
             except Exception:
-                pass
+                # fallback: centered label
+                self.set_y(-18)
+                self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
+                self.cell(0, 6, self._txt("Authorised Signatory"), ln=1, align="C")
+        else:
+            # no image: keep label centered
+            self.set_y(-18)
+            self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
+            self.cell(0, 6, self._txt("Authorised Signatory"), ln=1, align="C")
 
-        # "Authorised Signatory"
-        self.set_y(-18)
-        self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 10)
-        self.cell(0, 6, self._txt("Authorised Signatory"), ln=1, align="C")
-
-        # rights text at very bottom
-        self.set_y(-10)
+        # rights text lifted so it doesn't overlap the border line
+        self.set_y(-16)
         self.set_font("DejaVu" if self.use_unicode else "Helvetica", "", 8)
         self.cell(0, 5, self._txt(ORG["footer_rights"]), ln=1, align="C")
 
@@ -332,6 +339,9 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.add_page()
 
     left = 16
+    col1_w, col2_w = 130, 52
+    th = 8
+
     pdf.set_x(left)
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 13)
     pdf.cell(0, 9, pdf._txt("INVOICE"), ln=1)
@@ -354,22 +364,21 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.set_x(left); pdf.cell(0, 6, pdf._txt(f"Route: {_str(row.get('final_route'))}"), ln=1)
     pdf.ln(2)
 
-    # Subject
-    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 11)
-    pdf.multi_cell(0, 6, pdf._txt(f"Subject: {subject}"))
-    pdf.ln(1)
+    # ===== Subject row (aligned with table width) =====
+    pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
+    y = pdf.get_y()
+    pdf.rect(left, y, col1_w + col2_w, th)
+    pdf.text(left + 2, y + th - 2, pdf._txt(f"Subject: {subject}"))
+    pdf.ln(th + 2)
 
-    # Line item
+    # Line item rows
     days_nights = _nights_days(row.get("start_date"), row.get("end_date"))
     base  = int(row.get("base_amount", 0))
     disc  = int(row.get("discount", 0))
     final = int(row.get("final_cost", 0))
     desc = f"{days_nights} {_str(row.get('final_route'))} travel package for {_str(row.get('total_pax'))} pax"
 
-    # Table
-    col1_w, col2_w = 130, 52
-    th = 8
-
+    # header row
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
@@ -377,6 +386,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.text(left+col1_w+2, y+th-2, pdf._txt("Amount"))
     pdf.ln(th)
 
+    # item row
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
@@ -385,6 +395,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(base)), align="R")
     pdf.ln(th)
 
+    # discount row
     if disc > 0:
         y = pdf.get_y()
         pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
@@ -393,6 +404,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
         pdf.cell(col2_w-2, th, pdf._txt(f"- {_fmt_money(disc)}"), align="R")
         pdf.ln(th)
 
+    # total row
     y = pdf.get_y()
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     pdf.rect(left, y, col1_w, th); pdf.rect(left+col1_w, y, col2_w, th)
@@ -401,6 +413,7 @@ def build_invoice_pdf(row: dict, subject: str) -> bytes:
     pdf.cell(col2_w-2, th, pdf._txt(_fmt_money(final)), align="R")
     pdf.ln(th + 4)
 
+    # note
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "", 9)
     pdf.multi_cell(0, 5, pdf._txt("Note: This invoice is generated for your confirmed booking. Please retain for your records."))
 
@@ -413,6 +426,8 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     pdf.add_page()
 
     left = 16
+    col1_w, col2_w, th = 130, 52, 8
+
     pdf.set_x(left)
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 13)
     pdf.cell(0, 9, pdf._txt("PAYMENT SLIP"), ln=1)
@@ -440,7 +455,6 @@ def build_payment_slip_pdf(row: dict, payment_date: Optional[date]) -> bytes:
     bal     = max(final - advance, 0)
 
     # table
-    col1_w, col2_w, th = 130, 52, 8
     pdf.set_font("DejaVu" if pdf.use_unicode else "Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th);  pdf.rect(left+col1_w, y, col2_w, th)
