@@ -142,22 +142,24 @@ def load_confirmed_packages() -> pd.DataFrame:
         "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
         "final_route": 1, "total_pax": 1, "representative": 1
     }))
+    if not its:
+        return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","final_route","total_pax","representative",
+                                     "booking_date","advance_amount","rep_name","final_cost","received","pending"])
     for r in its:
         r["itinerary_id"] = str(r["_id"])
         r.pop("_id", None)
-    df_i = pd.DataFrame(its) if its else pd.DataFrame(columns=[])
+    df_i = pd.DataFrame(its)
 
     df = df_u.merge(df_i, on="itinerary_id", how="left")
 
     # Compute final cost quickly
-    finals = []
-    for iid in df["itinerary_id"]:
-        finals.append(_final_cost_for(iid))
-    df["final_cost"] = pd.to_numeric(finals, errors="coerce").fillna(0).astype(int)
+    finals = [ _final_cost_for(iid) for iid in df["itinerary_id"] ]
+    # ✅ make it a Series (so we can fillna) and align indices
+    df["final_cost"] = pd.to_numeric(pd.Series(finals, index=df.index), errors="coerce").fillna(0).astype(int)
 
     # Received from customer = advance_amount (current schema)
     df["received"] = pd.to_numeric(df["advance_amount"], errors="coerce").fillna(0).astype(int)
-    df["pending"] = (df["final_cost"] - df["received"]).clip(lower=0).astype(int)
+    df["pending"]  = (df["final_cost"] - df["received"]).clip(lower=0).astype(int)
     return df
 
 @st.cache_data(ttl=120, show_spinner=False)
