@@ -302,26 +302,29 @@ def _load_client_refs() -> list[str]:
         return []
 
 def _client_suggestions(prefix: str) -> list[str]:
-    if not prefix: return []
+    if not prefix:
+        return []
     try:
         rx = f"^{re.escape(prefix)}"
         cur = col_it.aggregate([
-            {"$match": {"$or":[
-                {"client_name":{"$regex":rx,"$options":"i"}},
-                {"client_mobile":{"$regex":rx}}
-            ]}}},
-            {"$group":{"_id":{"n":"$client_name","m":"$client_mobile"}}},
-            {"$project":{"_id":0,"name":"$_id.n","mobile":"$_id.m"}},
-            {"$limit":50}
+            {"$match": {"$or": [
+                {"client_name": {"$regex": rx, "$options": "i"}},
+                {"client_mobile": {"$regex": rx}}
+            ]}},  # ✅ fixed: removed extra closing brace/bracket
+            {"$group": {"_id": {"n": "$client_name", "m": "$client_mobile"}}},
+            {"$project": {"_id": 0, "name": "$_id.n", "mobile": "$_id.m"}},
+            {"$limit": 50}
         ])
         res = []
         for x in cur:
             n = (x.get("name") or "").strip()
             m = (x.get("mobile") or "").strip()
-            if n or m: res.append(f"{n} — {m}" if n and m else n or m)
-        return sorted(set(res), key=lambda s:s.lower())
+            if n or m:
+                res.append(f"{n} — {m}" if n and m else n or m)
+        return sorted(set(res), key=lambda s: s.lower())
     except Exception:
         return []
+
 
 # =========================================================
 #                      CREATE NEW
