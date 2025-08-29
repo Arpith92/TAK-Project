@@ -16,6 +16,26 @@ from pymongo.errors import ServerSelectionTimeoutError
 st.set_page_config(page_title="Salary Slips", layout="wide")
 st.title("🧾 Monthly Salary Slip")
 
+# ---- Compact UI CSS tweaks (smaller text/controls) ----
+st.markdown("""
+<style>
+/* general text smaller */
+div[data-testid="stMarkdownContainer"] { font-size: 14px !important; }
+/* inputs text smaller */
+input, textarea, select, .st-al, .st-am, .st-b2, .st-b3, .st-b6, .st-c0, .st-c2 { font-size: 14px !important; }
+/* metric values/labels smaller (used in single-employee section) */
+div[data-testid="stMetricValue"] { font-size: 16px !important; line-height: 1.1 !important; }
+div[data-testid="stMetricLabel"] { font-size: 12px !important; }
+/* dataframe font */
+.css-1v0mbdj, .stDataFrame, .dataframe { font-size: 13px !important; }
+/* container padding tighter */
+section.main > div > div { padding-top: 0.2rem; padding-bottom: 0.2rem; }
+.small-kv { font-size: 13px; line-height: 1.2; }
+.small-kv b { font-size: 14px; }
+.compact-row { margin-top: .25rem; margin-bottom: .25rem; }
+</style>
+""", unsafe_allow_html=True)
+
 TTL = 60  # short cache for fast feel with fresh-ish data
 
 # =============================
@@ -188,7 +208,10 @@ def _ym_key(d: date) -> str:
 def load_payroll_record(emp: str, month_key: str) -> dict:
     return col_payroll.find_one({"employee": emp, "month": month_key}, {"_id":0}) or {}
 
-def save_or_update_pay(emp: str, month_key: str, *, amount: int, paid_on: Optional[date], utr: str, notes: str, components: dict, paid_flag: bool):
+def save_or_update_pay(
+    emp: str, month_key: str, *, amount: int, paid_on: Optional[date],
+    utr: str, notes: str, components: dict, paid_flag: bool
+):
     payload = {
         "employee": emp,
         "month": month_key,
@@ -197,7 +220,7 @@ def save_or_update_pay(emp: str, month_key: str, *, amount: int, paid_on: Option
         "paid_on": datetime.combine(paid_on, datetime.min.time()) if (paid_on and paid_flag) else None,
         "utr": (utr or "").strip(),
         "notes": (notes or "").strip(),
-        "components": components,
+        "components": components,   # snapshot of calc parts used for net pay
         "updated_at": datetime.utcnow(),
         "updated_by": st.session_state.get("user",""),
     }
@@ -311,7 +334,6 @@ df_all = load_all_payroll_all_months()
 if df_all.empty:
     st.caption("No saved salary records yet.")
 else:
-    # compute due vs paid from saved snapshots
     df_all["due"] = df_all["components"].apply(lambda c: _to_int((c or {}).get("net_pay", 0)))
     df_all["paid_amt"] = df_all["amount"].apply(_to_int)
     sel_emp = st.multiselect("Filter employees", options=emp_opts, default=emp_opts)
@@ -329,14 +351,13 @@ else:
 st.divider()
 
 # =============================
-# MODE: ALL EMPLOYEES OVERVIEW  (bulk edit + save)
+# MODE: ALL EMPLOYEES OVERVIEW  (COMPACT + bulk edit + save)
 # =============================
 if mode == "All employees (overview)":
     st.subheader(f"👥 Team overview — {month_start.strftime('%B %Y')}")
-
-    # Build current table & editable controls
     pending_total = 0
     edit_states: Dict[str, Dict] = {}
+
     for emp in emp_opts:
         comp = calc_components(emp, month_start, month_end)
         payrec = load_payroll_record(emp, month_key)
@@ -347,31 +368,37 @@ if mode == "All employees (overview)":
         default_amt = amount_paid if amount_paid else (comp["net_pay"] if paid_flag else 0)
 
         with st.container(border=True):
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.2,1,1,1,1.2,1.2,1.4])
+            # Tighter columns & small labels instead of st.metric
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.1,0.9,0.9,0.9,0.9,1.1,1.1])
             c1.markdown(f"**{emp}**")
-            c2.metric("Base", money(comp["base_salary"]))
-            c3.metric("Fuel", money(comp["fuel_allow"]))
-            c4.metric("Incentives", money(comp["incentives"]))
-            c5.metric("Reimb", money(comp["net_reimb"]))
-            c6.metric("Net Pay", money(comp["net_pay"]))
+
+            c2.markdown(f'<div class="small-kv">Base<br><b>{money(comp["base_salary"])}</b></div>', unsafe_allow_html=True)
+            c3.markdown(f'<div class="small-kv">Fuel<br><b>{money(comp["fuel_allow"])}</b></div>', unsafe_allow_html=True)
+            c4.markdown(f'<div class="small-kv">Incent.<br><b>{money(comp["incentives"])}</b></div>', unsafe_allow_html=True)
+            c5.markdown(f'<div class="small-kv">Reimb<br><b>{money(comp["net_reimb"])}</b></div>', unsafe_allow_html=True)
+            c6.markdown(f'<div class="small-kv">Net Pay<br><b>{money(comp["net_pay"])}</b></div>', unsafe_allow_html=True)
 
             paid_choice = c7.selectbox(f"Paid? — {emp}", ["No","Yes"], index=(1 if paid_flag else 0), key=f"paid_{emp}")
             paid_yes = (paid_choice == "Yes")
-            d1, d2, d3, d4 = st.columns([1,1,1,1.4])
+
+            d1, d2, d3, d4 = st.columns([1,1,1,1.1])
             with d1:
-                pay_date = st.date_input("Paid on", value=(paid_on if paid_yes else date.today()), key=f"date_{emp}", disabled=(not paid_yes))
+                pay_date = st.date_input("Paid on", value=(paid_on if paid_yes else date.today()),
+                                         key=f"date_{emp}", disabled=(not paid_yes))
             with d2:
                 pay_amt = st.number_input("Amount paid (₹)", min_value=0, step=500,
                                           value=int(default_amt if paid_yes else 0),
                                           key=f"amt_{emp}", disabled=(not paid_yes))
             with d3:
-                utr_val = st.text_input("UTR / Ref", value=(utr if paid_yes else ""), key=f"utr_{emp}", placeholder="UPI/NEFT ref", disabled=(not paid_yes))
+                utr_val = st.text_input("UTR / Ref", value=(utr if paid_yes else ""),
+                                        key=f"utr_{emp}", placeholder="UPI/NEFT ref", disabled=(not paid_yes))
             balance = comp["net_pay"] - (int(pay_amt) if paid_yes else 0)
             with d4:
-                st.metric("Balance", money(balance if balance>=0 else 0))
+                st.markdown(f'<div class="small-kv">Balance<br><b>{money(balance if balance>=0 else 0)}</b></div>', unsafe_allow_html=True)
+
             pending_total += max(balance, 0)
 
-            # Capture state for later bulk save
+            # Capture state for bulk save
             edit_states[emp] = {
                 "paid": paid_yes,
                 "amount": int(pay_amt if paid_yes else 0),
@@ -390,21 +417,20 @@ if mode == "All employees (overview)":
 
     st.info(f"**Total balance (unpaid across visible rows):** {money(int(pending_total))}")
 
-    if is_admin:
-        if st.button("💾 Save all changes", use_container_width=True, type="primary"):
-            for emp, payload in edit_states.items():
-                save_or_update_pay(
-                    emp=emp,
-                    month_key=month_key,
-                    amount=payload["amount"],
-                    paid_on=payload["paid_on"],
-                    utr=payload["utr"],
-                    notes=payload["notes"],
-                    components=payload["components"],
-                    paid_flag=payload["paid"],
-                )
-            st.success("Saved all payment updates.")
-            st.rerun()
+    if is_admin and st.button("💾 Save all changes", use_container_width=True, type="primary"):
+        for emp, payload in edit_states.items():
+            save_or_update_pay(
+                emp=emp,
+                month_key=month_key,
+                amount=payload["amount"],
+                paid_on=payload["paid_on"],
+                utr=payload["utr"],
+                notes=payload["notes"],
+                components=payload["components"],
+                paid_flag=payload["paid"],
+            )
+        st.success("Saved all payment updates.")
+        st.rerun()
 
     st.divider()
 
@@ -417,10 +443,7 @@ if mode == "Single employee":
     l, r = st.columns([2,1])
     with l:
         st.markdown(f"### Salary Slip — **{view_emp}**")
-        st.write({
-            "Month": month_start.strftime("%B %Y"),
-            "Employee": view_emp,
-        })
+        st.write({"Month": month_start.strftime("%B %Y"), "Employee": view_emp})
     with r:
         st.metric("Net Pay", money(comp["net_pay"]))
 
@@ -492,7 +515,7 @@ if mode == "Single employee":
             utr = st.text_input("UTR / Ref", value=(default_utr if paid_yes else ""),
                                 placeholder="UPI/NEFT reference", disabled=(not paid_yes))
 
-        notes = st.text_area("Notes (optional)", value=default_notes, placeholder="e.g., Salary for Aug 2025", disabled=False)
+        notes = st.text_area("Notes (optional)", value=default_notes, placeholder="e.g., Salary for Aug 2025")
 
         # Balance preview
         balance_preview = comp["net_pay"] - (int(pay_amount) if paid_yes else 0)
@@ -525,7 +548,7 @@ if mode == "Single employee":
             rec = {
                 "Paid?": "Yes" if cur.get("paid") else "No",
                 "Paid on": pd.to_datetime(cur.get("paid_on")).date() if cur.get("paid_on") else None,
-                "Amount paid (₹)": cur.get("amount", 0),
+                "Amount paid (₹)": _to_int(cur.get("amount",0)),
                 "UTR / Ref": cur.get("utr",""),
                 "Notes": cur.get("notes",""),
                 "Updated by": cur.get("updated_by",""),
