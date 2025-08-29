@@ -821,7 +821,6 @@ if picked_client_mobile:
             st.rerun()
 else:
     st.caption("Pick a client from **Suggestions** to see their packages & revisions.")
-------
 
     if loaded_doc:
         client_name = loaded_doc.get("client_name","")
