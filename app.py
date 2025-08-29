@@ -748,17 +748,24 @@ else:
 
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
 
-    picked_client_mobile = ""
-    picked_client_name = ""
-    if sel_client != "--":
-        parts = [p.strip() for p in sel_client.split("—",1)]
-        if len(parts)==2:
-            picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
+# always define first to avoid NameError
+picked_client_name = ""
+picked_client_mobile = ""
+
+if sel_client != "--":
+    parts = [p.strip() for p in sel_client.split("—", 1)]
+    if len(parts) == 2:
+        picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
+    else:
+        if parts and parts[0].isdigit():
+            picked_client_mobile = parts[0]
         else:
-            if parts and parts[0].isdigit():
-                picked_client_mobile = parts[0]
-            else:
-                picked_client_name = parts[0]
+            picked_client_name = parts[0]
+
+# --- After parsing sel_client into picked_client_name / picked_client_mobile
+picked_client_name = picked_client_name or ""
+picked_client_mobile = picked_client_mobile or ""
+
 
 # --- After parsing sel_client into picked_client_name / picked_client_mobile
 picked_client_name = picked_client_name or ""
