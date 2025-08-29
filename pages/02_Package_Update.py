@@ -309,6 +309,61 @@ def fetch_vendor_master() -> pd.DataFrame:
     dfv = pd.DataFrame(out)
     return dfv[dfv["active"] == True] if not dfv.empty else dfv
 
+# ======== ACTUAL PROFIT CALCULATOR ========
+def _safe_int(x): 
+    try: return int(round(float(str(x).replace(",", ""))))
+    except: return 0
+
+def final_cost_for(iid: str) -> int:
+    """Reads final package cost from expenses (preferred) or itinerary legacy fields."""
+    exp = col_expenses.find_one({"itinerary_id": str(iid)},
+                                {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}) or {}
+    if "final_package_cost" in exp:
+        return _safe_int(exp.get("final_package_cost", 0))
+    if ("base_package_cost" in exp) or ("discount" in exp) or ("package_cost" in exp):
+        base = _safe_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
+        disc = _safe_int(exp.get("discount", 0))
+        return max(0, base - disc)
+
+    it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost":1,"discount":1}) or {}
+    base = _safe_int(it.get("package_cost", 0))
+    disc = _safe_int(it.get("discount", 0))
+    return max(0, base - disc)
+
+def vendor_cost_for(iid: str) -> int:
+    """
+    Sum of vendor 'finalization_cost' across all vendor_payments.items for this itinerary.
+    If your intent is 'paid so far' instead, replace finalization_cost with (adv1+adv2+final).
+    """
+    rec = col_vendorpay.find_one({"itinerary_id": str(iid)}, {"_id":0, "items":1}) or {}
+    total = 0
+    for it in (rec.get("items") or []):
+        total += _safe_int(it.get("finalization_cost", 0))
+    return total
+
+def splitwise_cost_for(iid: str) -> int:
+    """Sum of Splitwise expenses linked to this itinerary_id (kind='expense')."""
+    q = {"itinerary_id": str(iid), "kind": "expense"}
+    amt = 0
+    for r in col_split.find(q, {"amount":1}):
+        amt += _safe_int(r.get("amount", 0))
+    return amt
+
+def profit_breakup(iid: str) -> dict:
+    """
+    Returns a dict with: final_cost, vendor_cost, splitwise_cost, actual_profit
+    """
+    fc = final_cost_for(iid)
+    vc = vendor_cost_for(iid)
+    sc = splitwise_cost_for(iid)
+    return {
+        "final_cost": fc,
+        "vendor_cost": vc,
+        "splitwise_cost": sc,
+        "actual_profit": max(fc - (vc + sc), 0)  # clamp at 0 (optional)
+    }
+
+
 # ------------------------------------------------------------------
 # Dedupe logic & revision view
 # ------------------------------------------------------------------
