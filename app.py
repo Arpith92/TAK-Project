@@ -10,7 +10,6 @@ try:
         subprocess.run([sys.executable, "-m", "pip", "install", "rich==13.9.4"], check=True)
         st.warning("Adjusted rich to 13.9.4 for compatibility. Rerunning…")
         st.rerun()
-
 except Exception:
     import streamlit as st  # ensure st is available
 
@@ -440,7 +439,7 @@ if mode == "Create new itinerary":
         column_config=col_cfg,
         on_change=_editor_sync,
     )
-    # Force-sync once so totals/preview reflect the very latest edit on this rerun.
+    # Keep totals in sync with last edit on each rerun
     _editor_sync()
 
     # --- Live totals preview (before Generate) ---
@@ -569,7 +568,7 @@ if mode == "Create new itinerary":
             itinerary_text += f"*Package cost (after referral 10%): ₹{in_locale(after_ref)}/-*\n"
         itinerary_text += f"{details_line}"
 
-        # Basic inclusions/exclusions/notes (same as before; trimmed for brevity)
+        # Boilerplate
         exclusions = "*Exclusions:-*\n" + "\n".join([
             "1. Any meals/beverages not specified.",
             "2. Entry fees unless included.",
@@ -668,7 +667,6 @@ if mode == "Create new itinerary":
         try:
             col_it.insert_one(record)
             st.success(f"✅ Saved package for **{client_name}** ({client_mobile}) • **rev {next_rev}**")
-
             st.session_state["last_preview_text"] = final_output
             st.session_state["last_generated_meta"] = {"client": client_name, "mobile": client_mobile, "rev": next_rev}
         except Exception as e:
@@ -686,14 +684,20 @@ else:
     suggestions = _client_suggestions(q.strip()) if q.strip() else []
     sel_client = st.selectbox("Suggestions", ["--"] + suggestions, index=0)
 
+    # If the suggestion changed, clear previously loaded doc & model
+    if sel_client != st.session_state.get("_last_sel_client"):
+        st.session_state["_last_sel_client"] = sel_client
+        st.session_state.pop(_SEARCH_DOC_KEY, None)
+        st.session_state.pop(_MODEL_KEY, None)
+
     # Keep the loaded doc in session so it survives reruns when you edit a cell.
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
+    picked_client_mobile = ""
+    picked_client_name = ""
 
     if sel_client != "--":
-        parts = [p.strip() for p in sel_client.split("—",1)]
-        picked_client_mobile = ""
-        picked_client_name = ""
-        if len(parts)==2:
+        parts = [p.strip() for p in sel_client.split("—", 1)]
+        if len(parts) == 2:
             picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
         else:
             if parts and parts[0].isdigit():
@@ -701,39 +705,34 @@ else:
             else:
                 picked_client_name = parts[0]
 
-if picked_client_mobile:
-    docs = list(
-        col_it.find({"client_mobile": picked_client_mobile}, {})
-        .sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
-    )
+        if picked_client_mobile:
+            docs = list(
+                col_it.find({"client_mobile": picked_client_mobile}, {})
+                .sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
+            )
 
-    if docs:
-        labels = [
-            f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • "
-            f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
-            for d in docs
-        ]
+            if docs:
+                labels = [
+                    f"{(d.get('client_name') or picked_client_name)} — {picked_client_mobile} • "
+                    f"start:{d.get('start_date','?')} • rev:{int(d.get('revision_num',0) or 0)}"
+                    for d in docs
+                ]
+                rev_key = f"rev_pick_{picked_client_mobile}"
+                selected_idx = st.selectbox(
+                    "Pick a start date & revision",
+                    options=list(range(len(labels))),
+                    format_func=lambda i: labels[i],
+                    index=0,
+                    key=rev_key,
+                )
+                if not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(docs):
+                    selected_idx = 0
 
-        # key is tied to the mobile so it resets when you pick a different suggestion
-        rev_key = f"rev_pick_{picked_client_mobile}"
-
-        selected_idx = st.selectbox(
-            "Pick a start date & revision",
-            options=list(range(len(labels))),
-            format_func=lambda i: labels[i],
-            index=0,                # safe default
-            key=rev_key,
-        )
-
-        # extra guard in case state gets out of sync
-        if not isinstance(selected_idx, int) or selected_idx < 0 or selected_idx >= len(docs):
-            selected_idx = 0
-
-        if st.button("Load this package", use_container_width=False, key=f"load_{picked_client_mobile}"):
-            loaded_doc = docs[selected_idx]
-            st.rerun()
-    else:
-        st.info("No itineraries found for this number yet.")
+                if st.button("Load this package", use_container_width=False, key=f"load_{picked_client_mobile}"):
+                    st.session_state[_SEARCH_DOC_KEY] = docs[selected_idx]  # persist
+                    st.rerun()
+            else:
+                st.info("No itineraries found for this number yet.")
 
     if loaded_doc:
         # Prefill header from loaded doc
@@ -772,13 +771,14 @@ if picked_client_mobile:
             df = pd.DataFrame(rows)
             for c in TARGET_COLS:
                 if c not in df.columns:
-                    df[c] = 0 if "Cost" in c else ""
+                    df[c] = 0.0 if "Cost" in c else ""
             df = _ensure_numeric_costs(df)
             df = df.reset_index(drop=True)
             for i in range(len(df)):
                 df.at[i, "Date"] = start + dt.timedelta(days=i)
             return df[TARGET_COLS]
 
+        # One-time load of editor model for the selected package
         if _MODEL_KEY not in st.session_state:
             st.session_state[_MODEL_KEY] = _rows_from_doc(loaded_doc, start_date)
 
