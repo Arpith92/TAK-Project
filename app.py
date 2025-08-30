@@ -444,7 +444,7 @@ stay_city_options = sorted(stay_city_df["Stay City"].dropna().astype(str).unique
 code_options = code_df["Code"].dropna().astype(str).unique().tolist() if not code_df.empty else []
 base_cars = ["Sedan","Ertiga","Innova","Tempo Traveller"]
 car_options = [f"{ac} {c}" for c in base_cars for ac in ("AC","Non AC")]
-hotel_options = ["AC Standard AC","Non-AC Standard AC","3Star AC Hotel room","4Star AC Hotel room","5Star AC Hotel room"]
+hotel_options = ["AC Standard AC","Non-AC Standard AC","3Star AC Hotel room","3Star AC Hotel room with Breakfast","4Star AC Hotel room","4Star AC Hotel room with Breakfast","5Star AC Hotel room","5Star AC Hotel room with Breakfast"]
 room_options = [f"{occ} occupancy {i} room" for occ in ["Double","Triple","Quad","Quint"] for i in range(1,5)]
 
 def _time_list(step_minutes=15):
