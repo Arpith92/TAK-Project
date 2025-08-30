@@ -974,25 +974,36 @@ else:
                 key=f"rev_{picked_client_mobile}_{sel_start}",
             )
 
-            if st.button(
-                "Load this revision",
-                use_container_width=False,
-                key=f"load_{picked_client_mobile}_{sel_start}",
-            ):
-                loaded_doc = revs[sel_rev_idx]
-                st.session_state[_SEARCH_DOC_KEY] = loaded_doc  # persist
-                st.rerun()
-    else:
-        st.caption("Pick a client from **Suggestions** to see their packages & revisions.")
+            # --- inside the block where you build `revs`, `rev_labels`, and `sel_rev_idx` ---
+if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
+    # persist the chosen doc
+    chosen = revs[sel_rev_idx]
+    st.session_state[_SEARCH_DOC_KEY] = chosen
 
-    # If a document is loaded, let user edit & save as next revision
-    if loaded_doc:
-        client_name = loaded_doc.get("client_name","")
-        client_mobile = loaded_doc.get("client_mobile","")
-        rep = loaded_doc.get("representative","-- Select --")
-        total_pax = int(loaded_doc.get("total_pax",1) or 1)
-        start_date = dt.date.fromisoformat(str(loaded_doc.get("start_date")))
-        days = int(loaded_doc.get("total_days", len(loaded_doc.get("rows",[])) or 1))
+    # build a stable fingerprint for the loaded revision
+    loaded_key = f"{chosen.get('client_mobile','')}:{str(chosen.get('start_date',''))}:rev{int(chosen.get('revision_num',0) or 0)}"
+
+    # RESET the data editor model to exactly what was saved in this revision
+    rows_df = pd.DataFrame(chosen.get("rows") or [])
+    st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+
+    # clear the editor widget state so Streamlit redraws with the fresh model
+    st.session_state.pop(_EDITOR_KEY, None)
+
+    # remember which revision is currently hydrated in the editor
+    st.session_state["_loaded_key"] = loaded_key
+
+    st.rerun()
+
+# --- immediately after you set `loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)` ---
+if loaded_doc:
+    current_key = f"{loaded_doc.get('client_mobile','')}:{str(loaded_doc.get('start_date',''))}:rev{int(loaded_doc.get('revision_num',0) or 0)}"
+    # If user changed selection (or first time), rehydrate the model from DB rows
+    if st.session_state.get("_loaded_key") != current_key:
+        rows_df = pd.DataFrame(loaded_doc.get("rows") or [])
+        st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+        st.session_state.pop(_EDITOR_KEY, None)  # force widget to pick up new data
+        st.session_state["_loaded_key"] = current_key
 
         c0, c1, c2, c3 = st.columns([1.6,1,1,1])
         with c0:
