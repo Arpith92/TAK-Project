@@ -896,36 +896,74 @@ if mode == "Create new itinerary":
 # =========================================================
 else:
     st.markdown("### Search itinerary")
-    q = st.text_input("Type client name or mobile (1 character shows suggestions)",
-                      key="search_q", placeholder="e.g., Gaurav or 9576226271")
+    q = st.text_input(
+        "Type client name or mobile (1 character shows suggestions)",
+        key="search_q", placeholder="e.g., Gaurav or 9576226271"
+    )
     suggestions = _client_suggestions(q.strip()) if q.strip() else []
 
-    # Safe defaults (prevents NameError)
-    picked_client_name: str = ""
-    picked_client_mobile: str = ""
+    picked_client_name, picked_client_mobile = "", ""
+    sel_client = st.selectbox("Suggestions", ["--"] + suggestions, index=0, key="sel_client")
 
-    # Single selectbox for suggestions (no duplicates)
-    sel_client = st.selectbox(
-        "Suggestions",
-        ["--"] + suggestions,
-        index=0,
-        key="sel_client"
-    )
-
-    # Parse selection into name/mobile
     if sel_client != "--":
         parts = [p.strip() for p in sel_client.split("—", 1)]
         if len(parts) == 2:
-            picked_client_name, picked_client_mobile = parts[0].strip(), parts[1].strip()
+            picked_client_name, picked_client_mobile = parts[0], parts[1]
+        elif parts and parts[0].isdigit():
+            picked_client_mobile = parts[0]
         else:
-            # If it's just digits, treat as mobile; else name
-            if parts and parts[0].isdigit():
-                picked_client_mobile = parts[0]
-            else:
-                picked_client_name = parts[0]
+            picked_client_name = parts[0]
 
-    # Keep any previously loaded doc available across reruns
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
+
+    if picked_client_mobile:
+        rx_name = f"^{re.escape(picked_client_name)}$" if picked_client_name else ".*"
+        docs = list(
+            col_it.find(
+                {"client_mobile": picked_client_mobile, "client_name": {"$regex": rx_name, "$options": "i"}},
+                {}
+            ).sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
+        )
+        if not docs:
+            st.info("No itineraries found for this client yet.")
+        else:
+            from collections import defaultdict
+            by_start = defaultdict(list)
+            for d in docs:
+                by_start[str(d.get("start_date", ""))].append(d)
+
+            start_dates = sorted(by_start.keys(), reverse=True)
+            sel_start = st.selectbox("Select package start date", start_dates, key=f"start_{picked_client_mobile}")
+
+            revs = sorted(by_start.get(sel_start, []), key=lambda x: int(x.get("revision_num", 0) or 0), reverse=True)
+            rev_labels = [
+                f"rev:{int(d.get('revision_num',0) or 0)} • uploaded:{str(d.get('upload_date',''))[:10]}"
+                for d in revs
+            ]
+            sel_rev_idx = st.selectbox("Select revision", list(range(len(revs))),
+                                       format_func=lambda i: rev_labels[i],
+                                       key=f"rev_{picked_client_mobile}_{sel_start}")
+
+            if st.button("📂 Load this revision",
+                         key=f"load_{picked_client_mobile}_{sel_start}_{sel_rev_idx}"):
+                chosen = revs[sel_rev_idx]
+                st.session_state[_SEARCH_DOC_KEY] = chosen
+                loaded_key = f"{chosen.get('client_mobile','')}:{chosen.get('start_date','')}:rev{int(chosen.get('revision_num',0) or 0)}"
+                st.session_state[_MODEL_KEY] = _normalize_to_model(pd.DataFrame(chosen.get("rows") or []))
+                st.session_state.pop(_EDITOR_KEY, None)
+                st.session_state["_loaded_key"] = loaded_key
+                st.rerun()
+
+    # -------- Hydrate editor once selection is set --------
+    if loaded_doc:
+        current_key = f"{loaded_doc.get('client_mobile','')}:{loaded_doc.get('start_date','')}:rev{int(loaded_doc.get('revision_num',0) or 0)}"
+        if st.session_state.get("_loaded_key") != current_key:
+            st.session_state[_MODEL_KEY] = _normalize_to_model(pd.DataFrame(loaded_doc.get("rows") or []))
+            st.session_state.pop(_EDITOR_KEY, None)
+            st.session_state["_loaded_key"] = current_key
+
+        # === show editable form here (client_name, mobile, rep, pax, bhas, table, etc.) ===
+        # ... keep all your form + update-itinerary button logic unchanged ...
 
     if picked_client_mobile:
         # Fetch ONLY this client's docs (name + mobile), newest first
