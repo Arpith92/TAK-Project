@@ -445,7 +445,21 @@ code_options = code_df["Code"].dropna().astype(str).unique().tolist() if not cod
 base_cars = ["Sedan","Ertiga","Innova","Tempo Traveller"]
 car_options = [f"{ac} {c}" for c in base_cars for ac in ("AC","Non AC")]
 hotel_options = ["AC Standard AC","Non-AC Standard AC","3Star AC Hotel room","3Star AC Hotel room with Breakfast","4Star AC Hotel room","4Star AC Hotel room with Breakfast","5Star AC Hotel room","5Star AC Hotel room with Breakfast"]
-room_options = [f"{occ} occupancy {i} room" for occ in ["Double","Triple","Quad","Quint"] for i in range(1,5)]
+room_options = [
+    f"{occ} occupancy {i} room"
+    for occ in ["Double", "Triple", "Quad", "Quint"]
+    for i in range(1, 6)  # upto 5 rooms
+]
+
+import itertools
+
+# generate combinations (choose 2 for example: double+triple)
+combo_options = list(itertools.combinations(room_options, 2))
+
+# Example: show first 5
+for c in combo_options[:5]:
+    print(c)
+
 
 def _time_list(step_minutes=15):
     base = dt.datetime(2000,1,1,0,0)
