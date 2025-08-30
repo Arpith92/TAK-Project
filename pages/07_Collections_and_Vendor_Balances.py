@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import os, io
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +27,7 @@ def require_admin():
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
     with st.sidebar:
         st.markdown("### Admin access")
-        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
+        p = st.text_input("Enter admin password", type="password", placeholder="enter pass", key="admin_pass_input")
     if (p or "").strip() != ADMIN_PASS.strip():
         st.stop()
     st.session_state["user"] = "Admin"
@@ -165,9 +165,6 @@ def load_latest_itineraries_df() -> pd.DataFrame:
 # =========================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_confirmed_snapshot() -> pd.DataFrame:
-    """
-    Minimal booking info from package_updates for confirmed items.
-    """
     ups = list(col_updates.find(
         {"status": "confirmed"},
         {"_id":0, "itinerary_id":1, "status":1, "booking_date":1, "advance_amount":1, "rep_name":1}
@@ -183,9 +180,6 @@ def load_confirmed_snapshot() -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_customer_payments() -> pd.DataFrame:
-    """
-    Customer payment transactions (new collection).
-    """
     rows = []
     cur = col_cust_txn.find({}, {"_id":0})
     for d in cur:
@@ -199,9 +193,6 @@ def load_customer_payments() -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_vendor_payment_txns() -> pd.DataFrame:
-    """
-    Vendor payment transactions (new collection).
-    """
     rows = []
     cur = col_vendor_txn.find({}, {"_id":0})
     for d in cur:
@@ -218,9 +209,6 @@ def load_vendor_payment_txns() -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_vendor_payments_legacy() -> pd.DataFrame:
-    """
-    Legacy vendor_payments (adv1/adv2/final) flattened.
-    """
     rows = []
     cur = col_vendorpay.find({}, {"_id": 0, "itinerary_id": 1, "final_done": 1, "items": 1, "updated_at": 1})
     for d in cur:
@@ -269,26 +257,26 @@ mstart, mend = month_bounds(today)
 with st.container():
     fl1, fl2, fl3, fl4 = st.columns([1.2, 1.2, 1.6, 2.0])
     with fl1:
-        basis = st.selectbox("Customer date basis", ["Booking date", "Custom range"], index=0)
+        basis = st.selectbox("Customer date basis", ["Booking date", "Custom range"], index=0, key="cust_date_basis")
     with fl2:
         if basis == "Booking date":
             start_c, end_c = mstart, mend
         else:
             start_c, end_c = today - timedelta(days=30), today
-        start_c = st.date_input("From (customers)", value=start_c)
+        start_c = st.date_input("From (customers)", value=start_c, key="cust_from")
     with fl3:
-        end_c = st.date_input("To (customers)", value=end_c)
+        end_c = st.date_input("To (customers)", value=end_c, key="cust_to")
         if end_c < start_c:
             end_c = start_c
     with fl4:
-        search_txt = st.text_input("Search customer (name/mobile/ACH/route)", "")
+        search_txt = st.text_input("Search customer (name/mobile/ACH/route)", "", key="cust_search_text")
 
 vl1, vl2 = st.columns([1.2, 2.8])
 with vl1:
-    vendor_date_mode = st.selectbox("Vendor filter", ["Any payment in range", "Ignore dates"], index=0)
+    vendor_date_mode = st.selectbox("Vendor filter", ["Any payment in range", "Ignore dates"], index=0, key="vendor_filter_mode")
 with vl2:
-    start_v = st.date_input("Vendor payments from", value=mstart)
-    end_v   = st.date_input("Vendor payments to", value=mend)
+    start_v = st.date_input("Vendor payments from", value=mstart, key="vendor_from")
+    end_v   = st.date_input("Vendor payments to", value=mend, key="vendor_to")
     if end_v < start_v:
         end_v = start_v
 
@@ -360,7 +348,7 @@ else:
                         last_utr=("utr","last")
                     ).reset_index()
         )
-        # We don't have a canonical "finalization_cost" per (i,v,c) in txn table; try to fetch from legacy if present
+        # Try to fetch "finalization_cost" from legacy if present
         if not df_vlegacy.empty:
             base_fc = df_vlegacy[["itinerary_id","vendor","category","finalization_cost"]].drop_duplicates()
             ag = ag.merge(base_fc, on=["itinerary_id","vendor","category"], how="left")
@@ -383,10 +371,9 @@ if not df_v.empty and not df_vdir.empty:
 # =========================================================
 # Customers: filter by booking_date (if confirmed info available)
 if not df_cust.empty:
-    # booking_date can be NaT if not confirmed; keep those only if "Custom range" and user wants? We'll filter only non-null.
     mask_range = df_cust["booking_date"].apply(lambda x: isinstance(x, date) and (start_c <= x <= end_c))
-    df_cust = df_cust[mask_range | df_cust["booking_date"].isna()]  # include NA to not hide unconfirmed records entirely
-    if search_txt.strip():
+    df_cust = df_cust[mask_range | df_cust["booking_date"].isna()]
+    if (search_txt or "").strip():
         s = search_txt.strip().lower()
         df_cust = df_cust[
             df_cust["client_name"].astype(str).str.lower().str.contains(s) |
@@ -409,11 +396,11 @@ st.success("Showing latest revision per package only.")
 # =========================================================
 with st.expander("➕ Create / Update Vendor", expanded=False):
     vcol1, vcol2, vcol3, vcol4 = st.columns(4)
-    with vcol1: v_name = st.text_input("Vendor name*")
-    with vcol2: v_city = st.text_input("City")
-    with vcol3: v_cat  = st.text_input("Category")
-    with vcol4: v_contact = st.text_input("Contact (phone/email)")
-    if st.button("Save vendor"):
+    with vcol1: v_name = st.text_input("Vendor name*", key="vendor_name_input")
+    with vcol2: v_city = st.text_input("City", key="vendor_city_input")
+    with vcol3: v_cat  = st.text_input("Category", key="vendor_category_input")
+    with vcol4: v_contact = st.text_input("Contact (phone/email)", key="vendor_contact_input")
+    if st.button("Save vendor", key="vendor_save_btn"):
         if not v_name.strip():
             st.error("Vendor name is required.")
         else:
@@ -433,12 +420,12 @@ with st.expander("🧾 Record Customer Receipt (amount/date/mode/UTR)", expanded
         pick = st.selectbox("Select package", options.tolist(), key="rec_cust_pkg")
         sel_iid = pick.split(" | ")[-1] if pick else None
         c1,c2,c3,c4 = st.columns([1,1,1,2])
-        with c1: amt = st.number_input("Amount (₹)", min_value=0, step=500)
-        with c2: dtp = st.date_input("Payment date", value=today)
-        with c3: mode = st.selectbox("Mode", ["UPI","NEFT/RTGS","IMPS","Cash","Card","Other"])
-        with c4: utr = st.text_input("UTR / Ref no.")
-        note = st.text_input("Note (optional)")
-        if st.button("Add receipt"):
+        with c1: amt = st.number_input("Amount (₹)", min_value=0, step=500, key="cust_amount_input")
+        with c2: dtp = st.date_input("Payment date", value=today, key="cust_payment_date")
+        with c3: mode = st.selectbox("Mode", ["UPI","NEFT/RTGS","IMPS","Cash","Card","Other"], key="cust_mode_select")
+        with c4: utr = st.text_input("UTR / Ref no.", key="cust_utr_input")
+        note = st.text_input("Note (optional)", key="cust_note_input")
+        if st.button("Add receipt", key="cust_add_receipt_btn"):
             if not sel_iid:
                 st.error("Pick a package.")
             elif amt <= 0:
@@ -464,15 +451,15 @@ with st.expander("🏷️ Record Vendor Payment (amount/date/UTR)", expanded=Fal
 
         vend_names = sorted(col_vendors.distinct("name"))
         c1,c2,c3,c4 = st.columns([1.3,1,1,1.2])
-        with c1: vsel = st.selectbox("Vendor*", ["--"] + vend_names)
-        with c2: cat  = st.text_input("Category (e.g., Hotel/Taxi/Guide)")
-        with c3: vtype = st.selectbox("Type", ["adv","final","other"])
-        with c4: vdate = st.date_input("Paid on", value=today)
+        with c1: vsel = st.selectbox("Vendor*", ["--"] + vend_names, key="vendor_select_input")
+        with c2: cat  = st.text_input("Category (e.g., Hotel/Taxi/Guide)", key="vendor_cat_input")
+        with c3: vtype = st.selectbox("Type", ["adv","final","other"], key="vendor_type_select")
+        with c4: vdate = st.date_input("Paid on", value=today, key="vendor_paid_on_input")
         r1, r2 = st.columns([1,2])
-        with r1: vamt = st.number_input("Amount (₹)", min_value=0, step=500)
-        with r2: vutr = st.text_input("UTR / Ref no.")
-        vnote = st.text_input("Note")
-        if st.button("Add vendor payment"):
+        with r1: vamt = st.number_input("Amount (₹)", min_value=0, step=500, key="vendor_amount_input")
+        with r2: vutr = st.text_input("UTR / Ref no.", key="vendor_utr_input")
+        vnote = st.text_input("Note", key="vendor_note_input")
+        if st.button("Add vendor payment", key="vendor_add_payment_btn"):
             if not sel_iid:
                 st.error("Pick a package.")
             elif vsel == "--":
@@ -494,10 +481,10 @@ with st.expander("🏷️ Record Vendor Payment (amount/date/UTR)", expanded=Fal
                 st.success("Vendor payment recorded.")
 
 with st.expander("⏰ Payment Reminder (customer/vendor)", expanded=False):
-    who = st.selectbox("Reminder for", ["customer","vendor"])
-    amount = st.number_input("Amount (₹)", min_value=0, step=500)
-    due = st.date_input("Due date", value=today + timedelta(days=3))
-    note = st.text_input("Note")
+    who = st.selectbox("Reminder for", ["customer","vendor"], key="rem_for_select")
+    amount = st.number_input("Amount (₹)", min_value=0, step=500, key="rem_amount_input")
+    due = st.date_input("Due date", value=today + timedelta(days=3), key="rem_due_date_input")
+    note = st.text_input("Note", key="rem_note_input")
     sel_iid = None; vsel = None
     if who == "customer":
         if df_latest.empty:
@@ -505,12 +492,12 @@ with st.expander("⏰ Payment Reminder (customer/vendor)", expanded=False):
         else:
             options = (df_latest["ach_id"].fillna("") + " | " + df_latest["client_name"].fillna("") +
                        " | " + df_latest["start_date"].astype(str) + " | " + df_latest["itinerary_id"])
-            pick = st.selectbox("Select package", options.tolist(), key="rem_pkg")
+            pick = st.selectbox("Select package", options.tolist(), key="rem_pkg_select")
             sel_iid = pick.split(" | ")[-1] if pick else None
     else:
         vend_names = sorted(col_vendors.distinct("name"))
-        vsel = st.selectbox("Select vendor", ["--"] + vend_names, key="rem_vendor")
-    if st.button("Create reminder"):
+        vsel = st.selectbox("Select vendor", ["--"] + vend_names, key="rem_vendor_select")
+    if st.button("Create reminder", key="rem_create_btn"):
         payload = {
             "for": who, "amount": int(amount),
             "due_date": datetime(due.year, due.month, due.day),
@@ -640,7 +627,7 @@ with right:
             df_cust["booking_date"].astype(str).fillna("") + " | " +
             df_cust["itinerary_id"]
         )
-        pick = st.selectbox("Open package", opts.tolist())
+        pick = st.selectbox("Open package", opts.tolist(), key="pkg_explorer_select")
         sel_id = pick.split(" | ")[-1] if pick else None
     else:
         sel_id = None
@@ -727,9 +714,8 @@ if rem:
     })[["For","ACH ID","Customer","Mobile","Vendor","Amount (₹)","Due date","Note","id"]]
     st.dataframe(df_show.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
-    # close reminder
-    rid = st.text_input("Reminder ID to close")
-    if st.button("Close reminder"):
+    rid = st.text_input("Reminder ID to close", key="rem_close_id_input")
+    if st.button("Close reminder", key="rem_close_btn"):
         try:
             col_reminders.update_one({"_id": ObjectId(rid)}, {"$set": {"status":"closed","closed_at": _now_utc()}})
             st.success("Reminder closed.")
@@ -825,5 +811,6 @@ st.download_button(
     data=export_excel_bytes(),
     file_name=f"collections_vendors_{date.today()}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True
+    use_container_width=True,
+    key="download_excel_btn"
 )
