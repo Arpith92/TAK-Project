@@ -373,12 +373,14 @@ else:
         ag["source"] = "txns"
         df_v = pd.concat([df_v, ag], ignore_index=True, sort=False)
 
-# Add vendor directory info
+# Add vendor directory info (FIXED the earlier .rename bug)
 if not df_v.empty and not df_vdir.empty:
-    df_v = df_v.merge(
-        df_vdir.rename(columns({"name":"vendor"}))[["name","city","category"]].rename(columns={"name":"vendor"}).drop_duplicates(["vendor","category"]),
-        on=["vendor","category"], how="left", suffixes=("","_dir")
+    vdir = (
+        df_vdir[["name","city","category"]]
+        .rename(columns={"name":"vendor"})
+        .drop_duplicates(["vendor","category"])
     )
+    df_v = df_v.merge(vdir, on=["vendor","category"], how="left")
 
 # Ensure vendor columns exist
 df_v = ensure_cols(df_v, {
