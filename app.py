@@ -136,23 +136,11 @@ def mongo_client():
     return client
 
 @st.cache_resource
-def mongo_client():
-    uri = _find_uri()
-    if not uri:
-        st.error("Mongo URI not configured. Add mongo_uri in Secrets.")
-        st.stop()
-    client = MongoClient(uri, appName="TAK_App", maxPoolSize=100, serverSelectionTimeoutMS=5000, tz_aware=True)
-    client.admin.command("ping")
-    return client
-
-@st.cache_resource
 def get_collections():
     """
     Always return a dict with the required keys.
-    Even if caching/stale state occurs, callers can rely on these keys existing.
     """
     db = mongo_client()["TAK_DB"]
-    # NOTE: Accessing db['name'] doesn't fail even if collection is empty; it just returns a handle.
     return {
         "itineraries":     db["itineraries"],
         "audit_logins":    db["audit_logins"],
@@ -165,7 +153,6 @@ cols = get_collections()
 _db = mongo_client()["TAK_DB"]  # fallback handle
 
 def _col(cols_dict: dict, key: str):
-    # Avoid truthiness on PyMongo collections; only check for None / missing
     val = cols_dict.get(key, None)
     return val if val is not None else _db[key]
 
@@ -178,9 +165,7 @@ for _k in ("itineraries", "audit_logins", "package_updates", "followups", "expen
     if _k not in cols or cols[_k] is None:
         cols[_k] = _db[_k]
 
-
-
-from datetime import datetime as _dt, time as _time
+from datetime import datetime as _dt
 
 def _to_int(x, default=0):
     try:
@@ -264,7 +249,6 @@ def sync_initial_cost_to_expenses_and_updates(itinerary_id: str, total_package: 
         }},
         upsert=True,
     )
-
 
 # ---------- Sidebar: User Trail ----------
 with st.sidebar.expander("👤 User trail (last 25)"):
@@ -867,7 +851,6 @@ if mode == "Create new itinerary":
             "is_revision": True if next_rev > 1 else False,
             "revision_notes": "initial" if next_rev == 1 else "auto: new version",
         }
-        # --- build 'record' dict above this line ---
 
         try:
             res = col_it.insert_one(record)   # INSERT
@@ -916,6 +899,7 @@ else:
 
     loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
 
+    # ------- Selection of package & revision -------
     if picked_client_mobile:
         rx_name = f"^{re.escape(picked_client_name)}$" if picked_client_name else ".*"
         docs = list(
@@ -940,146 +924,50 @@ else:
                 f"rev:{int(d.get('revision_num',0) or 0)} • uploaded:{str(d.get('upload_date',''))[:10]}"
                 for d in revs
             ]
-            sel_rev_idx = st.selectbox("Select revision", list(range(len(revs))),
-                                       format_func=lambda i: rev_labels[i],
-                                       key=f"rev_{picked_client_mobile}_{sel_start}")
-
-            if st.button("📂 Load this revision",
-                         key=f"load_{picked_client_mobile}_{sel_start}_{sel_rev_idx}"):
-                chosen = revs[sel_rev_idx]
-                st.session_state[_SEARCH_DOC_KEY] = chosen
-                loaded_key = f"{chosen.get('client_mobile','')}:{chosen.get('start_date','')}:rev{int(chosen.get('revision_num',0) or 0)}"
-                st.session_state[_MODEL_KEY] = _normalize_to_model(pd.DataFrame(chosen.get("rows") or []))
-                st.session_state.pop(_EDITOR_KEY, None)
-                st.session_state["_loaded_key"] = loaded_key
-                st.rerun()
-
-    # -------- Hydrate editor once selection is set --------
-    if loaded_doc:
-        current_key = f"{loaded_doc.get('client_mobile','')}:{loaded_doc.get('start_date','')}:rev{int(loaded_doc.get('revision_num',0) or 0)}"
-        if st.session_state.get("_loaded_key") != current_key:
-            st.session_state[_MODEL_KEY] = _normalize_to_model(pd.DataFrame(loaded_doc.get("rows") or []))
-            st.session_state.pop(_EDITOR_KEY, None)
-            st.session_state["_loaded_key"] = current_key
-
-        # === show editable form here (client_name, mobile, rep, pax, bhas, table, etc.) ===
-        # ... keep all your form + update-itinerary button logic unchanged ...
-
-    if picked_client_mobile:
-        # Fetch ONLY this client's docs (name + mobile), newest first
-        rx_name = f"^{re.escape(picked_client_name)}$" if picked_client_name else ".*"
-        docs = list(
-            col_it.find(
-                {
-                    "client_mobile": picked_client_mobile,
-                    "client_name": {"$regex": rx_name, "$options": "i"},
-                },
-                {}
-            ).sort([("start_date", -1), ("revision_num", -1), ("upload_date", -1)])
-        )
-
-        if not docs:
-            st.info("No itineraries found for this client yet.")
-        else:
-            # Group revisions by start_date (one package = one start date)
-            from collections import defaultdict
-            by_start: dict[str, list[dict]] = defaultdict(list)
-            for d in docs:
-                by_start[str(d.get("start_date", ""))].append(d)
-
-            # Choose a package (start date)
-            start_dates = sorted(by_start.keys(), reverse=True)
-            sel_start = st.selectbox(
-                "Select package start date",
-                start_dates,
-                key=f"start_{picked_client_mobile}",
-            )
-
-            # Show revisions ONLY for the selected package
-            revs = sorted(
-                by_start.get(sel_start, []),
-                key=lambda x: int(x.get("revision_num", 0) or 0),
-                reverse=True,
-            )
-            rev_labels = [
-                f"rev:{int(d.get('revision_num', 0) or 0)} • uploaded:{str(d.get('upload_date',''))[:10]}"
-                for d in revs
-            ]
             sel_rev_idx = st.selectbox(
                 "Select revision",
                 list(range(len(revs))),
                 format_func=lambda i: rev_labels[i],
-                key=f"rev_{picked_client_mobile}_{sel_start}",
+                key=f"rev_{picked_client_mobile}_{sel_start}"
             )
 
-    # Loader button – must be INSIDE the block where sel_start/revs/sel_rev_idx exist
-            if st.button("Load this revision",
-             use_container_width=False,
-             key=f"load_{picked_client_mobile}_{sel_start}_{sel_rev_idx}"):
-            chosen = revs[sel_rev_idx]
-            st.session_state[_SEARCH_DOC_KEY] = chosen
+            if st.button("📂 Load this revision",
+                         key=f"load_{picked_client_mobile}_{sel_start}_{sel_rev_idx}",
+                         use_container_width=False):
+                chosen = revs[sel_rev_idx]
+                st.session_state[_SEARCH_DOC_KEY] = chosen
+                loaded_key = (
+                    f"{chosen.get('client_mobile','')}:"
+                    f"{str(chosen.get('start_date',''))}:"
+                    f"rev{int(chosen.get('revision_num',0) or 0)}"
+                )
+                rows_df = pd.DataFrame(chosen.get("rows") or [])
+                st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+                st.session_state.pop(_EDITOR_KEY, None)  # force redraw
+                st.session_state["_loaded_key"] = loaded_key
+                st.rerun()
 
-           # stable fingerprint for the hydrated revision
-            loaded_key = (
-            f"{chosen.get('client_mobile','')}:"
-            f"{str(chosen.get('start_date',''))}:"
-            f"rev{int(chosen.get('revision_num',0) or 0)}"
-    )
-
-    # reset the editor model to EXACT saved rows of this revision
-    rows_df = pd.DataFrame(chosen.get("rows") or [])
-    st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
-
-    # force the data_editor widget to redraw with fresh data
-    st.session_state.pop(_EDITOR_KEY, None)
-    st.session_state["_loaded_key"] = loaded_key
-    st.rerun()
-
-
-            # --- inside the block where you build `revs`, `rev_labels`, and `sel_rev_idx` ---
-    if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
-            # persist the chosen doc
-            chosen = revs[sel_rev_idx]
-            st.session_state[_SEARCH_DOC_KEY] = chosen
-
-            # build a stable fingerprint for the loaded revision
-            loaded_key = f"{chosen.get('client_mobile','')}:{str(chosen.get('start_date',''))}:rev{int(chosen.get('revision_num',0) or 0)}"
-
-            # RESET the data editor model to exactly what was saved in this revision
-            rows_df = pd.DataFrame(chosen.get("rows") or [])
+    # -------- Hydrate editor once selection is set --------
+    loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)
+    if loaded_doc:
+        current_key = (
+            f"{loaded_doc.get('client_mobile','')}:"
+            f"{str(loaded_doc.get('start_date',''))}:"
+            f"rev{int(loaded_doc.get('revision_num',0) or 0)}"
+        )
+        if st.session_state.get("_loaded_key") != current_key:
+            rows_df = pd.DataFrame(loaded_doc.get("rows") or [])
             st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+            st.session_state.pop(_EDITOR_KEY, None)  # pick up new data
+            st.session_state["_loaded_key"] = current_key
 
-            # clear the editor widget state so Streamlit redraws with the fresh model
-            st.session_state.pop(_EDITOR_KEY, None)
-
-    # remember which revision is currently hydrated in the editor
-    st.session_state["_loaded_key"] = loaded_key
-
-    st.rerun()
-
-            # Rehydrate editor if selection changed or first load
-if loaded_doc:
-    current_key = (
-        f"{loaded_doc.get('client_mobile','')}:"
-        f"{str(loaded_doc.get('start_date',''))}:"
-        f"rev{int(loaded_doc.get('revision_num',0) or 0)}"
-    )
-    if st.session_state.get("_loaded_key") != current_key:
-        rows_df = pd.DataFrame(loaded_doc.get("rows") or [])
-        st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
-        st.session_state.pop(_EDITOR_KEY, None)  # pick up new data
-        st.session_state["_loaded_key"] = current_key
-
-
-# --- immediately after you set `loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)` ---
-if loaded_doc:
-    current_key = f"{loaded_doc.get('client_mobile','')}:{str(loaded_doc.get('start_date',''))}:rev{int(loaded_doc.get('revision_num',0) or 0)}"
-    # If user changed selection (or first time), rehydrate the model from DB rows
-    if st.session_state.get("_loaded_key") != current_key:
-        rows_df = pd.DataFrame(loaded_doc.get("rows") or [])
-        st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
-        st.session_state.pop(_EDITOR_KEY, None)  # force widget to pick up new data
-        st.session_state["_loaded_key"] = current_key
+        # Pre-fill top fields from loaded_doc
+        client_name = loaded_doc.get("client_name", "")
+        client_mobile = loaded_doc.get("client_mobile", "")
+        rep = loaded_doc.get("representative", "-- Select --") or "-- Select --"
+        total_pax = int(loaded_doc.get("total_pax", 1) or 1)
+        start_date = pd.to_datetime(loaded_doc.get("start_date")).date() if loaded_doc.get("start_date") else dt.date.today()
+        days = int(loaded_doc.get("total_days", len(st.session_state.get(_MODEL_KEY, []))) or 1)
 
         c0, c1, c2, c3 = st.columns([1.6,1,1,1])
         with c0:
@@ -1346,7 +1234,6 @@ if loaded_doc:
             except Exception as e:
                 st.error(f"Could not save itinerary: {e}")
                 st.stop()
-
 
 # ============= Shared: show preview & download if available =============
 if "last_preview_text" in st.session_state:
