@@ -1,7 +1,7 @@
 # pages/02_Package_Update.py
 from __future__ import annotations
 
-import math, os, io
+import math, os, io, calendar
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Dict
@@ -74,8 +74,8 @@ def _get_client() -> MongoClient:
         uri,
         appName="TAK_PackageUpdate",
         maxPoolSize=100,
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
+        serverSelectionTimeoutMS=6000,
+        connectTimeoutMS=6000,
         retryWrites=True,
         tz_aware=True,
     )
@@ -88,6 +88,15 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]
 col_vendors     = db["vendors"]
+# NEW: splitwise + driver attendance used for profit breakdown
+col_split       = db.get("expense_splitwise")
+col_att         = db.get("driver_attendance")
+
+# Driver costing constants (can be moved to Secrets if needed)
+BASE_SALARY   = int(st.secrets.get("driver_base_salary", 12000))
+LEAVE_DEDUCT  = int(st.secrets.get("driver_leave_deduct", 400))
+OVERTIME_ADD  = int(st.secrets.get("driver_overtime_add", 300))
+TAK_PREFIX    = str(st.secrets.get("tak_car_prefix", "TAK"))
 
 # ------------------------------------------------------------------
 # Helpers
@@ -186,6 +195,11 @@ def _ensure_cols(df: pd.DataFrame, cols: list[str], fill=None) -> pd.DataFrame:
             df[c] = fill
     return df
 
+def _month_bounds(d: date) -> Tuple[date, date]:
+    first = d.replace(day=1)
+    last = d.replace(day=calendar.monthrange(d.year, d.month)[1])
+    return first, last
+
 # ------------------------------------------------------------------
 # Cached loaders (projections only)
 # ------------------------------------------------------------------
@@ -255,17 +269,20 @@ def fetch_expenses_df() -> pd.DataFrame:
     rows = list(col_expenses.find(
         {},
         {"_id": 0, "itinerary_id": 1, "base_package_cost": 1, "discount": 1,
-         "final_package_cost": 1, "package_cost": 1, "total_expenses": 1, "profit": 1, "notes": 1}
+         "final_package_cost": 1, "package_cost": 1,
+         # NEW persisted breakdown fields (if saved earlier)
+         "vendor_total": 1, "splitwise_total": 1, "driver_total": 1,
+         "total_expenses": 1, "profit": 1, "notes": 1}
     ))
     if not rows:
-        return pd.DataFrame(columns=["itinerary_id","total_expenses","profit","package_cost","base_package_cost","discount","final_package_cost","notes"])
+        return pd.DataFrame(columns=["itinerary_id","total_expenses","profit","package_cost",
+                                     "base_package_cost","discount","final_package_cost",
+                                     "vendor_total","splitwise_total","driver_total","notes"])
     for r in rows:
         r["itinerary_id"] = str(r.get("itinerary_id"))
-        r["base_package_cost"] = _to_int(r.get("base_package_cost", 0))
-        r["discount"] = _to_int(r.get("discount", 0))
-        r["final_package_cost"] = _to_int(r.get("final_package_cost", r.get("package_cost", 0)))
-        r["total_expenses"] = _to_int(r.get("total_expenses", 0))
-        r["profit"] = _to_int(r.get("profit", 0))
+        for k in ("base_package_cost","discount","final_package_cost","package_cost",
+                  "vendor_total","splitwise_total","driver_total","total_expenses","profit"):
+            r[k] = _to_int(r.get(k, 0))
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -309,8 +326,8 @@ def fetch_vendor_master() -> pd.DataFrame:
     dfv = pd.DataFrame(out)
     return dfv[dfv["active"] == True] if not dfv.empty else dfv
 
-# ======== ACTUAL PROFIT CALCULATOR ========
-def _safe_int(x): 
+# ======== PROFIT CALCULATOR (extended) ========
+def _safe_int(x):
     try: return int(round(float(str(x).replace(",", ""))))
     except: return 0
 
@@ -320,49 +337,117 @@ def final_cost_for(iid: str) -> int:
                                 {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}) or {}
     if "final_package_cost" in exp:
         return _safe_int(exp.get("final_package_cost", 0))
-    if ("base_package_cost" in exp) or ("discount" in exp) or ("package_cost" in exp):
+    if any(k in exp for k in ("base_package_cost","discount","package_cost")):
         base = _safe_int(exp.get("base_package_cost", exp.get("package_cost", 0)))
         disc = _safe_int(exp.get("discount", 0))
         return max(0, base - disc)
-
     it = col_itineraries.find_one({"_id": ObjectId(iid)}, {"package_cost":1,"discount":1}) or {}
     base = _safe_int(it.get("package_cost", 0))
     disc = _safe_int(it.get("discount", 0))
     return max(0, base - disc)
 
 def vendor_cost_for(iid: str) -> int:
-    """
-    Sum of vendor 'finalization_cost' across all vendor_payments.items for this itinerary.
-    If your intent is 'paid so far' instead, replace finalization_cost with (adv1+adv2+final).
-    """
+    """Sum of vendor 'finalization_cost' across all vendor_payments.items for this itinerary.
+       If your intent is 'paid so far', replace finalization_cost with (adv1+adv2+final)."""
     rec = col_vendorpay.find_one({"itinerary_id": str(iid)}, {"_id":0, "items":1}) or {}
     total = 0
     for it in (rec.get("items") or []):
-        total += _safe_int(it.get("finalization_cost", 0))
+        fc = _safe_int(it.get("finalization_cost", 0))
+        if fc > 0:
+            total += fc
+        else:
+            total += _safe_int(it.get("adv1_amt", 0)) + _safe_int(it.get("adv2_amt", 0)) + _safe_int(it.get("final_amt", 0))
     return total
 
 def splitwise_cost_for(iid: str) -> int:
     """Sum of Splitwise expenses linked to this itinerary_id (kind='expense')."""
+    if col_split is None:
+        return 0
     q = {"itinerary_id": str(iid), "kind": "expense"}
     amt = 0
     for r in col_split.find(q, {"amount":1}):
         amt += _safe_int(r.get("amount", 0))
     return amt
 
+def _driver_month_gross(driver: str, y: int, m: int) -> Tuple[int,int,int,int]:
+    """Return (gross, days_in_month, leave_days, ot_units_all_month) from attendance."""
+    if col_att is None:
+        days_in_month = calendar.monthrange(y, m)[1]
+        return BASE_SALARY, days_in_month, 0, 0
+    first = date(y, m, 1)
+    last  = date(y, m, calendar.monthrange(y, m)[1])
+    cur = list(col_att.find(
+        {"driver": driver,
+         "date": {"$gte": datetime.combine(first, dtime.min), "$lte": datetime.combine(last, dtime.max)}},
+        {"status":1,"outstation_overnight":1,"overnight_client":1,"bhasmarathi":1}
+    ))
+    leave_days = sum(1 for r in cur if (r.get("status","Present") == "Leave"))
+    # All-month OT units for salary gross computation (derived from flags)
+    ot_all = 0
+    for r in cur:
+        ot_all += int(bool(r.get("outstation_overnight", False)))
+        ot_all += int(bool(r.get("overnight_client", False)))
+        ot_all += int(bool(r.get("bhasmarathi", False)))
+    days_in_month = (last - first).days + 1
+    gross = BASE_SALARY - leave_days * LEAVE_DEDUCT + ot_all * OVERTIME_ADD
+    return int(gross), int(days_in_month), int(leave_days), int(ot_all)
+
+def driver_cost_for_client(iid: str) -> int:
+    """
+    If TAK car used AND attendance row linked to this itinerary:
+      Sum across (driver, yyyy-mm) buckets:
+        daily_rate = (monthly_gross / days_in_month)
+        driver_cost += daily_rate * client_days_in_that_month + client_ot_units * OVERTIME_ADD
+    """
+    if col_att is None:
+        return 0
+    rows = list(col_att.find(
+        {"cust_itinerary_id": str(iid), "car": {"$regex": f"^{TAK_PREFIX}", "$options": "i"}},
+        {"driver":1,"date":1,"outstation_overnight":1,"overnight_client":1,"bhasmarathi":1,"billable_ot_units":1}
+    ))
+    if not rows:
+        return 0
+    # bucket by driver and month
+    buckets: Dict[Tuple[str,int,int], List[dict]] = {}
+    for r in rows:
+        dt = pd.to_datetime(r.get("date")).to_pydatetime()
+        key = (str(r.get("driver","")), dt.year, dt.month)
+        buckets.setdefault(key, []).append(r)
+
+    total = 0
+    for (drv, y, m), items in buckets.items():
+        gross, dim, _leave, _ot_all = _driver_month_gross(drv, y, m)
+        daily_rate = gross / max(dim, 1)
+        client_days = len(items)  # one row per day in driver page
+        client_ot = 0
+        for r in items:
+            bu = _to_int(r.get("billable_ot_units", 0))
+            if bu > 0:
+                client_ot += bu
+            else:
+                client_ot += int(bool(r.get("outstation_overnight", False)))
+                client_ot += int(bool(r.get("overnight_client", False)))
+                client_ot += int(bool(r.get("bhasmarathi", False)))
+        total += int(round(daily_rate * client_days)) + client_ot * OVERTIME_ADD
+    return int(total)
+
 def profit_breakup(iid: str) -> dict:
     """
-    Returns a dict with: final_cost, vendor_cost, splitwise_cost, actual_profit
+    Returns a dict with: final_cost, vendor_total, splitwise_total, driver_total, total_expenses, actual_profit
     """
     fc = final_cost_for(iid)
     vc = vendor_cost_for(iid)
     sc = splitwise_cost_for(iid)
+    dr = driver_cost_for_client(iid)
+    tot = vc + sc + dr
     return {
         "final_cost": fc,
-        "vendor_cost": vc,
-        "splitwise_cost": sc,
-        "actual_profit": max(fc - (vc + sc), 0)  # clamp at 0 (optional)
+        "vendor_total": vc,
+        "splitwise_total": sc,
+        "driver_total": dr,
+        "total_expenses": tot,
+        "actual_profit": max(fc - tot, 0)
     }
-
 
 # ------------------------------------------------------------------
 # Dedupe logic & revision view
@@ -760,7 +845,7 @@ else:
 st.divider()
 
 # ------------------------------------------------------------------
-# 2) Final Cost & Vendor Payments (Confirmed Only)
+# 2) Final Cost & Vendor Payments (Confirmed Only)  + Header Expenses
 # ------------------------------------------------------------------
 st.subheader("2) Final Cost & Vendor Payments (Confirmed Only)")
 
@@ -810,7 +895,7 @@ else:
         sel = st.selectbox("Choose package", options.tolist() if not options.empty else [])
         chosen_id = sel.split(" | ")[-1] if sel else None
 
-    # ------- Save one-time final package summary (NO estimates) -------
+    # ------- Save one-time final package summary (with full expenses) -------
     def save_expense_summary(
         itinerary_id: str,
         client_name: str,
@@ -819,20 +904,15 @@ else:
         discount: int,
         notes: str = ""
     ):
-        vp_doc = col_vendorpay.find_one({"itinerary_id": str(itinerary_id)}) or {}
-        items = vp_doc.get("items", [])
-        total_expenses = 0
-        for it in items:
-            fc = _to_int(it.get("finalization_cost", 0))
-            if fc > 0:
-                total_expenses += fc
-            else:
-                total_expenses += _to_int(it.get("adv1_amt", 0)) + _to_int(it.get("adv2_amt", 0)) + _to_int(it.get("final_amt", 0))
+        vendor_total    = vendor_cost_for(itinerary_id)
+        splitwise_total = splitwise_cost_for(itinerary_id)
+        driver_total    = driver_cost_for_client(itinerary_id)
 
         base = _to_int(base_amount)
         disc = _to_int(discount)
         final_cost = max(0, base - disc)
-        profit = final_cost - total_expenses
+        total_expenses = vendor_total + splitwise_total + driver_total
+        profit = max(final_cost - total_expenses, 0)
 
         doc = {
             "itinerary_id": str(itinerary_id),
@@ -842,6 +922,9 @@ else:
             "discount": disc,
             "final_package_cost": final_cost,
             "package_cost": final_cost,  # legacy
+            "vendor_total": _to_int(vendor_total),
+            "splitwise_total": _to_int(splitwise_total),
+            "driver_total": _to_int(driver_total),
             "total_expenses": _to_int(total_expenses),
             "profit": _to_int(profit),
             "notes": str(notes or ""),
@@ -849,7 +932,7 @@ else:
         }
         col_expenses.update_one({"itinerary_id": str(itinerary_id)}, {"$set": _clean_for_mongo(doc)}, upsert=True)
         fetch_expenses_df.clear()
-        return profit, total_expenses, final_cost
+        return profit, total_expenses, final_cost, vendor_total, splitwise_total, driver_total
 
     # ------- Vendor payments helpers -------
     def get_vendor_rows(itinerary_id: str) -> pd.DataFrame:
@@ -936,13 +1019,22 @@ else:
             computed_final = max(0, int(base_amount) - int(discount))
             st.metric("Final package (computed)", f"₹ {computed_final:,}")
 
+        # Live header totals (Vendor, Splitwise, Driver, Total, Profit)
+        br_now = profit_breakup(chosen_id)
+        h1, h2, h3, h4, h5 = st.columns(5)
+        h1.metric("Vendor (₹)", f"{br_now['vendor_total']:,}")
+        h2.metric("Splitwise (₹)", f"{br_now['splitwise_total']:,}")
+        h3.metric("Driver (₹)", f"{br_now['driver_total']:,}")
+        h4.metric("Total expenses (₹)", f"{br_now['total_expenses']:,}")
+        h5.metric("Profit (₹)", f"{max(computed_final - br_now['total_expenses'], 0):,}")
+
         notes = st.text_area("Notes (optional)", value=str(exp_row["notes"].iat[0]) if (not exp_row.empty and "notes" in exp_row.columns) else "")
 
-        if st.button("💾 Save Final Package"):
-            profit, total_expenses, final_cost = save_expense_summary(
+        if st.button("💾 Save Final Package & Expenses"):
+            profit, total_expenses, final_cost, vtot, swtot, drtot = save_expense_summary(
                 chosen_id, client_name, booking_date, base_amount, discount, notes
             )
-            st.success(f"Saved. Final: ₹{final_cost:,} • Expenses: ₹{total_expenses:,} • Profit: ₹{profit:,}")
+            st.success(f"Saved. Final: ₹{final_cost:,} • Vendor: ₹{vtot:,} • Splitwise: ₹{swtot:,} • Driver: ₹{drtot:,} • Total: ₹{total_expenses:,} • Profit: ₹{profit:,}")
             st.rerun()
 
         # ---- Vendor Payments ----
@@ -1020,12 +1112,14 @@ else:
                             0
                         )
                 save_vendor_rows(chosen_id, edited_vendors, final_done_new)
-                st.success("Vendor payments saved.")
+                # After vendor save, refresh live header
+                br2 = profit_breakup(chosen_id)
+                st.success(f"Vendor payments saved. Vendor: ₹{br2['vendor_total']:,} • Splitwise: ₹{br2['splitwise_total']:,} • Driver: ₹{br2['driver_total']:,} • Total: ₹{br2['total_expenses']:,} • Profit: ₹{max(final_cost_for(chosen_id)-br2['total_expenses'],0):,}")
                 st.rerun()
 
         # ---- Client & Vendor Payment Summaries ----
         st.markdown("### 📑 Payment Summaries")
-        final_now = int(df[df["itinerary_id"] == chosen_id]["final_cost"].iloc[0])
+        final_now = final_cost_for(chosen_id)
         received  = _to_int(df_up[df_up["itinerary_id"]==chosen_id]["advance_amount"].fillna(0).sum()) if not df_up.empty else 0
         balance   = max(final_now - received, 0)
         cS1, cS2, cS3 = st.columns(3)
@@ -1107,6 +1201,8 @@ else:
         created_ist_str = _fmt_ist(created_dt_utc)
         created_utc_str = created_dt_utc.strftime("%Y-%m-%d %H:%M %Z") if created_dt_utc else ""
 
+        br = profit_breakup(selected_id)
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Basic**")
@@ -1123,7 +1219,6 @@ else:
             })
         with c2:
             st.markdown("**Status & Money**")
-            final_cost_display = int(df[df["itinerary_id"] == selected_id]["final_cost"].iloc[0])
             base_cost_display = _to_int(exp.get("base_package_cost", it.get("package_cost_num", 0)))
             discount_display  = _to_int(exp.get("discount", 0))
             st.write({
@@ -1135,9 +1230,12 @@ else:
                 "Representative": upd.get("rep_name","") or it.get("representative",""),
                 "Quoted amount (₹)": base_cost_display,
                 "Discount (₹)": discount_display,
-                "Final package (₹)": final_cost_display,
-                "Total expenses (₹)": exp.get("total_expenses", 0),
-                "Profit (₹)": exp.get("profit", 0),
+                "Final package (₹)": br["final_cost"],
+                "Vendor (₹)": br["vendor_total"],
+                "Splitwise (₹)": br["splitwise_total"],
+                "Driver (₹)": br["driver_total"],
+                "Total expenses (₹)": br["total_expenses"],
+                "Profit (₹)": br["actual_profit"],
             })
 
         st.markdown("**Itinerary text**")
