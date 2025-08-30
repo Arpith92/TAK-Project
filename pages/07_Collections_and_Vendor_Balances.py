@@ -95,7 +95,7 @@ def _to_int(x, default=0) -> int:
     except Exception:
         return default
 
-def _d(x) -> Optional[date]:
+def _d(x):
     try:
         if x is None or (isinstance(x, float) and pd.isna(x)):
             return None
@@ -110,6 +110,13 @@ def month_bounds(d: date) -> Tuple[date, date]:
 
 def _now_utc():
     return datetime.utcnow()
+
+def ensure_cols(df: pd.DataFrame, defaults: dict) -> pd.DataFrame:
+    """Guarantee required columns exist with safe defaults."""
+    for c, v in defaults.items():
+        if c not in df.columns:
+            df[c] = v
+    return df
 
 # Final cost resolver (in sync with other pages)
 def _final_cost_for(iid: str) -> int:
@@ -321,6 +328,13 @@ if not df_cust.empty:
         )
         df_cust = df_cust.merge(last_pay, on="itinerary_id", how="left")
 
+# Ensure all columns we will use exist (avoids KeyError)
+df_cust = ensure_cols(df_cust, {
+    "ach_id":"", "client_name":"", "client_mobile":"", "final_route":"", "total_pax":0,
+    "booking_date": None, "rep_name":"", "final_cost":0, "received":0, "pending":0,
+    "last_pay_date": None, "last_utr":"", "itinerary_id":""
+})
+
 # Vendor transactions (new) + legacy
 df_vtxn = load_vendor_payment_txns()
 df_vlegacy = load_vendor_payments_legacy()
@@ -329,7 +343,7 @@ df_vlegacy = load_vendor_payments_legacy()
 if df_vlegacy.empty and df_vtxn.empty:
     df_v = pd.DataFrame(columns=[
         "itinerary_id","vendor","category","finalization_cost","paid_total","balance",
-        "last_pay_date","last_utr","source"
+        "last_pay_date","last_utr","source","city"
     ])
 else:
     # Start with legacy lines (already balanced)
@@ -362,9 +376,15 @@ else:
 # Add vendor directory info
 if not df_v.empty and not df_vdir.empty:
     df_v = df_v.merge(
-        df_vdir.rename(columns={"name":"vendor"})[["vendor","city","category"]].drop_duplicates(["vendor","category"]),
+        df_vdir.rename(columns({"name":"vendor"}))[["name","city","category"]].rename(columns={"name":"vendor"}).drop_duplicates(["vendor","category"]),
         on=["vendor","category"], how="left", suffixes=("","_dir")
     )
+
+# Ensure vendor columns exist
+df_v = ensure_cols(df_v, {
+    "itinerary_id":"", "vendor":"", "category":"", "city":"", "finalization_cost":0,
+    "paid_total":0, "balance":0, "last_pay_date": None, "last_utr":"", "source":""
+})
 
 # =========================================================
 # Apply filters
@@ -529,18 +549,19 @@ st.subheader("👤 Customer Collections (Latest Packages Only)")
 if df_cust.empty:
     st.info("No packages found.")
 else:
-    total_final   = int(df_cust["final_cost"].sum())
-    total_received= int(df_cust["received"].sum())
-    total_pending = int(df_cust["pending"].sum())
+    total_final   = int(pd.to_numeric(df_cust["final_cost"], errors="coerce").fillna(0).sum())
+    total_received= int(pd.to_numeric(df_cust["received"], errors="coerce").fillna(0).sum())
+    total_pending = int(pd.to_numeric(df_cust["pending"], errors="coerce").fillna(0).sum())
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Total Final (₹)", f"{total_final:,}")
     k2.metric("Received (₹)", f"{total_received:,}")
     k3.metric("Pending (₹)", f"{total_pending:,}")
 
-    # Table per customer
+    # Table per customer (ensure columns exist)
     cust_cols = ["ach_id","client_name","client_mobile","final_route","total_pax",
                  "booking_date","rep_name","final_cost","received","pending","last_pay_date","last_utr","itinerary_id"]
+    df_cust = ensure_cols(df_cust, {c: "" for c in cust_cols})
     view_c = df_cust[cust_cols].rename(columns={
         "ach_id":"ACH ID","client_name":"Customer","client_mobile":"Mobile",
         "final_route":"Route","total_pax":"Pax","booking_date":"Booked on",
@@ -582,8 +603,8 @@ else:
             .reset_index()
             .sort_values(["Balance","Finalization"], ascending=[False, False])
     )
-    total_vendor_balance = int(vendor_sum["Balance"].sum())
-    total_vendors_with_dues = int((vendor_sum["Balance"] > 0).sum())
+    total_vendor_balance = int(pd.to_numeric(vendor_sum["Balance"], errors="coerce").fillna(0).sum())
+    total_vendors_with_dues = int((pd.to_numeric(vendor_sum["Balance"], errors="coerce").fillna(0) > 0).sum())
     v1, v2 = st.columns(2)
     v1.metric("Total Vendor Balance (₹)", f"{total_vendor_balance:,}")
     v2.metric("Vendors with dues", total_vendors_with_dues)
@@ -600,6 +621,11 @@ else:
         meta_needed_cols = ["itinerary_id","ach_id","client_name","client_mobile","booking_date","final_route"]
         meta = df_cust[meta_needed_cols].drop_duplicates("itinerary_id") if not df_cust.empty else pd.DataFrame(columns=meta_needed_cols)
         line = df_v.merge(meta, on="itinerary_id", how="left")
+        line = ensure_cols(line, {
+            "vendor":"", "category":"", "city":"", "ach_id":"", "client_name":"", "client_mobile":"",
+            "booking_date":None, "final_route":"", "finalization_cost":0, "paid_total":0, "balance":0,
+            "last_pay_date":None, "last_utr":"", "source":""
+        })
         line = line[[
             "vendor","category","city","itinerary_id","ach_id","client_name","client_mobile","booking_date","final_route",
             "finalization_cost","paid_total","balance","last_pay_date","last_utr","source"
@@ -608,7 +634,7 @@ else:
             "client_name":"Customer","client_mobile":"Mobile","booking_date":"Booked on","final_route":"Route",
             "finalization_cost":"Finalized (₹)","paid_total":"Paid total (₹)","balance":"Balance (₹)",
             "last_pay_date":"Last pay date","last_utr":"Last UTR","source":"From"
-        }).sort_values(["Vendor","Booked on","Customer"])
+        }).sort_values(["Vendor","Booked on","Customer"], na_position="last")
         st.dataframe(line, use_container_width=True, hide_index=True)
 
 st.divider()
@@ -708,6 +734,7 @@ if rem:
             df_cust[["itinerary_id","ach_id","client_name","client_mobile"]].drop_duplicates("itinerary_id"),
             on="itinerary_id", how="left"
         )
+    df_rem = ensure_cols(df_rem, {"ach_id":"", "client_name":"", "client_mobile":"", "vendor":"", "amount":0, "due_date": None, "note":""})
     df_show = df_rem.rename(columns={
         "for":"For","ach_id":"ACH ID","client_name":"Customer","client_mobile":"Mobile",
         "vendor":"Vendor","amount":"Amount (₹)","due_date":"Due date","note":"Note"
@@ -775,6 +802,11 @@ def export_excel_bytes() -> bytes:
             meta_needed_cols = ["itinerary_id","ach_id","client_name","client_mobile","booking_date","final_route"]
             meta = df_cust[meta_needed_cols].drop_duplicates("itinerary_id") if not df_cust.empty else pd.DataFrame(columns=meta_needed_cols)
             line = df_v.merge(meta, on="itinerary_id", how="left")
+            line = ensure_cols(line, {
+                "vendor":"", "category":"", "city":"", "ach_id":"", "client_name":"", "client_mobile":"",
+                "booking_date":None, "final_route":"", "finalization_cost":0, "paid_total":0, "balance":0,
+                "last_pay_date":None, "last_utr":"", "source":""
+            })
             line = line[[
                 "vendor","category","city","itinerary_id","ach_id","client_name","client_mobile","booking_date","final_route",
                 "finalization_cost","paid_total","balance","last_pay_date","last_utr","source"
