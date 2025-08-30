@@ -456,6 +456,17 @@ import itertools
 # generate combinations (choose 2 for example: double+triple)
 combo_options = list(itertools.combinations(room_options, 2))
 
+import streamlit as st
+
+# Multi-select dropdown for combinations
+selected_rooms = st.multiselect(
+    "Select room combinations:",
+    room_options
+)
+
+st.write("You selected:", selected_rooms)
+
+
 # Example: show first 5
 for c in combo_options[:5]:
     print(c)
