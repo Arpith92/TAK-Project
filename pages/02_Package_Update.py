@@ -1,7 +1,8 @@
 # pages/02_Package_Update.py
 from __future__ import annotations
 
-import math, os, io, calendar
+import math, os, io
+import calendar as pycal  # avoid shadowing streamlit_calendar.calendar
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, List, Dict
@@ -88,9 +89,9 @@ col_updates     = db["package_updates"]
 col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]
 col_vendors     = db["vendors"]
-# NEW: splitwise + driver attendance used for profit breakdown
-col_split       = db.get("expense_splitwise")
-col_att         = db.get("driver_attendance")
+# ✅ FIX: get collections with bracket syntax (safe even if not created yet)
+col_split       = db["expense_splitwise"]
+col_att         = db["driver_attendance"]
 
 # Driver costing constants (can be moved to Secrets if needed)
 BASE_SALARY   = int(st.secrets.get("driver_base_salary", 12000))
@@ -197,7 +198,7 @@ def _ensure_cols(df: pd.DataFrame, cols: list[str], fill=None) -> pd.DataFrame:
 
 def _month_bounds(d: date) -> Tuple[date, date]:
     first = d.replace(day=1)
-    last = d.replace(day=calendar.monthrange(d.year, d.month)[1])
+    last = d.replace(day=pycal.monthrange(d.year, d.month)[1])
     return first, last
 
 # ------------------------------------------------------------------
@@ -270,7 +271,6 @@ def fetch_expenses_df() -> pd.DataFrame:
         {},
         {"_id": 0, "itinerary_id": 1, "base_package_cost": 1, "discount": 1,
          "final_package_cost": 1, "package_cost": 1,
-         # NEW persisted breakdown fields (if saved earlier)
          "vendor_total": 1, "splitwise_total": 1, "driver_total": 1,
          "total_expenses": 1, "profit": 1, "notes": 1}
     ))
@@ -332,7 +332,6 @@ def _safe_int(x):
     except: return 0
 
 def final_cost_for(iid: str) -> int:
-    """Reads final package cost from expenses (preferred) or itinerary legacy fields."""
     exp = col_expenses.find_one({"itinerary_id": str(iid)},
                                 {"final_package_cost":1,"base_package_cost":1,"discount":1,"package_cost":1}) or {}
     if "final_package_cost" in exp:
@@ -347,8 +346,6 @@ def final_cost_for(iid: str) -> int:
     return max(0, base - disc)
 
 def vendor_cost_for(iid: str) -> int:
-    """Sum of vendor 'finalization_cost' across all vendor_payments.items for this itinerary.
-       If your intent is 'paid so far', replace finalization_cost with (adv1+adv2+final)."""
     rec = col_vendorpay.find_one({"itinerary_id": str(iid)}, {"_id":0, "items":1}) or {}
     total = 0
     for it in (rec.get("items") or []):
@@ -360,9 +357,6 @@ def vendor_cost_for(iid: str) -> int:
     return total
 
 def splitwise_cost_for(iid: str) -> int:
-    """Sum of Splitwise expenses linked to this itinerary_id (kind='expense')."""
-    if col_split is None:
-        return 0
     q = {"itinerary_id": str(iid), "kind": "expense"}
     amt = 0
     for r in col_split.find(q, {"amount":1}):
@@ -371,18 +365,14 @@ def splitwise_cost_for(iid: str) -> int:
 
 def _driver_month_gross(driver: str, y: int, m: int) -> Tuple[int,int,int,int]:
     """Return (gross, days_in_month, leave_days, ot_units_all_month) from attendance."""
-    if col_att is None:
-        days_in_month = calendar.monthrange(y, m)[1]
-        return BASE_SALARY, days_in_month, 0, 0
     first = date(y, m, 1)
-    last  = date(y, m, calendar.monthrange(y, m)[1])
+    last  = date(y, m, pycal.monthrange(y, m)[1])
     cur = list(col_att.find(
         {"driver": driver,
          "date": {"$gte": datetime.combine(first, dtime.min), "$lte": datetime.combine(last, dtime.max)}},
         {"status":1,"outstation_overnight":1,"overnight_client":1,"bhasmarathi":1}
     ))
     leave_days = sum(1 for r in cur if (r.get("status","Present") == "Leave"))
-    # All-month OT units for salary gross computation (derived from flags)
     ot_all = 0
     for r in cur:
         ot_all += int(bool(r.get("outstation_overnight", False)))
@@ -399,15 +389,12 @@ def driver_cost_for_client(iid: str) -> int:
         daily_rate = (monthly_gross / days_in_month)
         driver_cost += daily_rate * client_days_in_that_month + client_ot_units * OVERTIME_ADD
     """
-    if col_att is None:
-        return 0
     rows = list(col_att.find(
         {"cust_itinerary_id": str(iid), "car": {"$regex": f"^{TAK_PREFIX}", "$options": "i"}},
         {"driver":1,"date":1,"outstation_overnight":1,"overnight_client":1,"bhasmarathi":1,"billable_ot_units":1}
     ))
     if not rows:
         return 0
-    # bucket by driver and month
     buckets: Dict[Tuple[str,int,int], List[dict]] = {}
     for r in rows:
         dt = pd.to_datetime(r.get("date")).to_pydatetime()
@@ -418,7 +405,7 @@ def driver_cost_for_client(iid: str) -> int:
     for (drv, y, m), items in buckets.items():
         gross, dim, _leave, _ot_all = _driver_month_gross(drv, y, m)
         daily_rate = gross / max(dim, 1)
-        client_days = len(items)  # one row per day in driver page
+        client_days = len(items)
         client_ot = 0
         for r in items:
             bu = _to_int(r.get("billable_ot_units", 0))
@@ -432,9 +419,6 @@ def driver_cost_for_client(iid: str) -> int:
     return int(total)
 
 def profit_breakup(iid: str) -> dict:
-    """
-    Returns a dict with: final_cost, vendor_total, splitwise_total, driver_total, total_expenses, actual_profit
-    """
     fc = final_cost_for(iid)
     vc = vendor_cost_for(iid)
     sc = splitwise_cost_for(iid)
@@ -490,10 +474,6 @@ def _oid_time(iid: str) -> datetime:
     return ts
 
 def latest_confirmed_unique_by_mobile(df_now: pd.DataFrame) -> pd.DataFrame:
-    """
-    From confirmed rows, keep only the latest per client_mobile.
-    Priority: booking_date desc (None last), then upload_date desc, then ObjectId time desc.
-    """
     if df_now.empty:
         return df_now
     d = df_now.copy()
@@ -941,7 +921,6 @@ else:
 
     def save_vendor_rows(itinerary_id: str, rows_df: pd.DataFrame, final_done: bool):
         rows_df = rows_df.copy()
-        # ensure expected cols
         need_cols = ["category","vendor","finalization_cost","adv1_amt","adv1_date","adv2_amt","adv2_date","final_amt","final_date","balance"]
         for c in need_cols:
             if c not in rows_df.columns:
@@ -1041,7 +1020,6 @@ else:
         st.markdown("### Vendor Payments")
         st.caption("Add or edit vendor rows freely. Balance auto-calculates. You can lock with **Final done** if needed.")
 
-        # ➕ Add to vendor master (instant availability)
         with st.expander("➕ Add vendor to master"):
             vc1, vc2, vc3 = st.columns([1,1,2])
             with vc1:
@@ -1066,7 +1044,6 @@ else:
                 else:
                     st.warning("Enter a vendor name.")
 
-        # Build vendor options (flat list – data_editor can't do per-row options)
         vendor_options = sorted(df_vend_master["vendor"].unique().tolist()) if not df_vend_master.empty else []
 
         current_rows = get_vendor_rows(chosen_id)
@@ -1085,7 +1062,6 @@ else:
             num_rows="dynamic",
             column_config={
                 "category": st.column_config.SelectboxColumn("Category", options=["Hotel","Car","Bhasmarathi","Poojan","PhotoFrame","Others"]),
-                # ⬇️ use vendor master as dropdown; still allows typing free text if needed
                 "vendor": st.column_config.SelectboxColumn("Vendor", options=[""] + vendor_options),
                 "finalization_cost": st.column_config.NumberColumn("Finalization (₹)", min_value=0, step=100),
                 "adv1_amt": st.column_config.NumberColumn("Adv-1 (₹)", min_value=0, step=100),
@@ -1112,7 +1088,6 @@ else:
                             0
                         )
                 save_vendor_rows(chosen_id, edited_vendors, final_done_new)
-                # After vendor save, refresh live header
                 br2 = profit_breakup(chosen_id)
                 st.success(f"Vendor payments saved. Vendor: ₹{br2['vendor_total']:,} • Splitwise: ₹{br2['splitwise_total']:,} • Driver: ₹{br2['driver_total']:,} • Total: ₹{br2['total_expenses']:,} • Profit: ₹{max(final_cost_for(chosen_id)-br2['total_expenses'],0):,}")
                 st.rerun()
@@ -1147,7 +1122,6 @@ st.divider()
 st.subheader("3) Calendar – Confirmed Packages")
 view = st.radio("View", ["By Booking Date", "By Travel Dates"], horizontal=True)
 
-# Use deduped confirmed set for calendar as well
 confirmed_view = latest_confirmed_unique_by_mobile(df[df["status"] == "confirmed"].copy())
 if confirmed_view.empty:
     st.info("No confirmed packages to show on calendar.")
