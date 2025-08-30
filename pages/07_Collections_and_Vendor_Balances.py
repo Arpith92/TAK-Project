@@ -4,7 +4,7 @@ from __future__ import annotations
 import os, io
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 
 import pandas as pd
 import streamlit as st
@@ -15,7 +15,7 @@ from pymongo import MongoClient
 # Page config
 # =========================================================
 st.set_page_config(page_title="Collections & Vendor Balances", layout="wide")
-st.title("💰 Collections (Customer) & Vendor Balances")
+st.title("💰 Collections (Customer) & Vendor Balances — Confirmed Packages Only")
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -80,10 +80,11 @@ col_expenses    = db["expenses"]
 col_vendorpay   = db["vendor_payments"]          # legacy per-item fields (adv1/adv2/final)
 col_vendors     = db["vendors"]
 
-# NEW lightweight collections (created on first insert)
-col_cust_txn    = db["customer_payments"]        # {itinerary_id, amount, date, mode, utr, note, created_at}
-col_vendor_txn  = db["vendor_payment_txns"]      # {itinerary_id, vendor, category, amount, date, utr, type, note, created_at}
+# NEW lightweight collections
+col_cust_txn    = db["customer_payments"]        # {itinerary_id, amount, date, mode, utr, collected_by, note, term_label, term_percent, created_at}
+col_vendor_txn  = db["vendor_payment_txns"]      # {itinerary_id, vendor, category, amount, date, utr, mode, collected_by, type, note, term_label, term_percent, created_at}
 col_reminders   = db["payment_reminders"]        # {for: 'customer'|'vendor', itinerary_id?, vendor?, due_date, amount, note, status}
+col_terms       = db["payment_terms"]            # {scope:'customer'|'vendor', itinerary_id, vendor?, category?, plan:[{label, percent}], created_at}
 
 # =========================================================
 # Helpers
@@ -138,7 +139,7 @@ def _final_cost_for(iid: str) -> int:
     return max(0, base - disc)
 
 # =========================================================
-# Latest packages only (unique per client_mobile + start_date)
+# Latest packages only (unique per client_mobile + start_date) — then filter to CONFIRMED only
 # =========================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_latest_itineraries_df() -> pd.DataFrame:
@@ -167,9 +168,6 @@ def load_latest_itineraries_df() -> pd.DataFrame:
         "representative","start_date","revision_num","upload_date"
     ])
 
-# =========================================================
-# Customer & Vendor data loads (with transactions)
-# =========================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_confirmed_snapshot() -> pd.DataFrame:
     ups = list(col_updates.find(
@@ -195,7 +193,7 @@ def load_customer_payments() -> pd.DataFrame:
         d["date"] = _d(d.get("date"))
         rows.append(d)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        "itinerary_id","amount","date","mode","utr","note","created_at"
+        "itinerary_id","amount","date","mode","utr","collected_by","term_label","term_percent","note","created_at"
     ])
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -211,7 +209,7 @@ def load_vendor_payment_txns() -> pd.DataFrame:
         d["category"] = (d.get("category") or "").strip()
         rows.append(d)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        "itinerary_id","vendor","category","amount","date","utr","type","note","created_at"
+        "itinerary_id","vendor","category","amount","date","mode","utr","collected_by","type","term_label","term_percent","note","created_at"
     ])
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -255,6 +253,15 @@ def load_vendor_directory() -> pd.DataFrame:
     vs = list(col_vendors.find({}, {"_id":0, "name":1, "city":1, "category":1, "contact":1}))
     return pd.DataFrame(vs) if vs else pd.DataFrame(columns=["name","city","category","contact"])
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_terms(scope: str, itinerary_id: str, vendor: Optional[str]=None, category: Optional[str]=None) -> List[Dict[str, Any]]:
+    q = {"scope": scope, "itinerary_id": itinerary_id}
+    if scope == "vendor":
+        q["vendor"] = vendor or ""
+        q["category"] = (category or "").strip()
+    doc = col_terms.find_one(q, {"_id":0, "plan":1})
+    return (doc or {}).get("plan", [])
+
 # =========================================================
 # Filters
 # =========================================================
@@ -290,25 +297,29 @@ with vl2:
 st.divider()
 
 # =========================================================
-# Data prep (latest-only packages)
+# Data prep (latest-only packages) — then filter to CONFIRMED only
 # =========================================================
 df_latest = load_latest_itineraries_df()  # unique latest packages
-df_conf   = load_confirmed_snapshot()
+df_conf   = load_confirmed_snapshot()     # ONLY confirmed
 df_cpay   = load_customer_payments()
 df_vdir   = load_vendor_directory()
 
-# Merge booking snapshot into latest-only set
+# Keep ONLY confirmed packages (inner-join on itinerary_id)
 if not df_latest.empty and not df_conf.empty:
-    df_cust = df_latest.merge(df_conf, on="itinerary_id", how="left")
+    df_cust = df_latest.merge(df_conf, on="itinerary_id", how="inner")   # <- confirmed only
 else:
-    df_cust = df_latest.copy()
+    df_cust = pd.DataFrame(columns=[
+        "itinerary_id","ach_id","client_name","client_mobile","final_route","total_pax",
+        "representative","start_date","revision_num","upload_date",
+        "booking_date","advance_amount","rep_name"
+    ])
 
-# Compute FINAL cost, RECEIVED (sum of customer txns + legacy advance_amount), PENDING
+# Compute FINAL cost, RECEIVED, PENDING for confirmed-only
 if not df_cust.empty:
     finals = [ _final_cost_for(i) for i in df_cust["itinerary_id"] ]
     df_cust["final_cost"] = pd.to_numeric(pd.Series(finals, index=df_cust.index), errors="coerce").fillna(0).astype(int)
 
-    # Customer received from txns (+ keep legacy advance_amount if present)
+    # Customer received from txns (+ legacy advance_amount)
     if not df_cpay.empty:
         recv = df_cpay.groupby("itinerary_id", as_index=False)["amount"].sum().rename(columns={"amount":"received_txn"})
         df_cust = df_cust.merge(recv, on="itinerary_id", how="left")
@@ -318,7 +329,7 @@ if not df_cust.empty:
     df_cust["received"] = (df_cust["received_txn"].fillna(0) + df_cust["received_legacy"]).astype(int)
     df_cust["pending"]  = (df_cust["final_cost"] - df_cust["received"]).clip(lower=0).astype(int)
 
-    # last payment info (date/UTR)
+    # last payment info
     if not df_cpay.empty:
         last_pay = (
             df_cpay.sort_values(["itinerary_id","date"], ascending=[True, True])
@@ -328,7 +339,7 @@ if not df_cust.empty:
         )
         df_cust = df_cust.merge(last_pay, on="itinerary_id", how="left")
 
-# Ensure all columns we will use exist (avoids KeyError)
+# Ensure columns exist
 df_cust = ensure_cols(df_cust, {
     "ach_id":"", "client_name":"", "client_mobile":"", "final_route":"", "total_pax":0,
     "booking_date": None, "rep_name":"", "final_cost":0, "received":0, "pending":0,
@@ -373,7 +384,13 @@ else:
         ag["source"] = "txns"
         df_v = pd.concat([df_v, ag], ignore_index=True, sort=False)
 
-# Add vendor directory info (FIXED the earlier .rename bug)
+# Restrict df_v to CONFIRMED itineraries only
+if not df_v.empty and not df_cust.empty:
+    confirmed_ids = set(df_cust["itinerary_id"].unique())
+    df_v = df_v[df_v["itinerary_id"].isin(confirmed_ids)].copy()
+
+# Add vendor directory info
+df_vdir = df_vdir if 'df_vdir' in locals() else load_vendor_directory()
 if not df_v.empty and not df_vdir.empty:
     vdir = (
         df_vdir[["name","city","category"]]
@@ -389,9 +406,8 @@ df_v = ensure_cols(df_v, {
 })
 
 # =========================================================
-# Apply filters
+# Apply filters (confirmed packages only)
 # =========================================================
-# Customers: filter by booking_date (if confirmed info available)
 if not df_cust.empty:
     mask_range = df_cust["booking_date"].apply(lambda x: isinstance(x, date) and (start_c <= x <= end_c))
     df_cust = df_cust[mask_range | df_cust["booking_date"].isna()]
@@ -411,7 +427,96 @@ if not df_v.empty and vendor_date_mode == "Any payment in range":
         return isinstance(d, date) and (start_v <= d <= end_v)
     df_v = df_v[df_v.apply(in_range, axis=1)].copy()
 
-st.success("Showing latest revision per package only.")
+st.success("Showing CONFIRMED packages only — latest revision per (client_mobile, start_date).")
+
+# =========================================================
+# 🔧 Payment Terms (Customer & Vendor)
+# =========================================================
+st.subheader("🧩 Define Payment Terms / Plan")
+
+with st.expander("🧑‍💼 Customer Payment Terms", expanded=False):
+    if df_cust.empty:
+        st.info("No confirmed packages.")
+    else:
+        opts = (df_cust["ach_id"].fillna("") + " | " + df_cust["client_name"].fillna("") +
+                " | " + df_cust["booking_date"].astype(str) + " | " + df_cust["itinerary_id"])
+        pick = st.selectbox("Select package", opts.tolist(), key="cust_terms_pkg")
+        sel_iid = pick.split(" | ")[-1] if pick else None
+
+        tmpl = st.selectbox("Template", ["-- Select --", "50-20-30", "25-25-25-25", "100"], key="cust_terms_template")
+        custom = st.text_input("Custom percentages (comma-separated, e.g., 40,30,20,10)", key="cust_terms_custom")
+
+        if st.button("Save Customer Terms", key="save_cust_terms_btn"):
+            if not sel_iid:
+                st.error("Pick a package.")
+            else:
+                if tmpl == "50-20-30":
+                    plan = [{"label": "Break 1", "percent": 50}, {"label": "Break 2", "percent": 20}, {"label": "Break 3", "percent": 30}]
+                elif tmpl == "25-25-25-25":
+                    plan = [{"label": f"Break {i}", "percent": 25} for i in range(1,5)]
+                elif tmpl == "100":
+                    plan = [{"label": "Full", "percent": 100}]
+                else:
+                    # parse custom
+                    try:
+                        parts = [int(p.strip()) for p in custom.split(",") if p.strip() != ""]
+                        if sum(parts) != 100: raise ValueError("Sum must be 100")
+                        plan = [{"label": f"Break {i+1}", "percent": parts[i]} for i in range(len(parts))]
+                    except Exception as e:
+                        st.error(f"Invalid custom plan: {e}")
+                        plan = []
+                if plan:
+                    col_terms.update_one(
+                        {"scope":"customer","itinerary_id": sel_iid},
+                        {"$set": {"scope":"customer","itinerary_id": sel_iid, "plan": plan, "created_at": _now_utc()}},
+                        upsert=True
+                    )
+                    st.success("Customer payment terms saved.")
+
+with st.expander("🏷️ Vendor Payment Terms (per vendor/category)", expanded=False):
+    if df_cust.empty:
+        st.info("No confirmed packages.")
+    else:
+        opts = (df_cust["ach_id"].fillna("") + " | " + df_cust["client_name"].fillna("") +
+                " | " + df_cust["booking_date"].astype(str) + " | " + df_cust["itinerary_id"])
+        pick = st.selectbox("Select package", opts.tolist(), key="vend_terms_pkg")
+        sel_iid = pick.split(" | ")[-1] if pick else None
+
+        vend_names = sorted(col_vendors.distinct("name"))
+        vsel = st.selectbox("Vendor", ["--"] + vend_names, key="vend_terms_vendor")
+        vcat = st.text_input("Category (Hotel/Taxi/Guide...)", key="vend_terms_cat")
+
+        tmpl = st.selectbox("Template", ["-- Select --", "50-50", "40-60", "30-30-40"], key="vend_terms_template")
+        custom = st.text_input("Custom percentages (comma-separated, sum 100)", key="vend_terms_custom")
+
+        if st.button("Save Vendor Terms", key="save_vend_terms_btn"):
+            if not sel_iid or vsel == "--":
+                st.error("Pick package & vendor.")
+            else:
+                if tmpl == "50-50":
+                    plan = [{"label": "Break 1", "percent": 50}, {"label": "Break 2", "percent": 50}]
+                elif tmpl == "40-60":
+                    plan = [{"label": "Break 1", "percent": 40}, {"label": "Break 2", "percent": 60}]
+                elif tmpl == "30-30-40":
+                    plan = [{"label": "Break 1", "percent": 30}, {"label": "Break 2", "percent": 30}, {"label": "Break 3", "percent": 40}]
+                else:
+                    try:
+                        parts = [int(p.strip()) for p in custom.split(",") if p.strip() != ""]
+                        if sum(parts) != 100: raise ValueError("Sum must be 100")
+                        plan = [{"label": f"Break {i+1}", "percent": parts[i]} for i in range(len(parts))]
+                    except Exception as e:
+                        st.error(f"Invalid custom plan: {e}")
+                        plan = []
+                if plan:
+                    col_terms.update_one(
+                        {"scope":"vendor","itinerary_id": sel_iid, "vendor": vsel.strip(), "category": vcat.strip()},
+                        {"$set": {"scope":"vendor","itinerary_id": sel_iid, "vendor": vsel.strip(), "category": vcat.strip(),
+                                  "plan": plan, "created_at": _now_utc()}},
+                        upsert=True
+                    )
+                    st.success("Vendor payment terms saved.")
+
+st.divider()
 
 # =========================================================
 # Entry forms (create vendors / record payments / reminders)
@@ -433,54 +538,92 @@ with st.expander("➕ Create / Update Vendor", expanded=False):
             )
             st.success("Vendor saved/updated.")
 
-with st.expander("🧾 Record Customer Receipt (amount/date/mode/UTR)", expanded=False):
-    if df_latest.empty:
-        st.info("No packages.")
+with st.expander("🧾 Record Customer Receipt (multi-break, mode/UTR/receiver, optional reminder)", expanded=False):
+    if df_cust.empty:
+        st.info("No confirmed packages.")
     else:
-        options = (df_latest["ach_id"].fillna("") + " | " + df_latest["client_name"].fillna("") +
-                   " | " + df_latest["start_date"].astype(str) + " | " + df_latest["itinerary_id"])
+        options = (df_cust["ach_id"].fillna("") + " | " + df_cust["client_name"].fillna("") +
+                   " | " + df_cust["booking_date"].astype(str) + " | " + df_cust["itinerary_id"])
         pick = st.selectbox("Select package", options.tolist(), key="rec_cust_pkg")
         sel_iid = pick.split(" | ")[-1] if pick else None
-        c1,c2,c3,c4 = st.columns([1,1,1,2])
+
+        # Load terms plan (if any)
+        plan = load_terms("customer", sel_iid) if sel_iid else []
+        term_labels = ["--"] + [f'{x["label"]} ({x["percent"]}%)' for x in plan] if plan else ["--"]
+
+        c1,c2,c3,c4 = st.columns([1,1,1,1.5])
         with c1: amt = st.number_input("Amount (₹)", min_value=0, step=500, key="cust_amount_input")
         with c2: dtp = st.date_input("Payment date", value=today, key="cust_payment_date")
         with c3: mode = st.selectbox("Mode", ["UPI","NEFT/RTGS","IMPS","Cash","Card","Other"], key="cust_mode_select")
         with c4: utr = st.text_input("UTR / Ref no.", key="cust_utr_input")
+        collected_by = st.text_input("If Cash: collected by (employee)", key="cust_collected_by")
+        tsel = st.selectbox("Map to term (optional)", term_labels, key="cust_term_select")
         note = st.text_input("Note (optional)", key="cust_note_input")
+        mk_rem = st.checkbox("Also create reminder for remaining balance", value=False, key="cust_make_reminder")
+
         if st.button("Add receipt", key="cust_add_receipt_btn"):
             if not sel_iid:
                 st.error("Pick a package.")
             elif amt <= 0:
                 st.error("Enter a positive amount.")
             else:
+                term_label = None; term_percent = None
+                if plan and tsel != "--":
+                    idx = term_labels.index(tsel) - 1
+                    term_label = plan[idx]["label"]; term_percent = plan[idx]["percent"]
                 col_cust_txn.insert_one({
                     "itinerary_id": sel_iid,
                     "amount": int(amt),
                     "date": datetime(dtp.year, dtp.month, dtp.day),
-                    "mode": mode, "utr": utr.strip(), "note": note.strip(),
+                    "mode": mode, "utr": utr.strip(), "collected_by": (collected_by or "").strip(),
+                    "term_label": term_label, "term_percent": term_percent,
+                    "note": note.strip(),
                     "created_at": _now_utc()
                 })
                 st.success("Customer receipt recorded.")
 
-with st.expander("🏷️ Record Vendor Payment (amount/date/UTR)", expanded=False):
-    if df_latest.empty:
-        st.info("No packages.")
+                # Optional reminder for remaining balance (based on final_cost)
+                if mk_rem:
+                    final_cost = _final_cost_for(sel_iid)
+                    paid_so_far = int((df_cpay[df_cpay["itinerary_id"]==sel_iid]["amount"].sum() if not df_cpay.empty else 0) + amt)
+                    bal = max(final_cost - paid_so_far, 0)
+                    if bal > 0:
+                        col_reminders.insert_one({
+                            "for":"customer","itinerary_id": sel_iid,
+                            "amount": bal, "due_date": datetime(dtp.year, dtp.month, dtp.day) + timedelta(days=3),
+                            "note": f"Auto reminder for remaining balance after receipt ₹{amt:,}",
+                            "status":"open","created_at": _now_utc()
+                        })
+                        st.info(f"Reminder created for remaining ₹{bal:,}.")
+
+with st.expander("🏷️ Record Vendor Payment (multi-break, mode/UTR/receiver, optional reminder)", expanded=False):
+    if df_cust.empty:
+        st.info("No confirmed packages.")
     else:
-        options = (df_latest["ach_id"].fillna("") + " | " + df_latest["client_name"].fillna("") +
-                   " | " + df_latest["start_date"].astype(str) + " | " + df_latest["itinerary_id"])
+        options = (df_cust["ach_id"].fillna("") + " | " + df_cust["client_name"].fillna("") +
+                   " | " + df_cust["booking_date"].astype(str) + " | " + df_cust["itinerary_id"])
         pick = st.selectbox("Select package", options.tolist(), key="rec_vendor_pkg")
         sel_iid = pick.split(" | ")[-1] if pick else None
 
         vend_names = sorted(col_vendors.distinct("name"))
         c1,c2,c3,c4 = st.columns([1.3,1,1,1.2])
         with c1: vsel = st.selectbox("Vendor*", ["--"] + vend_names, key="vendor_select_input")
-        with c2: cat  = st.text_input("Category (e.g., Hotel/Taxi/Guide)", key="vendor_cat_input")
+        with c2: cat  = st.text_input("Category (Hotel/Taxi/Guide)", key="vendor_cat_input")
         with c3: vtype = st.selectbox("Type", ["adv","final","other"], key="vendor_type_select")
         with c4: vdate = st.date_input("Paid on", value=today, key="vendor_paid_on_input")
-        r1, r2 = st.columns([1,2])
+        r1, r2, r3 = st.columns([1,1.4,1.4])
         with r1: vamt = st.number_input("Amount (₹)", min_value=0, step=500, key="vendor_amount_input")
-        with r2: vutr = st.text_input("UTR / Ref no.", key="vendor_utr_input")
+        with r2: vmode = st.selectbox("Mode", ["UPI","NEFT/RTGS","IMPS","Cash","Card","Other"], key="vendor_mode_select")
+        with r3: vutr = st.text_input("UTR / Ref no.", key="vendor_utr_input")
+        vrecv = st.text_input("If Cash: paid to (person)", key="vendor_paid_to_input")
         vnote = st.text_input("Note", key="vendor_note_input")
+
+        # Load vendor-specific terms (if any)
+        vplan = load_terms("vendor", sel_iid, vsel if vsel!="--" else None, cat) if sel_iid else []
+        vterm_labels = ["--"] + [f'{x["label"]} ({x["percent"]}%)' for x in vplan] if vplan else ["--"]
+        vtsel = st.selectbox("Map to term (optional)", vterm_labels, key="vendor_term_select")
+        mk_rem_v = st.checkbox("Also create reminder for remaining vendor balance", value=False, key="vend_make_reminder")
+
         if st.button("Add vendor payment", key="vendor_add_payment_btn"):
             if not sel_iid:
                 st.error("Pick a package.")
@@ -489,67 +632,56 @@ with st.expander("🏷️ Record Vendor Payment (amount/date/UTR)", expanded=Fal
             elif vamt <= 0:
                 st.error("Enter a positive amount.")
             else:
+                term_label = None; term_percent = None
+                if vplan and vtsel != "--":
+                    idx = vterm_labels.index(vtsel) - 1
+                    term_label = vplan[idx]["label"]; term_percent = vplan[idx]["percent"]
+
                 col_vendor_txn.insert_one({
                     "itinerary_id": sel_iid,
                     "vendor": vsel.strip(),
                     "category": cat.strip(),
                     "amount": int(vamt),
                     "date": datetime(vdate.year, vdate.month, vdate.day),
+                    "mode": vmode,
                     "utr": vutr.strip(),
+                    "collected_by": (vrecv or "").strip(),  # who received, if cash
                     "type": vtype,
+                    "term_label": term_label, "term_percent": term_percent,
                     "note": vnote.strip(),
                     "created_at": _now_utc()
                 })
                 st.success("Vendor payment recorded.")
 
-with st.expander("⏰ Payment Reminder (customer/vendor)", expanded=False):
-    who = st.selectbox("Reminder for", ["customer","vendor"], key="rem_for_select")
-    amount = st.number_input("Amount (₹)", min_value=0, step=500, key="rem_amount_input")
-    due = st.date_input("Due date", value=today + timedelta(days=3), key="rem_due_date_input")
-    note = st.text_input("Note", key="rem_note_input")
-    sel_iid = None; vsel = None
-    if who == "customer":
-        if df_latest.empty:
-            st.info("No packages.")
-        else:
-            options = (df_latest["ach_id"].fillna("") + " | " + df_latest["client_name"].fillna("") +
-                       " | " + df_latest["start_date"].astype(str) + " | " + df_latest["itinerary_id"])
-            pick = st.selectbox("Select package", options.tolist(), key="rem_pkg_select")
-            sel_iid = pick.split(" | ")[-1] if pick else None
-    else:
-        vend_names = sorted(col_vendors.distinct("name"))
-        vsel = st.selectbox("Select vendor", ["--"] + vend_names, key="rem_vendor_select")
-    if st.button("Create reminder", key="rem_create_btn"):
-        payload = {
-            "for": who, "amount": int(amount),
-            "due_date": datetime(due.year, due.month, due.day),
-            "note": note.strip(), "status": "open",
-            "created_at": _now_utc()
-        }
-        if who == "customer":
-            if not sel_iid:
-                st.error("Pick a package.")
-            else:
-                payload["itinerary_id"] = sel_iid
-                col_reminders.insert_one(payload)
-                st.success("Customer reminder created.")
-        else:
-            if vsel == "--":
-                st.error("Pick a vendor.")
-            else:
-                payload["vendor"] = vsel
-                col_reminders.insert_one(payload)
-                st.success("Vendor reminder created.")
+                # Optional reminder for remaining vendor balance (based on finalization_cost if known)
+                if mk_rem_v:
+                    # find finalization cost reference from legacy lines (if available)
+                    ref = df_vlegacy
+                    fc = 0
+                    if not ref.empty:
+                        mask = (ref["itinerary_id"]==sel_iid)&(ref["vendor"]==vsel)&(ref["category"]==cat)
+                        if ref[mask].shape[0]>0:
+                            fc = int(pd.to_numeric(ref[mask]["finalization_cost"], errors="coerce").fillna(0).max())
+                    paid_so_far = int((df_vtxn[(df_vtxn["itinerary_id"]==sel_iid)&(df_vtxn["vendor"]==vsel)&(df_vtxn["category"]==cat)]["amount"].sum() if not df_vtxn.empty else 0) + vamt)
+                    bal = max(fc - paid_so_far, 0)
+                    if bal > 0:
+                        col_reminders.insert_one({
+                            "for":"vendor","itinerary_id": sel_iid, "vendor": vsel.strip(),
+                            "amount": bal, "due_date": datetime(vdate.year, vdate.month, vdate.day) + timedelta(days=3),
+                            "note": f"Auto reminder for remaining vendor balance after pay ₹{vamt:,}",
+                            "status":"open","created_at": _now_utc()
+                        })
+                        st.info(f"Reminder created for remaining vendor balance ₹{bal:,}.")
 
 st.divider()
 
 # =========================================================
-# ⚖️ Customer collections — overview
+# ⚖️ Customer collections — overview (Confirmed Only)
 # =========================================================
-st.subheader("👤 Customer Collections (Latest Packages Only)")
+st.subheader("👤 Customer Collections — Confirmed Only")
 
 if df_cust.empty:
-    st.info("No packages found.")
+    st.info("No confirmed packages found.")
 else:
     total_final   = int(pd.to_numeric(df_cust["final_cost"], errors="coerce").fillna(0).sum())
     total_received= int(pd.to_numeric(df_cust["received"], errors="coerce").fillna(0).sum())
@@ -560,7 +692,7 @@ else:
     k2.metric("Received (₹)", f"{total_received:,}")
     k3.metric("Pending (₹)", f"{total_pending:,}")
 
-    # Table per customer (ensure columns exist)
+    # Table per customer
     cust_cols = ["ach_id","client_name","client_mobile","final_route","total_pax",
                  "booking_date","rep_name","final_cost","received","pending","last_pay_date","last_utr","itinerary_id"]
     df_cust = ensure_cols(df_cust, {c: "" for c in cust_cols})
@@ -572,22 +704,24 @@ else:
     }).sort_values(["Booked on","Customer"], na_position="last")
     st.dataframe(view_c.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
 
-    # Date-wise (booking_date)
-    by_day = (
-        df_cust[~df_cust["booking_date"].isna()]
-        .groupby("booking_date", as_index=False)
-        .agg(Final=("final_cost","sum"), Received=("received","sum"), Pending=("pending","sum"))
-        .sort_values("booking_date")
-    )
-    st.markdown("**Date-wise summary**")
-    st.dataframe(by_day.rename(columns={"booking_date":"Date"}), use_container_width=True, hide_index=True)
+    # Date-wise customer receipts
+    if not df_cpay.empty:
+        cust_by_day = (
+            df_cpay[df_cpay["itinerary_id"].isin(df_cust["itinerary_id"])]
+            .groupby("date", as_index=False)
+            .agg(Received=("amount","sum"))
+            .rename(columns={"date":"Date"})
+            .sort_values("Date")
+        )
+        st.markdown("**Date-wise customer receipts**")
+        st.dataframe(cust_by_day, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================================================
-# 🧾 Vendor dues — overview
+# 🧾 Vendor dues — overview (Confirmed Only) + Date-wise vendor payments
 # =========================================================
-st.subheader("🏷️ Vendor Dues / Payments (Latest Packages)")
+st.subheader("🏷️ Vendor Dues / Payments — Confirmed Only")
 
 if df_v.empty:
     st.info("No vendor payment records match the current filter.")
@@ -639,12 +773,24 @@ else:
         }).sort_values(["Vendor","Booked on","Customer"], na_position="last")
         st.dataframe(line, use_container_width=True, hide_index=True)
 
+    # Date-wise vendor payments (from txns)
+    if not df_vtxn.empty:
+        vend_by_day = (
+            df_vtxn[df_vtxn["itinerary_id"].isin(df_cust["itinerary_id"])]
+            .groupby("date", as_index=False)
+            .agg(Paid=("amount","sum"))
+            .rename(columns={"date":"Date"})
+            .sort_values("Date")
+        )
+        st.markdown("**Date-wise vendor payments**")
+        st.dataframe(vend_by_day, use_container_width=True, hide_index=True)
+
 st.divider()
 
 # =========================================================
-# 🧭 Per-package explorer (customer + vendor txns with UTRs)
+# 🧭 Per-package explorer (plan vs actual, UTRs, cash collector)
 # =========================================================
-st.subheader("🧭 Per-package explorer")
+st.subheader("🧭 Per-package explorer (Plan vs Actual)")
 
 left, right = st.columns([2, 1])
 with right:
@@ -678,38 +824,77 @@ with left:
             "Last UTR": row.get("last_utr",""),
         })
 
-        st.caption("Customer payment transactions")
+        # Customer PLAN vs ACTUAL
+        st.caption("Customer payment plan (if defined)")
+        cplan = load_terms("customer", sel_id)
+        if cplan:
+            final_cost = _final_cost_for(sel_id)
+            plan_df = pd.DataFrame([{
+                "Break": p["label"], "Percent": p["percent"], "Planned (₹)": int(round(final_cost * p["percent"]/100.0))
+            } for p in cplan])
+            paid_map = {}
+            txc = df_cpay[df_cpay["itinerary_id"] == sel_id].copy() if not df_cpay.empty else pd.DataFrame()
+            if not txc.empty:
+                for _, r in txc.iterrows():
+                    key = (r.get("term_label") or "").strip()
+                    paid_map[key] = paid_map.get(key, 0) + int(r.get("amount", 0))
+            plan_df["Paid (₹)"] = plan_df["Break"].map(paid_map).fillna(0).astype(int)
+            plan_df["Balance (₹)"] = (plan_df["Planned (₹)"] - plan_df["Paid (₹)"]).clip(lower=0)
+            st.dataframe(plan_df, use_container_width=True, hide_index=True)
+        else:
+            st.write("No customer payment plan defined.")
+
+        st.caption("Customer payment transactions (with mode/UTR/cash collector)")
         txc = df_cpay[df_cpay["itinerary_id"] == sel_id].copy() if not df_cpay.empty else pd.DataFrame()
         if not txc.empty:
-            txc = txc[["date","amount","mode","utr","note"]].rename(columns={
-                "date":"Date","amount":"Amount (₹)","mode":"Mode","utr":"UTR / Ref","note":"Note"
+            txc = txc[["date","amount","mode","utr","collected_by","term_label","term_percent","note"]].rename(columns={
+                "date":"Date","amount":"Amount (₹)","mode":"Mode","utr":"UTR / Ref","collected_by":"Collected by",
+                "term_label":"Term","term_percent":"%"
             }).sort_values("Date")
             st.dataframe(txc, use_container_width=True, hide_index=True)
         else:
             st.write("No customer receipts recorded yet.")
 
-        # vendor lines for this package (legacy + txns)
-        detail = df_v[df_v["itinerary_id"] == sel_id].copy() if not df_v.empty else pd.DataFrame()
-        if not detail.empty:
-            st.caption("Vendor payments summary (this package)")
-            show = detail[[
-                "vendor","category","city","finalization_cost","paid_total","balance","last_pay_date","last_utr","source"
-            ]].rename(columns={
-                "vendor":"Vendor","category":"Category","city":"City",
-                "finalization_cost":"Finalized (₹)","paid_total":"Paid total (₹)",
-                "balance":"Balance (₹)","last_pay_date":"Last pay date","last_utr":"Last UTR","source":"From"
-            }).sort_values(["Vendor","Category"])
-            st.dataframe(show, use_container_width=True, hide_index=True)
-        else:
-            st.caption("No vendor payment records yet for this package.")
+        # Vendor PLAN vs ACTUAL for each vendor/category
+        st.caption("Vendor payment plan (if defined) & summary")
+        if not df_vtxn.empty:
+            vend_pairs = df_vtxn[df_vtxn["itinerary_id"] == sel_id][["vendor","category"]].drop_duplicates()
+            if vend_pairs.empty:
+                st.write("No vendor payments yet.")
+            else:
+                for _, vp in vend_pairs.iterrows():
+                    vname, vcat = vp["vendor"], vp["category"]
+                    st.write(f"**{vname} — {vcat}**")
+                    vplan = load_terms("vendor", sel_id, vname, vcat)
+                    if vplan:
+                        # try to fetch finalization cost baseline
+                        ref = df_vlegacy
+                        fc = 0
+                        if not ref.empty:
+                            mask = (ref["itinerary_id"]==sel_id)&(ref["vendor"]==vname)&(ref["category"]==vcat)
+                            if ref[mask].shape[0]>0:
+                                fc = int(pd.to_numeric(ref[mask]["finalization_cost"], errors="coerce").fillna(0).max())
+                        plan_df = pd.DataFrame([{
+                            "Break": p["label"], "Percent": p["percent"], "Planned (₹)": int(round(fc * p["percent"]/100.0))
+                        } for p in vplan])
+                        paid_map = {}
+                        sub = df_vtxn[(df_vtxn["itinerary_id"]==sel_id)&(df_vtxn["vendor"]==vname)&(df_vtxn["category"]==vcat)]
+                        for _, r in sub.iterrows():
+                            key = (r.get("term_label") or "").strip()
+                            paid_map[key] = paid_map.get(key, 0) + int(r.get("amount", 0))
+                        plan_df["Paid (₹)"] = plan_df["Break"].map(paid_map).fillna(0).astype(int)
+                        plan_df["Balance (₹)"] = (plan_df["Planned (₹)"] - plan_df["Paid (₹)"]).clip(lower=0)
+                        st.dataframe(plan_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.write("No vendor payment plan defined for this vendor/category.")
 
-        # raw vendor transactions (new collection) for this package
+        st.caption("Individual vendor transactions (mode/UTR/receiver)")
         txv = df_vtxn[df_vtxn["itinerary_id"] == sel_id].copy() if not df_vtxn.empty else pd.DataFrame()
         if not txv.empty:
-            st.caption("Individual vendor transactions (with UTR)")
-            txv = txv[["vendor","category","type","date","amount","utr","note"]].rename(columns={
+            txv = txv[["vendor","category","type","date","amount","mode","utr","collected_by","term_label","term_percent","note"]].rename(columns={
                 "vendor":"Vendor","category":"Category","type":"Type","date":"Date",
-                "amount":"Amount (₹)","utr":"UTR / Ref","note":"Note"
+                "amount":"Amount (₹)","mode":"Mode","utr":"UTR / Ref","collected_by":"Paid to",
+                "term_label":"Term","term_percent":"%"
             }).sort_values(["Vendor","Date"])
             st.dataframe(txv, use_container_width=True, hide_index=True)
 
@@ -756,7 +941,7 @@ else:
 st.divider()
 
 # =========================================================
-# ⬇️ Excel export (multi-sheet)
+# ⬇️ Excel export (multi-sheet, confirmed only)
 # =========================================================
 st.subheader("⬇️ Export Excel (current filters)")
 def export_excel_bytes() -> bytes:
@@ -823,16 +1008,18 @@ def export_excel_bytes() -> bytes:
             pd.DataFrame(columns=["No data"]).to_excel(xw, index=False, sheet_name="Vendor_Summary")
             pd.DataFrame(columns=["No data"]).to_excel(xw, index=False, sheet_name="Vendor_LineItems")
 
-        # Raw transactions for reference
+        # Raw transactions for reference (include mode/UTR/collector & term mapping)
         if not df_cpay.empty:
-            df_cpay.rename(columns={"date":"Date","amount":"Amount","mode":"Mode","utr":"UTR","note":"Note"}, inplace=False).to_excel(
+            df_cpay.rename(columns={"date":"Date","amount":"Amount","mode":"Mode","utr":"UTR","collected_by":"Collected_by",
+                                    "term_label":"Term","term_percent":"Percent","note":"Note"}, inplace=False).to_excel(
                 xw, index=False, sheet_name="Customer_Txns"
             )
         else:
             pd.DataFrame(columns=["No customer txns"]).to_excel(xw, index=False, sheet_name="Customer_Txns")
 
         if not df_vtxn.empty:
-            df_vtxn.rename(columns={"date":"Date","amount":"Amount","utr":"UTR","type":"Type","note":"Note"}, inplace=False).to_excel(
+            df_vtxn.rename(columns={"date":"Date","amount":"Amount","mode":"Mode","utr":"UTR","collected_by":"Paid_to",
+                                    "type":"Type","term_label":"Term","term_percent":"Percent","note":"Note"}, inplace=False).to_excel(
                 xw, index=False, sheet_name="Vendor_Txns"
             )
         else:
