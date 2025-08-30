@@ -974,6 +974,30 @@ else:
                 key=f"rev_{picked_client_mobile}_{sel_start}",
             )
 
+    # Loader button – must be INSIDE the block where sel_start/revs/sel_rev_idx exist
+            if st.button("Load this revision",
+             use_container_width=False,
+             key=f"load_{picked_client_mobile}_{sel_start}_{sel_rev_idx}"):
+            chosen = revs[sel_rev_idx]
+            st.session_state[_SEARCH_DOC_KEY] = chosen
+
+           # stable fingerprint for the hydrated revision
+            loaded_key = (
+            f"{chosen.get('client_mobile','')}:"
+            f"{str(chosen.get('start_date',''))}:"
+            f"rev{int(chosen.get('revision_num',0) or 0)}"
+    )
+
+    # reset the editor model to EXACT saved rows of this revision
+    rows_df = pd.DataFrame(chosen.get("rows") or [])
+    st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+
+    # force the data_editor widget to redraw with fresh data
+    st.session_state.pop(_EDITOR_KEY, None)
+    st.session_state["_loaded_key"] = loaded_key
+    st.rerun()
+
+
             # --- inside the block where you build `revs`, `rev_labels`, and `sel_rev_idx` ---
     if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
             # persist the chosen doc
@@ -994,6 +1018,20 @@ else:
     st.session_state["_loaded_key"] = loaded_key
 
     st.rerun()
+
+            # Rehydrate editor if selection changed or first load
+if loaded_doc:
+    current_key = (
+        f"{loaded_doc.get('client_mobile','')}:"
+        f"{str(loaded_doc.get('start_date',''))}:"
+        f"rev{int(loaded_doc.get('revision_num',0) or 0)}"
+    )
+    if st.session_state.get("_loaded_key") != current_key:
+        rows_df = pd.DataFrame(loaded_doc.get("rows") or [])
+        st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+        st.session_state.pop(_EDITOR_KEY, None)  # pick up new data
+        st.session_state["_loaded_key"] = current_key
+
 
 # --- immediately after you set `loaded_doc = st.session_state.get(_SEARCH_DOC_KEY)` ---
 if loaded_doc:
