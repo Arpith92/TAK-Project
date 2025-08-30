@@ -1,10 +1,10 @@
 # pages/01_Dashboard.py
 from __future__ import annotations
 
-import io, csv, os, re
+import io, csv, os
 from datetime import datetime, date, timedelta, time as dtime
 from zoneinfo import ZoneInfo
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict
 
 import pandas as pd
 import streamlit as st
@@ -14,17 +14,14 @@ from pymongo import MongoClient
 # =========================
 # Guard & Page config
 # =========================
-# If user not set, default to Unknown (prevents KeyError on direct page open)
 st.session_state.setdefault("user", "Unknown")
-
-# Restrict certain users (as in your original)
+# (Keep your restriction consistent with other pages)
 if st.session_state.get("user") in ("Teena", "Kuldeep"):
     st.stop()
 
 st.set_page_config(page_title="TAK Dashboard", layout="wide")
 st.markdown("## 📊 TAK – Operations Dashboard")
 
-# Optional pageview audit (kept as-is; safely import)
 try:
     from tak_audit import audit_pageview
     audit_pageview(st.session_state.get("user", "Unknown"), "01_Dashboard")
@@ -39,7 +36,7 @@ except Exception:
     CALENDAR_AVAILABLE = False
 
 # =========================
-# Admin gate (consistent with app)
+# Admin gate
 # =========================
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
@@ -55,7 +52,7 @@ def require_admin():
 require_admin()
 
 # =========================
-# Mongo (fast, cached)
+# Mongo
 # =========================
 IST = ZoneInfo("Asia/Kolkata")
 CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
@@ -94,10 +91,13 @@ def get_db():
     return client["TAK_DB"]
 
 db = get_db()
-col_it = db["itineraries"]
-col_up = db["package_updates"]
-col_ex = db["expenses"]
-col_fu = db["followups"]
+col_it   = db["itineraries"]
+col_up   = db["package_updates"]
+col_ex   = db["expenses"]              # legacy/fallback for final_cost only
+col_fu   = db["followups"]
+col_sw   = db["expense_splitwise"]     # NEW: Splitwise-style expenses
+col_drv  = db["driver_attendance"]     # NEW: Driver attendance & overtime
+col_vpay = db["vendor_payments"]       # NEW: Vendor payments
 
 # =========================
 # Helpers
@@ -152,14 +152,13 @@ def _ensure_cols(df: pd.DataFrame, cols: list[str], fill=None) -> pd.DataFrame:
 # =========================
 @st.cache_data(ttl=120, show_spinner=False)
 def load_itineraries_df() -> pd.DataFrame:
-    # Pull essential fields incl. new schema columns (from updated app.py)
     docs = list(col_it.find(
         {},
         {
             "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
             "representative": 1, "final_route": 1, "total_pax": 1,
             "upload_date": 1, "start_date": 1, "end_date": 1,
-            # new totals
+            # new totals from main app (if present)
             "package_total": 1, "package_after_referral": 1,
             "actual_total": 1, "profit_total": 1,
             "referred_by": 1, "referral_discount_pct": 1,
@@ -206,7 +205,6 @@ def load_itineraries_df() -> pd.DataFrame:
         rec["created_utc"] = _created_utc_from_oid(rec["itinerary_id"])
         rec["created_ist"] = _fmt_ist(rec["created_utc"])
 
-        # Back-compat for dashboard calculations:
         # Prefer new fields from app.py, fallback to legacy if needed
         pkg_total = _to_int(rec.get("package_total", rec.get("package_cost", 0)))
         pkg_after = _to_int(rec.get("package_after_referral", 0))
@@ -220,14 +218,9 @@ def load_itineraries_df() -> pd.DataFrame:
         rec["package_cost"] = pkg_total
         rec["discount"]     = max(pkg_total - pkg_after, 0)
 
-        # Expose profit/actual if needed elsewhere
-        rec["actual_total"] = _to_int(rec.get("actual_total", 0))
-        rec["profit_total"] = _to_int(rec.get("profit_total", 0))
-
         out.append(rec)
 
     df = pd.DataFrame(out)
-    # Ensure optional columns exist
     df = _ensure_cols(df, ["ach_id", "representative"], "")
     return df
 
@@ -252,6 +245,7 @@ def load_updates_df() -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_expenses_df() -> pd.DataFrame:
+    # Only used to prefer an explicit final_package_cost if present
     docs = list(col_ex.find(
         {},
         {"_id": 0, "itinerary_id": 1, "base_package_cost": 1, "discount": 1,
@@ -263,18 +257,62 @@ def load_expenses_df() -> pd.DataFrame:
         r["itinerary_id"] = str(r.get("itinerary_id"))
         r["base_package_cost"] = _to_int(r.get("base_package_cost", 0))
         r["discount"] = _to_int(r.get("discount", 0))
-        # prefer explicit final; fallback to legacy package_cost
         r["final_package_cost"] = _to_int(r.get("final_package_cost", r.get("package_cost", 0)))
         r["total_expenses"] = _to_int(r.get("total_expenses", 0))
         r["profit"] = _to_int(r.get("profit", 0))
     return pd.DataFrame(docs)
 
 @st.cache_data(ttl=120, show_spinner=False)
-def load_followups_for_ids(iids: list[str]) -> pd.DataFrame:
-    if not iids:
-        return pd.DataFrame()
-    docs = list(col_fu.find({"itinerary_id": {"$in": iids}}, {"_id": 0}))
+def load_splitwise_df() -> pd.DataFrame:
+    docs = list(col_sw.find({"kind": "expense"},
+                            {"_id":0, "itinerary_id":1, "amount":1}))
+    if not docs:
+        return pd.DataFrame(columns=["itinerary_id","amount"])
+    for r in docs:
+        r["itinerary_id"] = str(r.get("itinerary_id",""))
+        r["amount"] = _to_int(r.get("amount", 0))
     return pd.DataFrame(docs)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_driver_df() -> pd.DataFrame:
+    """
+    Expected fields per record (per itinerary_id, can be multiple rows):
+    - salary_month (driver base salary for the month)
+    - month_days    (days in that month; default 30)
+    - days          (days allocated to this itinerary)
+    - overtime      (₹ overtime allocated to this itinerary)
+    """
+    docs = list(col_drv.find({}, {"_id":0,"itinerary_id":1,"salary_month":1,"month_days":1,"days":1,"overtime":1}))
+    if not docs:
+        return pd.DataFrame(columns=["itinerary_id","salary_month","month_days","days","overtime"])
+    for r in docs:
+        r["itinerary_id"]  = str(r.get("itinerary_id",""))
+        r["salary_month"]  = _to_int(r.get("salary_month", 0))
+        r["month_days"]    = max(_to_int(r.get("month_days", 30)), 1)
+        r["days"]          = _to_int(r.get("days", 0))
+        r["overtime"]      = _to_int(r.get("overtime", 0))
+    return pd.DataFrame(docs)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_vendorpay_df() -> pd.DataFrame:
+    """
+    Flatten vendor_payments:
+      - Sum per itinerary_id:
+          if finalization_cost > 0 -> use finalization_cost
+          else -> (adv1_amt + adv2_amt + final_amt)
+    """
+    docs = list(col_vpay.find({}, {"_id":0, "itinerary_id":1, "items":1}))
+    rows = []
+    for d in docs:
+        iid = str(d.get("itinerary_id",""))
+        for it in d.get("items", []) or []:
+            finalization = _to_int(it.get("finalization_cost", 0))
+            if finalization > 0:
+                used = finalization
+            else:
+                used = _to_int(it.get("adv1_amt",0)) + _to_int(it.get("adv2_amt",0)) + _to_int(it.get("final_amt",0))
+            rows.append({"itinerary_id": iid, "vendor_used": used})
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["itinerary_id","vendor_used"])
 
 # =========================
 # Build master DF (vectorized)
@@ -284,30 +322,60 @@ if df_it.empty:
     st.info("No data yet. Create packages in the main app.")
     st.stop()
 
-df_up = load_updates_df()
-df_ex = load_expenses_df()
+df_up    = load_updates_df()
+df_ex    = load_expenses_df()
+df_sw    = load_splitwise_df()
+df_drv   = load_driver_df()
+df_vpay  = load_vendorpay_df()
 
+# Merge itinerary + updates
 df_all = df_it.merge(df_up, on="itinerary_id", how="left")
-df_all = df_all.merge(df_ex, on="itinerary_id", how="left", suffixes=("", "_ex"))
-
-# defaults & types
 df_all["status"] = df_all["status"].fillna("pending")
-for c in ("total_expenses","profit","incentive","advance_amount","total_pax"):
-    if c in df_all.columns:
-        df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
 
-# compute final cost efficiently (no row-wise DB hits)
-final_cost = pd.to_numeric(df_all.get("final_package_cost", 0), errors="coerce").fillna(0).astype(int)
-
-# If not present in expenses, compute from itinerary base & discount
-fallback_need = final_cost.eq(0)
-if fallback_need.any():
+# Prefer explicit final from expenses when available; else compute from itinerary
+final_from_ex = pd.to_numeric(df_ex.get("final_package_cost", pd.Series([], dtype=int)), errors="coerce")
+ex_map = df_ex.set_index("itinerary_id")["final_package_cost"].to_dict() if not df_ex.empty else {}
+df_all["final_cost"] = df_all["itinerary_id"].map(ex_map).fillna(0).astype(int)
+need_comp = df_all["final_cost"].eq(0)
+if need_comp.any():
     base = pd.to_numeric(df_all.get("package_cost", 0), errors="coerce").fillna(0).astype(int)
     disc = pd.to_numeric(df_all.get("discount", 0), errors="coerce").fillna(0).astype(int)
     comp = (base - disc).clip(lower=0)
-    final_cost = final_cost.mask(final_cost.eq(0), comp)
+    df_all["final_cost"] = df_all["final_cost"].mask(need_comp, comp).astype(int)
 
-df_all["final_cost"] = final_cost.astype(int)
+# ----- Splitwise sum per itinerary
+sw_sum = df_sw.groupby("itinerary_id", as_index=False)["amount"].sum().rename(columns={"amount":"sw_expenses"})
+df_all = df_all.merge(sw_sum, on="itinerary_id", how="left")
+df_all["sw_expenses"] = df_all["sw_expenses"].fillna(0).astype(int)
+
+# ----- Driver cost per itinerary
+drv_costs = []
+if not df_drv.empty:
+    for iid, grp in df_drv.groupby("itinerary_id"):
+        # allocate using the rule: (salary_month / month_days) * days + overtime
+        # If multiple rows for a month/driver, sum their allocations
+        alloc = 0.0
+        # can be multiple rows (different months/drivers) – add each allocation
+        for _, r in grp.iterrows():
+            day_rate = (r["salary_month"] / max(r["month_days"], 1))
+            alloc += (day_rate * r["days"]) + r["overtime"]
+        drv_costs.append({"itinerary_id": iid, "driver_cost": int(round(alloc))})
+df_drv_cost = pd.DataFrame(drv_costs) if drv_costs else pd.DataFrame(columns=["itinerary_id","driver_cost"])
+df_all = df_all.merge(df_drv_cost, on="itinerary_id", how="left")
+df_all["driver_cost"] = df_all["driver_cost"].fillna(0).astype(int)
+
+# ----- Vendor total per itinerary
+vendor_sum = df_vpay.groupby("itinerary_id", as_index=False)["vendor_used"].sum().rename(columns={"vendor_used":"vendor_total"})
+df_all = df_all.merge(vendor_sum, on="itinerary_id", how="left")
+df_all["vendor_total"] = df_all["vendor_total"].fillna(0).astype(int)
+
+# ----- Profit (NEW canonical)
+df_all["profit_calc"] = (
+    df_all["final_cost"].fillna(0).astype(int)
+    - df_all["vendor_total"]
+    - df_all["sw_expenses"]
+    - df_all["driver_cost"]
+)
 
 # =========================
 # Top bar: Global search
@@ -356,7 +424,6 @@ if rep_filter:
     df = df[df["representative"].isin(rep_filter)]
 if (search_txt or "").strip():
     s = search_txt.strip().lower()
-    # Ensure columns exist for robust search
     df = _ensure_cols(df, ["ach_id","client_name","client_mobile"], "")
     df = df[
         df["client_name"].astype(str).str.lower().str.contains(s, na=False) |
@@ -386,14 +453,17 @@ k2.metric("🟡 Enquiries", int(is_enquiry.sum()))
 k3.metric("🟠 Under discussion", int(is_udisc.sum()))
 k4.metric("🔵 Follow-up", int(is_followup.sum()))
 k5.metric("🔴 Cancelled", int(is_cancel.sum()))
-# expenses pending among confirmed
-have_cost_ids = set(df.loc[df["total_expenses"] > 0, "itinerary_id"])
-conf_ids = set(df.loc[is_confirmed, "itinerary_id"])
-k6.metric("🧾 Expense entry pending", int(max(len(conf_ids) - len(conf_ids & have_cost_ids), 0)))
+
+# Expense entry pending among confirmed:
+# If there's no vendor_total & sw_expenses & driver_cost for a confirmed itinerary, count as pending
+need_cost = df[is_confirmed].copy()
+need_cost["has_any_cost"] = (need_cost["vendor_total"]>0) | (need_cost["sw_expenses"]>0) | (need_cost["driver_cost"]>0)
+pending_cost = int((~need_cost["has_any_cost"]).sum()) if not need_cost.empty else 0
+k6.metric("🧾 Cost entry pending", pending_cost)
 st.divider()
 
 # =========================
-# Status Split (simple)
+# Status Split
 # =========================
 st.subheader("Status mix")
 mix = pd.DataFrame({
@@ -427,21 +497,32 @@ st.line_chart(trend.set_index("date"))
 st.divider()
 
 # =========================
-# 💰 Financials — Structured
+# 💰 Financials — Structured (uses NEW profit_calc)
 # =========================
 st.subheader("💰 Revenue snapshot (confirmed in range)")
 
 conf_in_range = df[df["status"].eq("confirmed")].copy()
 
-# Totals for the selected range
 sum_final = int(conf_in_range["final_cost"].sum())
-sum_exp   = int(conf_in_range["total_expenses"].sum())
-sum_prof  = int(conf_in_range["profit"].sum())
+sum_vendor = int(conf_in_range["vendor_total"].sum())
+sum_sw     = int(conf_in_range["sw_expenses"].sum())
+sum_drv    = int(conf_in_range["driver_cost"].sum())
+sum_prof   = int(conf_in_range["profit_calc"].sum())
+
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Final package (₹) — in range", f"{sum_final:,}")
+c2.metric("Vendor totals (₹)", f"{sum_vendor:,}")
+c3.metric("Splitwise (₹)", f"{sum_sw:,}")
+c4.metric("Driver cost (₹)", f"{sum_drv:,}")
+c5.metric("Profit (₹)", f"{sum_prof:,}")
 
 # Totals (till date) — confirmed any time
 df_confirmed_all = df_all[df_all["status"].eq("confirmed")].copy()
 total_final_all = int(df_confirmed_all["final_cost"].sum())
-total_profit_all = int(df_confirmed_all["profit"].sum())
+total_profit_all = int(df_confirmed_all["profit_calc"].sum())
+c6,c7 = st.columns(2)
+c6.metric("Total Final (₹) — till date", f"{total_final_all:,}")
+c7.metric("Total Profit (₹) — till date", f"{total_profit_all:,}")
 
 # Totals (this month) — booking_date in this month
 mstart, mend = month_bounds(date.today())
@@ -450,35 +531,29 @@ df_confirmed_month = df_all[
     df_all["booking_date"].apply(_norm_date).between(mstart, mend)
 ].copy()
 total_final_month = int(df_confirmed_month["final_cost"].sum())
-total_profit_month = int(df_confirmed_month["profit"].sum())
-
-c1,c2,c3 = st.columns(3)
-c1.metric("Final package (₹) — in range", f"{sum_final:,}")
-c2.metric("Expenses (₹) — in range", f"{sum_exp:,}")
-c3.metric("Profit (₹) — in range", f"{sum_prof:,}")
-
-c4,c5 = st.columns(2)
-c4.metric("Total Final (₹) — till date", f"{total_final_all:,}")
-c5.metric("Total Profit (₹) — till date", f"{total_profit_all:,}")
-
-c6,c7 = st.columns(2)
-c6.metric("Total Final (₹) — this month", f"{total_final_month:,}")
-c7.metric("Total Profit (₹) — this month", f"{total_profit_month:,}")
+total_profit_month = int(df_confirmed_month["profit_calc"].sum())
+c8,c9 = st.columns(2)
+c8.metric("Total Final (₹) — this month", f"{total_final_month:,}")
+c9.metric("Total Profit (₹) — this month", f"{total_profit_month:,}")
 
 # Table: who confirmed & at what final cost (confirmed in current filter range)
 if not conf_in_range.empty:
     df_tmp = _ensure_cols(conf_in_range.copy(), ["ach_id","rep_name"], "")
-    view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date","final_cost","profit","itinerary_id"]
+    view_cols = ["ach_id","client_name","client_mobile","rep_name","booking_date",
+                 "final_cost","vendor_total","sw_expenses","driver_cost","profit_calc","itinerary_id"]
     table_fin = df_tmp[view_cols].copy()
     table_fin.rename(columns={
         "rep_name": "Confirmed by",
-        "final_cost": "Final package (₹)"
+        "final_cost": "Final (₹)",
+        "vendor_total": "Vendor (₹)",
+        "sw_expenses": "Splitwise (₹)",
+        "driver_cost": "Driver (₹)",
+        "profit_calc": "Profit (₹)"
     }, inplace=True)
-    table_fin.sort_values(["booking_date","Final package (₹)"], ascending=[True, False], inplace=True)
+    table_fin.sort_values(["booking_date","Final (₹)"], ascending=[True, False], inplace=True)
     st.dataframe(table_fin.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
 else:
     st.caption("No confirmed packages in the selected range.")
-
 st.divider()
 
 # =========================
@@ -574,9 +649,11 @@ if sel_id:
             "Booking date": row.get("booking_date",""),
             "Advance (₹)": row.get("advance_amount",0),
             "Incentive (₹)": row.get("incentive",0),
-            "Final package (₹)": row.get("final_cost",0),
-            "Expenses (₹)": row.get("total_expenses",0),
-            "Profit (₹)": row.get("profit",0),
+            "Final (₹)": row.get("final_cost",0),
+            "Vendor (₹)": row.get("vendor_total",0),
+            "Splitwise (₹)": row.get("sw_expenses",0),
+            "Driver (₹)": row.get("driver_cost",0),
+            "Profit (₹)": row.get("profit_calc",0),
             "Rep (credited)": row.get("rep_name",""),
         })
 
@@ -585,6 +662,10 @@ if sel_id:
         it_doc = df_all[df_all["itinerary_id"]==iid].copy()
         up_docs = pd.DataFrame(list(col_up.find({"itinerary_id": str(iid)}, {"_id":0})))
         fu_docs = pd.DataFrame(list(col_fu.find({"itinerary_id": str(iid)}, {"_id":0})))
+        # include vendor + driver + splitwise raw rows for that itinerary
+        vp = list(col_vpay.find({"itinerary_id": str(iid)}, {"_id":0}))
+        drv = list(col_drv.find({"itinerary_id": str(iid)}, {"_id":0}))
+        sw  = list(col_sw.find({"itinerary_id": str(iid)}, {"_id":0}))
         ex_doc = pd.DataFrame(list(col_ex.find({"itinerary_id": str(iid)}, {"_id":0})))
         buf = io.BytesIO()
         try:
@@ -592,7 +673,10 @@ if sel_id:
                 it_doc.to_excel(xw, index=False, sheet_name="Itinerary")
                 if not up_docs.empty: up_docs.to_excel(xw, index=False, sheet_name="Updates")
                 if not fu_docs.empty: fu_docs.to_excel(xw, index=False, sheet_name="Followups")
-                if not ex_doc.empty: ex_doc.to_excel(xw, index=False, sheet_name="Expenses")
+                if ex_doc is not None and not ex_doc.empty: ex_doc.to_excel(xw, index=False, sheet_name="ExpensesLegacy")
+                if vp: pd.DataFrame(vp).to_excel(xw, index=False, sheet_name="VendorPayments")
+                if drv: pd.DataFrame(drv).to_excel(xw, index=False, sheet_name="DriverAlloc")
+                if sw:  pd.DataFrame(sw).to_excel(xw, index=False, sheet_name="Splitwise")
             return buf.getvalue()
         except Exception:
             try:
@@ -620,7 +704,7 @@ st.divider()
 # =========================
 st.subheader("📞 Follow-ups by package")
 iids = df["itinerary_id"].astype(str).unique().tolist()
-df_fu_bulk = load_followups_for_ids(iids)
+df_fu_bulk = pd.DataFrame(list(col_fu.find({"itinerary_id": {"$in": iids}}, {"_id": 0})))
 if df_fu_bulk.empty:
     st.caption("No follow-ups for the current filters.")
 else:
@@ -747,22 +831,34 @@ def export_filtered_bytes() -> bytes | None:
     fu_rng = list(col_fu.find({"created_at": {"$gte": start_dt, "$lte": end_dt}}, {"_id":0}))
     df_fu_rng = pd.DataFrame(fu_rng)
     iids = df["itinerary_id"].astype(str).unique().tolist()
+
     raw_up = pd.DataFrame(list(col_up.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
     raw_ex = pd.DataFrame(list(col_ex.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
+    raw_sw = pd.DataFrame(list(col_sw.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
+    raw_drv= pd.DataFrame(list(col_drv.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
+    raw_vp = pd.DataFrame(list(col_vpay.find({"itinerary_id": {"$in": iids}}, {"_id":0})))
+
     buf = io.BytesIO()
     try:
         with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-            df.to_excel(xw, index=False, sheet_name="Filtered_Packages")
+            # Include the key computed columns in the filtered set
+            cols = ["itinerary_id","ach_id","client_name","client_mobile","representative",
+                    "upload_date","booking_date","start_date","end_date",
+                    "final_route","total_pax",
+                    "final_cost","vendor_total","sw_expenses","driver_cost","profit_calc","status"]
+            exp_df = _ensure_cols(df.copy(), cols, None)[cols]
+            exp_df.to_excel(xw, index=False, sheet_name="Filtered_Packages")
             if not df_fu_rng.empty: df_fu_rng.to_excel(xw, index=False, sheet_name="Followups_in_range")
             if not raw_up.empty:   raw_up.to_excel(xw, index=False, sheet_name="Updates_raw")
             if not raw_ex.empty:   raw_ex.to_excel(xw, index=False, sheet_name="Expenses_raw")
+            if not raw_vp.empty:   raw_vp.to_excel(xw, index=False, sheet_name="VendorPayments_raw")
+            if not raw_sw.empty:   raw_sw.to_excel(xw, index=False, sheet_name="Splitwise_raw")
+            if not raw_drv.empty:  raw_drv.to_excel(xw, index=False, sheet_name="Driver_raw")
         return buf.getvalue()
     except Exception:
+        # CSV fallback
         out = io.StringIO()
-        writer = csv.writer(out)
-        writer.writerow(df.columns.tolist())
-        for _, row in df.iterrows():
-            writer.writerow([row.get(c, "") for c in df.columns])
+        exp_df.to_csv(out, index=False)
         return out.getvalue().encode("utf-8")
 
 st.download_button(
