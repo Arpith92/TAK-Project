@@ -89,8 +89,6 @@ OVERTIME_ADD = 300  # for each counted unit: overnight_outstation, overnight_cli
 
 ORG_LOGO = ".streamlit/logo.png"
 ORG_SIGN = ".streamlit/signature.png"
-FONT_REG = ".streamlit/DejaVuSans.ttf"
-FONT_BLD = ".streamlit/DejaVuSans-Bold.ttf"
 
 def _to_int(x, default=0) -> int:
     try:
@@ -170,6 +168,9 @@ def load_confirmed_customers() -> pd.DataFrame:
     if not it_rows:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile"])
     df = pd.DataFrame(it_rows).drop_duplicates(subset=["itinerary_id"]).reset_index(drop=True)
+    # normalize strings
+    for c in ("ach_id","client_name","client_mobile","itinerary_id"):
+        df[c] = df[c].fillna("").astype(str)
     return df
 
 # ==============================
@@ -325,33 +326,8 @@ def calc_salary(df_att: pd.DataFrame, df_adv: pd.DataFrame, month_start: date, m
     }
 
 # ==============================
-# PDF Slip (ASCII-safe)
+# PDF Slip (ASCII-safe, invoice-style, table kept inside border)
 # ==============================
-def inr_ascii(n: int | float) -> str:
-    try:
-        return f"Rs {int(round(float(n))):,}"
-    except Exception:
-        return f"Rs {n}"
-
-def _ascii(s: str) -> str:
-    if s is None:
-        return ""
-    return (str(s)
-            .replace("₹", "Rs ")
-            .replace("–", "-").replace("—", "-")
-            .replace("•", "-")
-            .replace("“", '"').replace("”", '"')
-            .replace("’", "'").replace("‘", "'")
-            .replace("™", "(TM)")
-            )
-
-# ===== Invoice-style header/footer for Salary PDF =====
-# (Drop-in replacement for your current PDF classes + build_salary_pdf)
-
-# --- Org / assets (same style as Invoice) ---
-ORG_LOGO = ".streamlit/logo.png"        # ensure file exists
-ORG_SIGN = ".streamlit/signature.png"   # ensure file exists
-
 def _ascii_downgrade(s: str) -> str:
     if s is None:
         return ""
@@ -362,13 +338,7 @@ def _ascii_downgrade(s: str) -> str:
         .replace("™", "(TM)")
     )
 
-def inr_ascii(n) -> str:
-    try:
-        return f"Rs {int(round(float(n))):,}"
-    except Exception:
-        return f"Rs {n}"
-
-# These lines match your Invoice page "line 1/2/3" layout
+# Org header/lines like your invoice
 ORG = {
     "title": "TravelaajKal® – Achala Holidays Pvt. Ltd.",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
@@ -380,58 +350,52 @@ class SalaryPDF(FPDF):
     def __init__(self):
         super().__init__(format="A4")
         self.set_auto_page_break(auto=True, margin=18)
-        # metadata
         self.set_title("Driver Salary Statement")
         self.set_author("Achala Holidays Pvt. Ltd.")
         self.set_creator("TravelaajKal – Streamlit")
         self.set_subject("Salary Statement")
 
     def _txt(self, s: str) -> str:
-        # Always ASCII-normalize so Helvetica never throws
         return _ascii_downgrade(s)
 
-    # ---------- Header (exact invoice look) ----------
     def header(self):
         # outer border
         self.set_draw_color(150,150,150)
         self.rect(8, 8, 194, 281)
 
-        # logo (left)
+        # logo
         if ORG_LOGO and os.path.exists(ORG_LOGO):
             try:
                 self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception:
                 pass
 
-        # center title + lines
+        # center text
         self.set_xy(50, 12)
         self.set_font("Helvetica", "B", 14)
         self.cell(0, 7, self._txt(ORG["title"]), align="C", ln=1)
-
         self.set_font("Helvetica", "", 10)
         self.cell(0, 6, self._txt(ORG["line1"]), align="C", ln=1)
         self.cell(0, 6, self._txt(ORG["line2"]), align="C", ln=1)
-
         self.ln(2)
         self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y())
         self.ln(4)
 
-    # ---------- Footer (same as invoice) ----------
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "", 8)
         self.cell(0, 5, self._txt(ORG["footer_rights"]), ln=1, align="C")
 
-def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc: dict) -> bytes:
-    """
-    calc keys expected (from your calc_salary):
-      days_in_month, leave_days, ot_units, leave_ded, overtime_amt, advances, net
-    Base salary is shown as 12000 (constant) to reflect policy.
-    """
-    BASE_SALARY = 12000  # display-line (policy)
+def inr_ascii(n) -> str:
+    try:
+        return f"Rs {int(round(float(n))):,}"
+    except Exception:
+        return f"Rs {n}"
 
-    # Map with safe defaults
+def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc: dict) -> bytes:
+    BASE_SALARY_LINE = 12000  # display policy
+
     days_in_month = int(calc.get("days_in_month", 0))
     leave_days    = int(calc.get("leave_days", 0))
     leave_ded     = int(calc.get("leave_ded", 0) or calc.get("leave_deduction", 0))
@@ -445,15 +409,15 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
 
     left = 16
     th = 8
-    col1_w, col2_w, col3_w = 90, 40, 60  # Particulars | Days/Units | Amount
-
-    # Statement header text (under the invoice-style header)
+    # Keep table inside right border (right edge at x=202). With left=16, max width=186.
+    col1_w, col2_w, col3_w = 88, 40, 58  # sum = 186 (fits)
+    # Statement header
     pdf.set_font("Helvetica", "", 11)
     pdf.set_x(left)
     pdf.cell(0, 6, pdf._txt(f"{month_label} (Salary Statement: {period_label})"), ln=1)
     pdf.ln(1)
 
-    # Employee line
+    # Employee
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_x(left)
     pdf.cell(0, 6, pdf._txt(f"EMP NAME:  {emp_name}"), ln=1)
@@ -462,9 +426,9 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     # Table header
     pdf.set_font("Helvetica", "B", 10)
     y = pdf.get_y()
-    pdf.rect(left, y, col1_w, th)                 # Particulars
-    pdf.rect(left + col1_w, y, col2_w, th)        # Days/Units
-    pdf.rect(left + col1_w + col2_w, y, col3_w, th)  # Amount
+    pdf.rect(left, y, col1_w, th)
+    pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.rect(left + col1_w + col2_w, y, col3_w, th)
     pdf.text(left + 2, y + th - 2, pdf._txt("Particulars"))
     pdf.text(left + col1_w + 2, y + th - 2, pdf._txt("Days/Units"))
     pdf.text(left + col1_w + col2_w + 2, y + th - 2, pdf._txt("Amount"))
@@ -482,9 +446,8 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
         pdf.set_xy(left + col1_w + col2_w, y); pdf.cell(col3_w - 2, th, pdf._txt(inr_ascii(amount)), align="R")
         pdf.ln(th)
 
-    # Rows
     row("Total Days in Month", days_in_month, 0)
-    row("Salary", "-", BASE_SALARY)
+    row("Salary", "-", BASE_SALARY_LINE)
     row("Total Leave", leave_days, leave_ded)
     row("Over-time", ot_units, ot_amount)
     row("Advances (deduct)", "-", advances)
@@ -504,21 +467,20 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, pdf._txt("Note: This is a computer-generated statement."))
 
-    # Signature block (RIGHT, same placement pattern as invoice)
+    # Signature
     pdf.ln(6)
-    sig_w = 50  # signature image width
-    sig_x = pdf.w - 16 - sig_w  # right margin 16
+    sig_w = 50
+    sig_x = pdf.w - 16 - sig_w
     sig_y = pdf.get_y()
     if ORG_SIGN and os.path.exists(ORG_SIGN):
         try:
             pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
         except Exception:
             pass
-    pdf.set_xy(sig_x, sig_y + 18)  # label just under the image
+    pdf.set_xy(sig_x, sig_y + 18)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(sig_w, 6, pdf._txt("Authorised Signatory"), ln=1, align="C")
 
-    # Return bytes (ASCII-safe)
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
@@ -554,31 +516,56 @@ with tab_driver:
         bhasmarathi = st.checkbox("Bhasmarathi duty", value=False, key="drv_bhas")
         bhas_client = st.text_input("Bhasmarathi client", value="", key="drv_bhas_name", disabled=(not bhasmarathi))
 
-    # --- Customer link & per-customer cost allocation
+    # --- Customer link & per-customer cost allocation (Unique search UX)
     st.markdown("### Link to Customer (optional) & Cost Allocation")
     confirmed = load_confirmed_customers()
-    choices = []
-    if confirmed.empty:
-        st.caption("No confirmed packages found.")
-    else:
-        choices = (confirmed["ach_id"].fillna("") + " | " +
-                   confirmed["client_name"].fillna("") + " | " +
-                   confirmed["itinerary_id"]).tolist()
-    choices = [""] + choices + ["➕ Add new / other"]
-    pick = st.selectbox("Select confirmed customer (ACH | Name | IID)", choices, index=0, key="drv_cust_pick")
 
     cust_itinerary_id = ""
     cust_ach_id = ""
     cust_name = ""
     cust_is_custom = False
 
-    if pick == "➕ Add new / other":
-        cust_is_custom = True
-        cust_name = st.text_input("Enter customer name (free text)", key="drv_cust_custom")
-    elif pick:
-        parts = [p.strip() for p in pick.split(" | ")]
-        if len(parts) == 3:
-            cust_ach_id, cust_name, cust_itinerary_id = parts[0], parts[1], parts[2]
+    if confirmed.empty:
+        st.caption("No confirmed packages found.")
+        first_pick = st.selectbox("Select customer", ["", "➕ Add new / other"], index=0, key="drv_cust_first")
+        if first_pick == "➕ Add new / other":
+            cust_is_custom = True
+            cust_name = st.text_input("Enter customer name (free text)", key="drv_cust_custom")
+    else:
+        # Build unique client list by (name + mobile); show ONE row per client
+        confirmed["key"] = (
+            confirmed["client_name"].str.strip().str.lower() + " | " +
+            confirmed["client_mobile"].str.strip()
+        )
+        unique_clients = confirmed.drop_duplicates(subset=["key"]).copy()
+        # Label: Name – Mobile (ACH optional)
+        unique_clients["label"] = (
+            unique_clients["client_name"].str.strip() + " — " +
+            unique_clients["client_mobile"].str.strip()
+        )
+        # First picker: unique client
+        unique_opts = ["", "➕ Add new / other"] + unique_clients["label"].tolist()
+        first_pick = st.selectbox("Search / pick client (unique)", unique_opts, index=0, key="drv_cust_first")
+
+        if first_pick == "➕ Add new / other":
+            cust_is_custom = True
+            cust_name = st.text_input("Enter customer name (free text)", key="drv_cust_custom")
+        elif first_pick:
+            # Get the client key back
+            name_part, mobile_part = [p.strip() for p in first_pick.split(" — ", 1)]
+            client_key = name_part.lower() + " | " + mobile_part
+            # All itineraries for this client
+            all_for_client = confirmed[confirmed["key"] == client_key].copy()
+            cust_name = name_part
+            cust_ach_id = (all_for_client["ach_id"].iloc[0] if not all_for_client.empty else "")
+            # Second picker: choose specific itinerary (shows ACH | IID); default to first
+            all_for_client["iid_label"] = all_for_client["ach_id"].fillna("") + " | " + all_for_client["itinerary_id"]
+            iid_options = all_for_client["iid_label"].tolist()
+            sel_iid_lbl = st.selectbox("Select package (ACH | IID)", iid_options, index=0, key="drv_cust_iid_pick")
+            try:
+                cust_ach_id, cust_itinerary_id = [p.strip() for p in sel_iid_lbl.split("|", 1)]
+            except Exception:
+                cust_itinerary_id = all_for_client["itinerary_id"].iloc[0]
 
     ac1, ac2, ac3 = st.columns(3)
     with ac1:
@@ -701,7 +688,7 @@ if is_admin and tab_admin is not None:
         with st.expander("Advances (month)", expanded=False):
             st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
 
-        # Export customer allocations for expense pipeline
+        # Export customer allocations for expense posting
         st.markdown("#### Export customer-wise allocations (for expense posting)")
         alloc = df_att_m.copy()
         if not alloc.empty:
@@ -739,7 +726,7 @@ if is_admin and tab_admin is not None:
             st.session_state["drv_pdf"] = _as_bytes(pdf_bytes)
             st.success("PDF ready below.")
 
-        # Preview + Download (same pattern as your invoice page)
+        # Preview + Download
         if "drv_pdf" in st.session_state and st.session_state["drv_pdf"]:
             slip_b = _as_bytes(st.session_state["drv_pdf"])
 
