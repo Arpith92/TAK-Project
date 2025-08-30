@@ -975,20 +975,20 @@ else:
             )
 
             # --- inside the block where you build `revs`, `rev_labels`, and `sel_rev_idx` ---
-if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
-    # persist the chosen doc
-    chosen = revs[sel_rev_idx]
-    st.session_state[_SEARCH_DOC_KEY] = chosen
+    if st.button("Load this revision", use_container_width=False, key=f"load_{picked_client_mobile}_{sel_start}"):
+            # persist the chosen doc
+            chosen = revs[sel_rev_idx]
+            st.session_state[_SEARCH_DOC_KEY] = chosen
 
-    # build a stable fingerprint for the loaded revision
-    loaded_key = f"{chosen.get('client_mobile','')}:{str(chosen.get('start_date',''))}:rev{int(chosen.get('revision_num',0) or 0)}"
+            # build a stable fingerprint for the loaded revision
+            loaded_key = f"{chosen.get('client_mobile','')}:{str(chosen.get('start_date',''))}:rev{int(chosen.get('revision_num',0) or 0)}"
 
-    # RESET the data editor model to exactly what was saved in this revision
-    rows_df = pd.DataFrame(chosen.get("rows") or [])
-    st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
+            # RESET the data editor model to exactly what was saved in this revision
+            rows_df = pd.DataFrame(chosen.get("rows") or [])
+            st.session_state[_MODEL_KEY] = _normalize_to_model(rows_df)
 
-    # clear the editor widget state so Streamlit redraws with the fresh model
-    st.session_state.pop(_EDITOR_KEY, None)
+            # clear the editor widget state so Streamlit redraws with the fresh model
+            st.session_state.pop(_EDITOR_KEY, None)
 
     # remember which revision is currently hydrated in the editor
     st.session_state["_loaded_key"] = loaded_key
