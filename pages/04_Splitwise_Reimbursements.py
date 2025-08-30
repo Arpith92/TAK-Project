@@ -143,9 +143,12 @@ if not user:
     st.stop()
 is_admin = user in ADMIN_USERS
 
-# Audit
-from tak_audit import audit_pageview
-audit_pageview(st.session_state.get("user", "Unknown"), "04_Splitwise_Reimbursements")
+# Audit (safe import)
+try:
+    from tak_audit import audit_pageview
+    audit_pageview(st.session_state.get("user", "Unknown"), "04_Splitwise_Reimbursements")
+except Exception:
+    pass
 
 # =========================
 # Helpers (parity)
@@ -171,11 +174,19 @@ def all_employees() -> List[str]:
     return [e for e in sorted(load_users().keys()) if e]
 
 def pack_label(r: pd.Series) -> str:
-    return f"{(r.get('ach_id') or '').strip()} | {(r.get('client_name') or '').strip()} | {(r.get('client_mobile') or '').strip()} | {(r.get('itinerary_id') or '').strip()}"
+    # Coerce to string before strip to avoid AttributeError on non-strings
+    ach   = str(r.get("ach_id", "") or "").strip()
+    name  = str(r.get("client_name", "") or "").strip()
+    mob   = str(r.get("client_mobile", "") or "").strip()
+    iid   = str(r.get("itinerary_id", "") or "").strip()
+    return f"{ach} | {name} | {mob} | {iid}"
 
 def pack_options(df: pd.DataFrame) -> List[str]:
-    if df.empty:
+    if df is None or df.empty:
         return []
+    for c in ["ach_id","client_name","client_mobile","itinerary_id"]:
+        if c not in df.columns:
+            df[c] = ""
     return [pack_label(r) for _, r in df.iterrows()]
 
 def entry_to_row(d: dict) -> dict:
@@ -201,7 +212,6 @@ def entry_to_row(d: dict) -> dict:
 # =========================
 @st.cache_data(ttl=IST_TTL, show_spinner=False)
 def _confirmed_ids() -> List[str]:
-    """Return list of itinerary_ids that have status=confirmed."""
     cur = col_updates.find({"status": "confirmed"}, {"_id": 0, "itinerary_id": 1})
     return [str(d.get("itinerary_id")) for d in cur if d.get("itinerary_id")]
 
@@ -242,7 +252,6 @@ def confirmed_itineraries_df() -> pd.DataFrame:
         r.pop("_id", None)
         all_docs.append(r)
     for r in docs_by_str:
-        # ensure itinerary_id present
         r["itinerary_id"] = str(r.get("itinerary_id") or r.get("_id"))
         r["start_date"] = norm_date(r.get("start_date"))
         r["end_date"]   = norm_date(r.get("end_date"))
@@ -252,9 +261,7 @@ def confirmed_itineraries_df() -> pd.DataFrame:
     if not all_docs:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
 
-    # (Optional) make unique by itinerary_id (just in case)
-    df = pd.DataFrame(all_docs).drop_duplicates(subset=["itinerary_id"])
-    return df
+    return pd.DataFrame(all_docs).drop_duplicates(subset=["itinerary_id"])
 
 def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
                   employee: Optional[str] = None, itinerary_id: Optional[str] = None) -> pd.DataFrame:
@@ -339,28 +346,43 @@ with st.container():
             end = start
     with f3:
         emp_options = all_employees()
-        # default to current user selected, but allow multi
         default_emp = [user] if user in emp_options else []
         emp_filter = st.multiselect("Employees", options=emp_options, default=default_emp)
     with f4:
         search_txt = st.text_input("Search confirmed client/mobile/ACH", placeholder="Type to filter package list…")
 
-def choose_package(label="Select confirmed package", key="pkg_pick"):
+def choose_package(label="Select confirmed package", key="pkg_pick") -> Tuple[Optional[str], str, str]:
     options = df_confirmed.copy()
+    if options is None or options.empty:
+        st.info("No confirmed packages found.")
+        return None, "", ""
+
     if search_txt.strip():
         s = search_txt.strip().lower()
+        for c in ["client_name","client_mobile","ach_id"]:
+            if c not in options.columns:
+                options[c] = ""
         options = options[
-            options["client_name"].astype(str).str.lower().str.contains(s) |
-            options["client_mobile"].astype(str).str.lower().str.contains(s) |
-            options["ach_id"].astype(str).str.lower().str.contains(s)
+            options["client_name"].astype(str).str.lower().str.contains(s, na=False) |
+            options["client_mobile"].astype(str).str.lower().str.contains(s, na=False) |
+            options["ach_id"].astype(str).str.lower().str.contains(s, na=False)
         ]
+
     opt_labels = pack_options(options)
-    sel = st.selectbox(label, opt_labels, index=0 if opt_labels else None, key=key)
+    if not opt_labels:
+        st.info("No matching confirmed packages.")
+        return None, "", ""
+
+    sel = st.selectbox(label, opt_labels, index=0, key=key)
     if not sel:
         return None, "", ""
-    rid = sel.split(" | ")[-1]
-    row = options[options["itinerary_id"]==rid].iloc[0]
-    return rid, row.get("client_name",""), row.get("ach_id","")
+
+    rid = sel.split(" | ")[-1].strip()
+    row = options[options["itinerary_id"].astype(str).str.strip() == rid]
+    if row.empty:
+        return rid, "", ""
+    row = row.iloc[0]
+    return rid, str(row.get("client_name","") or ""), str(row.get("ach_id","") or "")
 
 # =========================
 # KPIs for current user
@@ -400,7 +422,6 @@ with st.form("add_expense_form", clear_on_submit=False):
             subheader = st.text_input("Subheader (detail)", placeholder="e.g., Airport transfer / Room upgrade")
         notes = st.text_area("Notes (optional)", placeholder="Anything helpful for accounting")
     else:
-        # Other expense flow (no package)
         c1, c2, c3 = st.columns([2,1,1])
         with c1:
             cust_name = st.text_input("Beneficiary / Customer (free text)", placeholder="e.g., Office supplies / Misc")
