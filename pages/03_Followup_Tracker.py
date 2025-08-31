@@ -54,7 +54,7 @@ st.title("📞 Follow-up Tracker")
 # =========================
 # Incentive policy constants
 # =========================
-INCENTIVE_START_DATE: date = date(2025, 8, 1)  # Incentives only for bookings on/after 2025-08-01
+INCENTIVE_START_DATE: date = date(2025, 8, 1)
 
 def _eligible_for_incentive(booking_dt: Optional[datetime]) -> bool:
     if not booking_dt:
@@ -496,18 +496,12 @@ def fetch_user_months_with_totals(rep_name: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, month_end: date) -> pd.DataFrame:
-    """
-    Return unique confirmed incentive rows for a rep within month,
-    unique on (Mobile, Client name, Travel date[start_date]) keeping the
-    **last confirmed revision** only for each key.
-    """
     start_window = max(month_start, INCENTIVE_START_DATE)
     if start_window > month_end:
         return pd.DataFrame(columns=[
             "ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)","itinerary_id"
         ])
 
-    # 1) All confirmed updates in month for this rep
     q = {
         "status": "confirmed",
         "rep_name": rep_name,
@@ -522,7 +516,6 @@ def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, m
     df_u = pd.DataFrame(rows)
     df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
 
-    # 2) Bring in itinerary info incl. start_date (Travel date) and revision_num
     its = list(col_itineraries.find(
         {"_id": {"$in": [ObjectId(x) for x in df_u["itinerary_id"].unique() if ObjectId.is_valid(x)]}},
         {"_id":1, "ach_id":1, "client_name":1, "client_mobile":1, "final_route":1, "start_date":1, "revision_num":1}
@@ -537,18 +530,13 @@ def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, m
         "_rev": int(i.get("revision_num", 1) or 1)
     } for i in its])
 
-    # 3) Merge + de-duplicate on (Mobile, Client, Travel date) keeping highest revision
     df = df_u.merge(df_i, on="itinerary_id", how="left")
     df["Booking date"] = pd.to_datetime(df["booking_date"], errors="coerce").dt.date
     df["Incentive (₹)"] = df["incentive"].apply(_to_int)
     df["Final package (₹)"] = df["final_package_cost"].apply(_to_int)
 
-    # Guard: if some rows miss Travel date, keep them but group key uses None safely
     df["_key"] = df[["Mobile","Client","Travel date"]].astype(object).agg(tuple, axis=1)
-
-    # Sort so that the first in each group is the *latest revision*, and as tie-breaker latest booking date
     df = df.sort_values(["_key", "_rev", "Booking date"], ascending=[True, False, False])
-
     unique_df = df.groupby("_key", as_index=False).first()
 
     view = unique_df[
@@ -917,7 +905,7 @@ with tabs[0]:
             st.rerun()
 
 # =========================
-# TAB 2: All packages (unique latest only)
+# TAB 2: All packages
 # =========================
 with tabs[1]:
     if is_admin:
@@ -1012,7 +1000,26 @@ with tabs[2]:
             month_start = date(yr, mo, 1)
             month_end = (pd.Timestamp(month_start) + pd.offsets.MonthEnd(1)).date()
 
-            details = fetch_user_customer_incentives_for_month(rep_for_view, month_start, month_end)
+            # --- Incentives edit state -------------------------------------------------
+            # Keep a working copy while the user edits, so typing doesn't wipe the grid.
+            same_scope = (
+                st.session_state.get("inc_edit_mode", False)
+                and st.session_state.get("inc_rep") == rep_for_view
+                and st.session_state.get("inc_month") == chosen_month
+                and isinstance(st.session_state.get("inc_details_df"), pd.DataFrame)
+            )
+
+            if not same_scope:
+                # Fresh scope: fetch and seed the working copy
+                details_fresh = fetch_user_customer_incentives_for_month(rep_for_view, month_start, month_end)
+                st.session_state["inc_details_df"] = details_fresh.copy()
+                st.session_state["inc_edit_mode"] = True
+                st.session_state["inc_rep"] = rep_for_view
+                st.session_state["inc_month"] = chosen_month
+
+            details = st.session_state["inc_details_df"]
+            # --------------------------------------------------------------------------
+
             if details.empty:
                 st.info("No incentives for the selected month.")
             else:
@@ -1034,8 +1041,11 @@ with tabs[2]:
                     st.markdown("### ✏️ Admin: Edit booking dates for this month")
                     edit_df = details[["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)"]].copy()
                     edit_df.rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}, inplace=True)
+
+                    # Live editor writes back to session working copy every rerun
                     edited = st.data_editor(
                         edit_df,
+                        key="inc_editor",
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -1044,13 +1054,24 @@ with tabs[2]:
                         },
                         disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)"]
                     )
+                    # Persist edits to working copy so reruns don't reset the grid
+                    edited_for_state = edited.rename(columns={"booking_date":"Booking date","final_package_cost":"Final package (₹)"})
+                    st.session_state["inc_details_df"] = details.drop(columns=["Booking date","Final package (₹)"]).merge(
+                        edited_for_state[["itinerary_id","Booking date","Final package (₹)"]],
+                        on="itinerary_id", how="left"
+                    )
+
                     if st.button("💾 Save booking date changes"):
                         try:
+                            # Build rows for DB update from the edited table
                             rows = edited.to_dict(orient="records")
                             updated = batch_update_booking_dates(rows, actor_user=user)
+                            # Clear caches and reset edit mode so we reload fresh view
                             fetch_user_months_with_totals.clear()
                             fetch_user_customer_incentives_for_month.clear()
                             fetch_updates_joined.clear()
+                            st.session_state["inc_edit_mode"] = False
+                            st.session_state.pop("inc_details_df", None)
                             st.success(f"Updated {updated} record(s). Incentives recalculated.")
                             st.session_state["force_refresh"] = True
                             st.rerun()
@@ -1059,7 +1080,7 @@ with tabs[2]:
         _clear_force_refresh()
 
 # =========================
-# TAB 4: 🧾 Revisions Trail (ALL revisions, read-only)
+# TAB 4: 🧾 Revisions Trail
 # =========================
 with tabs[3]:
     st.markdown("#### View all revisions (read-only) — does not affect counts or incentives")
