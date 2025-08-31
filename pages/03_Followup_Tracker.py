@@ -481,8 +481,10 @@ def fetch_updates_joined() -> pd.DataFrame:
         nam = str(row.get("client_name") or "").strip()
         return f"A:{ach}|N:{nam}"
     df["_client_key"] = df.apply(_ck, axis=1)
-    df["_booking"] = pd.to_datetime(df.get("booking_date"))
-    df["_created"] = pd.to_datetime(df.get("_created_utc"))
+    _bk = pd.to_datetime(df.get("booking_date"), errors="coerce", utc=True)
+    _cr = pd.to_datetime(df.get("_created_utc"), errors="coerce", utc=True)
+    df["_booking"] = _bk.dt.tz_convert(None)
+    df["_created"] = _cr.dt.tz_convert(None)
     return df
 
 def latest_per_client(df: pd.DataFrame, user_filter: Optional[str]=None) -> pd.DataFrame:
