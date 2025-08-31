@@ -54,7 +54,7 @@ st.title("📞 Follow-up Tracker")
 # =========================
 # Incentive policy constants
 # =========================
-INCENTIVE_START_DATE: date = date(2025, 8, 1)
+INCENTIVE_START_DATE: date = date(2025, 8, 1)  # Incentives only for bookings on/after 2025-08-01
 
 def _eligible_for_incentive(booking_dt: Optional[datetime]) -> bool:
     if not booking_dt:
@@ -496,6 +496,10 @@ def fetch_user_months_with_totals(rep_name: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, month_end: date) -> pd.DataFrame:
+    """
+    Unique confirmed rows for a rep within month,
+    unique on (Mobile, Client, Travel date) keeping the last confirmed revision.
+    """
     start_window = max(month_start, INCENTIVE_START_DATE)
     if start_window > month_end:
         return pd.DataFrame(columns=[
@@ -730,7 +734,7 @@ with st.sidebar:
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages", "💰 Incentives", "🧾 Revisions Trail"])
 
 # =========================
-# TAB 1: Follow-ups
+# TAB 1: Follow-ups (unique by client)
 # =========================
 with tabs[0]:
     if _defer_guard("Follow-ups list"):
@@ -905,7 +909,7 @@ with tabs[0]:
             st.rerun()
 
 # =========================
-# TAB 2: All packages
+# TAB 2: All packages (unique latest only)
 # =========================
 with tabs[1]:
     if is_admin:
@@ -1000,78 +1004,94 @@ with tabs[2]:
             month_start = date(yr, mo, 1)
             month_end = (pd.Timestamp(month_start) + pd.offsets.MonthEnd(1)).date()
 
-            # --- Incentives edit state -------------------------------------------------
-            # Keep a working copy while the user edits, so typing doesn't wipe the grid.
+            # --- Incentives edit state (stable while typing) --------------------------
             same_scope = (
                 st.session_state.get("inc_edit_mode", False)
                 and st.session_state.get("inc_rep") == rep_for_view
                 and st.session_state.get("inc_month") == chosen_month
-                and isinstance(st.session_state.get("inc_details_df"), pd.DataFrame)
+                and isinstance(st.session_state.get("inc_editor_df"), pd.DataFrame)
             )
-
             if not same_scope:
-                # Fresh scope: fetch and seed the working copy
                 details_fresh = fetch_user_customer_incentives_for_month(rep_for_view, month_start, month_end)
-                st.session_state["inc_details_df"] = details_fresh.copy()
+                # Seed editor df with editable-friendly columns
+                editor_df = details_fresh[[
+                    "itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)"
+                ]].rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}).copy()
+                st.session_state["inc_editor_df"] = editor_df
                 st.session_state["inc_edit_mode"] = True
                 st.session_state["inc_rep"] = rep_for_view
                 st.session_state["inc_month"] = chosen_month
 
-            details = st.session_state["inc_details_df"]
-            # --------------------------------------------------------------------------
+            # Always work on the session copy
+            editor_df = st.session_state["inc_editor_df"].copy()
+            # Duplicate flag (by Client) for editor grid
+            dup_mask_editor = editor_df["Client"].duplicated(keep=False)
+            editor_df["Duplicate?"] = dup_mask_editor
 
-            if details.empty:
+            # Viewer DF (pretty names) built from editor df so that live edits reflect in totals/preview
+            details_view = editor_df.rename(columns={
+                "booking_date":"Booking date",
+                "final_package_cost":"Final package (₹)"
+            }).copy()
+
+            if details_view.empty:
                 st.info("No incentives for the selected month.")
             else:
-                details = _ensure_columns(details, {
-                    "itinerary_id":"", "ACH ID":"", "Client":"", "Mobile":"", "Route":"", "Travel date":pd.NaT,
-                    "Booking date":pd.NaT, "Final package (₹)":0, "Incentive (₹)":0
-                })
-
+                # --- Left: Customer totals (live from editor_df) ---
                 st.markdown("**Customer totals**")
-                agg = details.groupby(["Client","Mobile"], as_index=False)["Incentive (₹)"].sum().sort_values("Incentive (₹)", ascending=False)
+                agg = details_view.groupby(["Client","Mobile"], as_index=False)["Incentive (₹)"].sum().sort_values("Incentive (₹)", ascending=False)
+
+                # --- Right: Package-wise details with duplicate Client names in red ---
+                def _style_dupe_clients(df_in: pd.DataFrame) -> pd.io.formats.style.Styler:
+                    dupe = df_in["Client"].duplicated(keep=False)
+                    sty = df_in.style.apply(lambda s: ['color: red' if d else '' for d in dupe], subset=["Client"])
+                    return sty
+
                 c1, c2 = st.columns([1,1])
                 with c1:
                     st.dataframe(agg, use_container_width=True, hide_index=True)
                 with c2:
                     st.markdown("**Package-wise details (unique)**")
-                    st.dataframe(details.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        _style_dupe_clients(details_view.drop(columns=["itinerary_id"])),
+                        use_container_width=True, hide_index=True
+                    )
 
+                # --- Admin editor (persists while typing) ---
                 if is_admin:
                     st.markdown("### ✏️ Admin: Edit booking dates for this month")
-                    edit_df = details[["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)"]].copy()
-                    edit_df.rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}, inplace=True)
 
-                    # Live editor writes back to session working copy every rerun
                     edited = st.data_editor(
-                        edit_df,
+                        editor_df,
                         key="inc_editor",
                         use_container_width=True,
                         hide_index=True,
                         column_config={
                             "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
                             "final_package_cost": st.column_config.NumberColumn("Final package (₹)", step=500, min_value=0),
+                            "itinerary_id": st.column_config.Column("itinerary_id", help="Internal ID", disabled=True),
+                            "ACH ID": st.column_config.Column("ACH ID", disabled=True),
+                            "Client": st.column_config.Column("Client", disabled=True),
+                            "Mobile": st.column_config.Column("Mobile", disabled=True),
+                            "Route": st.column_config.Column("Route", disabled=True),
+                            "Travel date": st.column_config.DateColumn("Travel date", disabled=True),
+                            "Incentive (₹)": st.column_config.NumberColumn("Incentive (₹)", disabled=True),
+                            "Duplicate?": st.column_config.CheckboxColumn("Duplicate?", disabled=True),
                         },
-                        disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)"]
                     )
-                    # Persist edits to working copy so reruns don't reset the grid
-                    edited_for_state = edited.rename(columns={"booking_date":"Booking date","final_package_cost":"Final package (₹)"})
-                    st.session_state["inc_details_df"] = details.drop(columns=["Booking date","Final package (₹)"]).merge(
-                        edited_for_state[["itinerary_id","Booking date","Final package (₹)"]],
-                        on="itinerary_id", how="left"
-                    )
+                    # Keep the working copy updated (prevents wipe on rerun)
+                    st.session_state["inc_editor_df"] = edited.copy()
 
                     if st.button("💾 Save booking date changes"):
                         try:
-                            # Build rows for DB update from the edited table
-                            rows = edited.to_dict(orient="records")
+                            rows = edited[["itinerary_id","booking_date","final_package_cost"]].to_dict(orient="records")
                             updated = batch_update_booking_dates(rows, actor_user=user)
-                            # Clear caches and reset edit mode so we reload fresh view
+                            # Reset edit state and caches, then reload fresh
                             fetch_user_months_with_totals.clear()
                             fetch_user_customer_incentives_for_month.clear()
                             fetch_updates_joined.clear()
                             st.session_state["inc_edit_mode"] = False
-                            st.session_state.pop("inc_details_df", None)
+                            st.session_state.pop("inc_editor_df", None)
                             st.success(f"Updated {updated} record(s). Incentives recalculated.")
                             st.session_state["force_refresh"] = True
                             st.rerun()
@@ -1080,7 +1100,7 @@ with tabs[2]:
         _clear_force_refresh()
 
 # =========================
-# TAB 4: 🧾 Revisions Trail
+# TAB 4: 🧾 Revisions Trail (ALL revisions, read-only)
 # =========================
 with tabs[3]:
     st.markdown("#### View all revisions (read-only) — does not affect counts or incentives")
