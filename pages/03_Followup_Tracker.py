@@ -774,21 +774,41 @@ with st.sidebar:
 # Admin/Manager quick overview
 if is_admin or is_manager:
     if not _defer_guard("Follow-ups by assignee"):
-        @st.cache_data(ttl=45, show_spinner=False)
-        def fetch_assigned_followups_raw(assigned_to: Optional[str] = None) -> pd.DataFrame:
-        if not df_over.empty:
-            st.markdown("### 👥 Follow-ups by assignee")
-            # Aggregate unique-by-client latest followups per assignee
-            df_over["_ck"] = df_over["client_mobile"].fillna("").astype(str)
-            df_over = df_over.sort_values(["assigned_to","_ck","_created_utc"], ascending=[True,True,False])
-            uniq = df_over.groupby(["assigned_to","_ck"], as_index=False).first()
-            agg = uniq.groupby("assigned_to")["itinerary_id"].nunique().rename("Follow-ups").reset_index()
-            st.dataframe(agg.rename(columns={"assigned_to":"User"}), use_container_width=True, hide_index=True)
+        # Use the existing cached fetcher defined above
+        df_over = fetch_assigned_followups_raw(assigned_to=None)
 
+        if not df_over.empty:
+            # Build a unique-by-client key and count latest per client per assignee
+            df_over["_ck"] = df_over["client_mobile"].fillna("").astype(str)
+            df_over["_created_utc"] = pd.to_datetime(df_over.get("_created_utc"))
+            df_over = df_over.sort_values(
+                ["assigned_to", "_ck", "_created_utc"],
+                ascending=[True, True, False]
+            )
+            # keep only latest row per client key per assignee
+            uniq = df_over.groupby(["assigned_to", "_ck"], as_index=False).first()
+            agg = (
+                uniq.groupby("assigned_to")["itinerary_id"]
+                .nunique()
+                .rename("Follow-ups")
+                .reset_index()
+                .sort_values("Follow-ups", ascending=False)
+            )
+
+            st.markdown("### 👥 Follow-ups by assignee")
+            st.dataframe(
+                agg.rename(columns={"assigned_to": "User"}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # Admin tools
     with st.expander("🧰 Admin tools"):
         if st.button("Resync assignments from representatives (recent 500)"):
             try:
-                recent_its = list(col_itineraries.find({}, {"_id":1}).sort([("_id", -1)]).limit(500))
+                recent_its = list(
+                    col_itineraries.find({}, {"_id": 1}).sort([("_id", -1)]).limit(500)
+                )
                 fixed = 0
                 for r in recent_its:
                     iid = str(r["_id"])
@@ -801,6 +821,7 @@ if is_admin or is_manager:
                 st.error(f"Failed to resync: {e}")
 
     st.divider()
+
 
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages", "💰 Incentives"])
 
