@@ -20,13 +20,70 @@ st.title("🚖 Driver Attendance & Salary")
 
 TTL = 90  # short cache keeps UI snappy
 
-# --- Freeze headers for dataframes/editors ---
+# --- Freeze headers + pin left columns up to 'status' ---
+# Adjust widths below if you want different pinned-column sizes.
 st.markdown("""
 <style>
-/* Make headers sticky inside data editor / dataframe scroll areas */
+/* Header sticky */
 div[data-testid="stDataEditor"] thead tr th,
 div[data-testid="stDataFrame"] thead tr th {
   position: sticky; top: 0; z-index: 2; background: var(--background-color,#fff);
+}
+
+/* Pinned columns: date, driver, car, in_time, out_time, status (first 6 cols) */
+:root {
+  --pin-col-1: 120px;  /* date */
+  --pin-col-2: 120px;  /* driver */
+  --pin-col-3: 130px;  /* car */
+  --pin-col-4: 110px;  /* in_time */
+  --pin-col-5: 110px;  /* out_time */
+  --pin-col-6: 120px;  /* status */
+}
+
+/* Helper sums */
+:root {
+  --pin-sum-1: var(--pin-col-1);
+  --pin-sum-2: calc(var(--pin-col-1) + var(--pin-col-2));
+  --pin-sum-3: calc(var(--pin-col-1) + var(--pin-col-2) + var(--pin-col-3));
+  --pin-sum-4: calc(var(--pin-col-1) + var(--pin-col-2) + var(--pin-col-3) + var(--pin-col-4));
+  --pin-sum-5: calc(var(--pin-col-1) + var(--pin-col-2) + var(--pin-col-3) + var(--pin-col-4) + var(--pin-col-5));
+}
+
+/* Apply to both header cells (th) and body cells (td) inside DataEditor */
+div[data-testid="stDataEditor"] table thead tr th:nth-child(1),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(1){
+  position: sticky; left: 0; z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-1); width: var(--pin-col-1);
+}
+div[data-testid="stDataEditor"] table thead tr th:nth-child(2),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(2){
+  position: sticky; left: var(--pin-sum-1); z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-2); width: var(--pin-col-2);
+}
+div[data-testid="stDataEditor"] table thead tr th:nth-child(3),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(3){
+  position: sticky; left: var(--pin-sum-2); z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-3); width: var(--pin-col-3);
+}
+div[data-testid="stDataEditor"] table thead tr th:nth-child(4),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(4){
+  position: sticky; left: var(--pin-sum-3); z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-4); width: var(--pin-col-4);
+}
+div[data-testid="stDataEditor"] table thead tr th:nth-child(5),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(5){
+  position: sticky; left: var(--pin-sum-4); z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-5); width: var(--pin-col-5);
+}
+div[data-testid="stDataEditor"] table thead tr th:nth-child(6),
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(6){
+  position: sticky; left: var(--pin-sum-5); z-index: 3; background: var(--background-color,#fff);
+  min-width: var(--pin-col-6); width: var(--pin-col-6);
+}
+
+/* Avoid selection artifacts when pinned cells overlap */
+div[data-testid="stDataEditor"] table tbody tr td:nth-child(-n+6) {
+  box-shadow: 1px 0 0 0 rgba(0,0,0,0.05);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -174,10 +231,6 @@ def load_confirmed_customers() -> pd.DataFrame:
     return df
 
 def customer_pick_options() -> tuple[list[str], Dict[str, Dict[str, str]]]:
-    """
-    Build dropdown options and a reverse map:
-    label = "Name — Mobile | ACH | ItineraryID"
-    """
     confirmed = load_confirmed_customers()
     options = ["", "➕ Custom / Other"]
     rev_map: Dict[str, Dict[str, str]] = {}
@@ -498,7 +551,6 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
 # Shared: editor + saver
 # ==============================
 def render_editable_table(df: pd.DataFrame, *, key: str) -> pd.DataFrame:
-    """Return edited DataFrame using st.data_editor with proper widgets, including customer dropdown."""
     if df.empty:
         st.info("No entries found for the selected period.")
         return df
@@ -506,48 +558,39 @@ def render_editable_table(df: pd.DataFrame, *, key: str) -> pd.DataFrame:
     df = df.copy()
     df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
 
-    # customer dropdown options (confirmed only)
     cust_opts, _ = customer_pick_options()
 
     cols = [
         "date","driver","car","in_time","out_time","status",
         "outstation_overnight","overnight_client","overnight_client_name",
         "bhasmarathi","bhas_client_name","notes",
-        # customer helper + details
-        "customer_pick", "cust_name","cust_ach_id","cust_itinerary_id","cust_is_custom",
-        # allocation
+        "customer_pick","cust_name","cust_ach_id","cust_itinerary_id","cust_is_custom",
         "billable_salary","billable_ot_units","billable_ot_amount",
     ]
-
-    # Ensure required cols exist
     for c in cols:
         if c not in df.columns:
             if c in ["outstation_overnight","overnight_client","bhasmarathi","cust_is_custom"]:
                 df[c] = False
-            elif c == "billable_ot_units":
-                df[c] = 0
-            elif c == "billable_ot_amount":
+            elif c in ["billable_ot_units","billable_ot_amount"]:
                 df[c] = 0
             else:
                 df[c] = ""
 
-    # Derive a default 'customer_pick' label if data matches a confirmed customer
     if "customer_pick" not in df.columns:
         df["customer_pick"] = ""
-    # (We keep it blank; users can choose an option. Matching back requires mobile which we don't store.)
 
     edited = st.data_editor(
         df[cols].sort_values("date"),
         hide_index=True,
         use_container_width=True,
-        height=520,  # internal scroll -> sticky header visible
+        height=520,
         key=key,
         column_config={
-            "date": st.column_config.DateColumn("date", help="Attendance date", disabled=True),
+            "date": st.column_config.DateColumn("date", disabled=True),
             "driver": st.column_config.TextColumn("driver", disabled=True),
             "car": st.column_config.SelectboxColumn("car", options=[""] + CARS),
-            "in_time": st.column_config.TextColumn("in_time", help="e.g., 08:00"),
-            "out_time": st.column_config.TextColumn("out_time", help="e.g., 20:30"),
+            "in_time": st.column_config.TextColumn("in_time"),
+            "out_time": st.column_config.TextColumn("out_time"),
             "status": st.column_config.SelectboxColumn("status", options=["Present","Leave"]),
             "outstation_overnight": st.column_config.CheckboxColumn("outstation_overnight"),
             "overnight_client": st.column_config.CheckboxColumn("overnight_client"),
@@ -555,18 +598,15 @@ def render_editable_table(df: pd.DataFrame, *, key: str) -> pd.DataFrame:
             "bhasmarathi": st.column_config.CheckboxColumn("bhasmarathi"),
             "bhas_client_name": st.column_config.TextColumn("bhas_client_name"),
             "notes": st.column_config.TextColumn("notes", width="large"),
-
-            # Customer selection & details
             "customer_pick": st.column_config.SelectboxColumn(
                 "customer (confirmed)",
                 options=cust_opts,
-                help="Pick a confirmed customer+package (Name — Mobile | ACH | IID) or choose '➕ Custom / Other' and fill 'cust_name'."
+                help="Pick confirmed customer (Name — Mobile | ACH | IID) or choose '➕ Custom / Other' and fill 'cust_name'."
             ),
             "cust_name": st.column_config.TextColumn("cust_name"),
             "cust_ach_id": st.column_config.TextColumn("cust_ach_id"),
             "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id"),
             "cust_is_custom": st.column_config.CheckboxColumn("cust_is_custom"),
-
             "billable_salary": st.column_config.NumberColumn("billable_salary", min_value=0, step=100),
             "billable_ot_units": st.column_config.NumberColumn("billable_ot_units", min_value=0, step=1),
             "billable_ot_amount": st.column_config.NumberColumn("billable_ot_amount", help="auto = units × 300", disabled=True),
@@ -575,7 +615,6 @@ def render_editable_table(df: pd.DataFrame, *, key: str) -> pd.DataFrame:
     return edited
 
 def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
-    """Persist all rows from edited_df by upserting each row (keyed on driver+date)."""
     if edited_df.empty:
         return 0
     _, cust_map = customer_pick_options()
@@ -586,7 +625,6 @@ def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
         if not day:
             continue
 
-        # Resolve customer from dropdown, if selected
         cust_is_custom = bool(r.get("cust_is_custom", False))
         cust_name = str(r.get("cust_name",""))
         cust_ach_id = str(r.get("cust_ach_id",""))
@@ -594,13 +632,11 @@ def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
         pick = str(r.get("customer_pick","")).strip()
 
         if pick and not pick.startswith("➕") and pick in cust_map:
-            # Overwrite from confirmed pick
             ref = cust_map[pick]
             cust_name = ref.get("cust_name","")
             cust_ach_id = ref.get("cust_ach_id","")
             cust_itinerary_id = ref.get("cust_itinerary_id","")
             cust_is_custom = False
-        # else keep whatever is typed, incl. custom
 
         upsert_attendance(
             driver = str(r.get("driver","")),
