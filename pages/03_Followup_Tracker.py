@@ -33,22 +33,17 @@ if dark_mode:
         html, body, [data-testid="stAppViewContainer"]{ background:var(--bg)!important; color:var(--fg)!important; }
         [data-testid="stHeader"]{ background:var(--bg)!important; }
         .stMarkdown, .stText, .stDataFrame, .stMetric, .stCaption, .st-emotion-cache { color:var(--fg)!important; }
-        /* inputs & select */
         input, textarea, select, .stTextInput>div>div>input, .stNumberInput input{
            background:var(--card)!important; color:var(--fg)!important; border:1px solid var(--border)!important;
         }
         label, .stSelectbox label, .stCheckbox>label{ color:var(--fg)!important; }
-        /* buttons */
         .stButton>button { background:var(--btn)!important; color:var(--fg)!important; 
            border-radius:10px; border:1px solid var(--border)!important; }
         .stButton>button:hover{ background:var(--btnh)!important; }
-        /* dataframes */
         [data-testid="stDataFrame"] div, [data-testid="stDataFrame"] th{
             color:var(--fg)!important; background:var(--card2)!important; border-color:var(--border)!important;
         }
-        /* expanders/cards */
         .st-af, .st-bc, .st-bb{ background:var(--card)!important; color:var(--fg)!important; }
-        /* metrics */
         [data-testid="stMetricValue"], [data-testid="stMetricLabel"]{ color:var(--fg)!important; }
         a{ color:var(--accent)!important; }
         </style>
@@ -125,7 +120,6 @@ def load_users() -> dict:
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
-    # local fallback
     try:
         try:
             import tomllib
@@ -236,7 +230,6 @@ def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
     return doc or {}
 
 def _ensure_columns(df: pd.DataFrame, defaults: dict) -> pd.DataFrame:
-    """Guarantee columns exist before slicing/views."""
     if df is None or df.empty:
         return pd.DataFrame({k: [v] for k, v in defaults.items()}).iloc[0:0]
     for col, default in defaults.items():
@@ -388,10 +381,6 @@ def _auto_confirm_other_packages(current_iid: str, credit_user: str, booking_dat
 # =========================
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_updates_joined() -> pd.DataFrame:
-    """
-    Join itineraries with updates; build client-key so *latest per client* can be computed.
-    This is the single source used by all tabs to ensure unique-last-revision logic.
-    """
     ups = list(col_updates.find({}, {"_id":0}))
     df_u = pd.DataFrame(ups) if ups else pd.DataFrame(columns=["itinerary_id"])
     its = list(col_itineraries.find({}, {
@@ -413,15 +402,10 @@ def fetch_updates_joined() -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df_i.merge(df_u, on="itinerary_id", how="left")
-
-    # Representative visibility alignment (app.py intent):
-    # - followup rows: assigned_to == rep who should see it
-    # - confirmed rows: rep_name == credited rep who should see it
     df["status"] = df["status"].fillna("followup")
     df["_booking"] = pd.to_datetime(df.get("booking_date"), errors="coerce", utc=True).dt.tz_convert(None)
     df["_created"] = pd.to_datetime(df.get("_created_utc"), errors="coerce")
 
-    # client key: prefer mobile; else ach+name
     def _ck(row):
         mob = str(row.get("client_mobile") or "").strip()
         if mob: return f"M:{mob}"
@@ -433,18 +417,12 @@ def fetch_updates_joined() -> pd.DataFrame:
 
 def _filter_for_user(df: pd.DataFrame, who: str) -> pd.DataFrame:
     if is_admin or is_manager:
-        return df  # admins can see all in tabs except where explicitly filtered
+        return df
     s = df["status"].fillna("")
     mask = ((s == "followup") & (df["assigned_to"] == who)) | ((s == "confirmed") & (df["rep_name"] == who))
     return df[mask]
 
 def latest_per_client(df: pd.DataFrame, user_filter: Optional[str]=None) -> pd.DataFrame:
-    """
-    Keep only latest entry per client based on:
-    1) booking_date desc (confirmed are newer),
-    2) created desc as tiebreaker.
-    Optionally filter rows to a single user.
-    """
     if df is None or df.empty:
         return pd.DataFrame()
     if user_filter:
@@ -466,7 +444,6 @@ def _unique_status_counts(df_latest: pd.DataFrame) -> Dict[str,int]:
     }
 
 def _between_ts(series: pd.Series, start_d: date, end_d: date) -> pd.Series:
-    """Robust datetime window check (handles tz-aware/mixed)."""
     s = pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert(None)
     lo = pd.Timestamp(datetime.combine(start_d, dtime.min))
     hi = pd.Timestamp(datetime.combine(end_d, dtime.max))
@@ -519,12 +496,18 @@ def fetch_user_months_with_totals(rep_name: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, month_end: date) -> pd.DataFrame:
+    """
+    Return unique confirmed incentive rows for a rep within month,
+    unique on (Mobile, Client name, Travel date[start_date]) keeping the
+    **last confirmed revision** only for each key.
+    """
     start_window = max(month_start, INCENTIVE_START_DATE)
     if start_window > month_end:
         return pd.DataFrame(columns=[
-            "ACH ID","Client","Mobile","Route","Booking date","Final package (₹)","Incentive (₹)"
+            "ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)","itinerary_id"
         ])
 
+    # 1) All confirmed updates in month for this rep
     q = {
         "status": "confirmed",
         "rep_name": rep_name,
@@ -534,14 +517,15 @@ def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, m
     rows = list(col_updates.find(q, {"_id":0, "itinerary_id":1, "booking_date":1, "incentive":1, "final_package_cost":1}))
     if not rows:
         return pd.DataFrame(columns=[
-            "ACH ID","Client","Mobile","Route","Booking date","Final package (₹)","Incentive (₹)"
+            "ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)","itinerary_id"
         ])
     df_u = pd.DataFrame(rows)
     df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
 
+    # 2) Bring in itinerary info incl. start_date (Travel date) and revision_num
     its = list(col_itineraries.find(
         {"_id": {"$in": [ObjectId(x) for x in df_u["itinerary_id"].unique() if ObjectId.is_valid(x)]}},
-        {"_id":1, "ach_id":1, "client_name":1, "client_mobile":1, "final_route":1}
+        {"_id":1, "ach_id":1, "client_name":1, "client_mobile":1, "final_route":1, "start_date":1, "revision_num":1}
     ))
     df_i = pd.DataFrame([{
         "itinerary_id": str(i["_id"]),
@@ -549,13 +533,26 @@ def fetch_user_customer_incentives_for_month(rep_name: str, month_start: date, m
         "Client": i.get("client_name",""),
         "Mobile": i.get("client_mobile",""),
         "Route": i.get("final_route",""),
+        "Travel date": (pd.to_datetime(i.get("start_date")).date() if i.get("start_date") else None),
+        "_rev": int(i.get("revision_num", 1) or 1)
     } for i in its])
 
-    df_u["Booking date"] = pd.to_datetime(df_u["booking_date"], errors="coerce").dt.date
-    df_u["Incentive (₹)"] = df_u["incentive"].apply(_to_int)
-    df_u["Final package (₹)"] = df_u["final_package_cost"].apply(_to_int)
-    view = df_u.merge(df_i, on="itinerary_id", how="left")[
-        ["ACH ID","Client","Mobile","Route","Booking date","Final package (₹)","Incentive (₹)","itinerary_id"]
+    # 3) Merge + de-duplicate on (Mobile, Client, Travel date) keeping highest revision
+    df = df_u.merge(df_i, on="itinerary_id", how="left")
+    df["Booking date"] = pd.to_datetime(df["booking_date"], errors="coerce").dt.date
+    df["Incentive (₹)"] = df["incentive"].apply(_to_int)
+    df["Final package (₹)"] = df["final_package_cost"].apply(_to_int)
+
+    # Guard: if some rows miss Travel date, keep them but group key uses None safely
+    df["_key"] = df[["Mobile","Client","Travel date"]].astype(object).agg(tuple, axis=1)
+
+    # Sort so that the first in each group is the *latest revision*, and as tie-breaker latest booking date
+    df = df.sort_values(["_key", "_rev", "Booking date"], ascending=[True, False, False])
+
+    unique_df = df.groupby("_key", as_index=False).first()
+
+    view = unique_df[
+        ["ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)","itinerary_id"]
     ].sort_values(["Booking date","Client"])
     return view
 
@@ -592,12 +589,6 @@ def upsert_update_status(
     comment: str, cancellation_reason: Optional[str], advance_amount: Optional[int],
     utr: Optional[str] = None, final_package_cost_override: Optional[int] = None
 ) -> None:
-    """
-    Create a followup trail item and mutate package_updates accordingly.
-    When confirming:
-      - enforce booking_date, advance_amount, utr as mandatory (checked by caller)
-      - compute incentive from final_package_cost (override -> expenses/updates, else existing)
-    """
     base = _get_itinerary(iid, {"client_name":1,"client_mobile":1,"ach_id":1})
     col_followups.insert_one({
         "itinerary_id": str(iid),
@@ -722,7 +713,6 @@ with st.sidebar:
         month_pick = st.date_input("Pick any date in month", value=first_this)
         m_start, m_end = month_bounds(month_pick)
         df_base = latest_per_client(fetch_updates_joined(), None)
-        # Make sure columns exist before view
         df_base = _ensure_columns(df_base, {
             "client_name":"", "rep_name":"", "final_package_cost":0, "_booking": pd.NaT, "status":""
         })
@@ -752,7 +742,7 @@ with st.sidebar:
 tabs = st.tabs(["🗂️ Follow-ups", "📘 All packages", "💰 Incentives", "🧾 Revisions Trail"])
 
 # =========================
-# TAB 1: Follow-ups (unique by client)
+# TAB 1: Follow-ups
 # =========================
 with tabs[0]:
     if _defer_guard("Follow-ups list"):
@@ -763,13 +753,11 @@ with tabs[0]:
     df_follow = df_join[df_join["status"].fillna("followup") == "followup"].copy()
     df_follow = latest_per_client(df_follow, user_filter)
 
-    # Ensure columns exist for safe slicing
     df_follow = _ensure_columns(df_follow, {
         "ach_id":"", "client_name":"", "client_mobile":"", "start_date":pd.NaT, "end_date":pd.NaT,
         "final_route":"", "assigned_to":"", "itinerary_id":""
     })
 
-    # KPIs via next-followup date from trail
     today = _today_utc()
     tmr = today + timedelta(days=1)
     in7 = today + timedelta(days=7)
@@ -804,7 +792,6 @@ with tabs[0]:
     c3.metric("Due tomorrow", due_tomorrow)
     c4.metric("Due next 7 days", due_week)
 
-    # search
     q = st.text_input("🔎 Search (name / mobile / ACH / route)", "")
     table = df_follow.copy()
     if q.strip():
@@ -873,7 +860,6 @@ with tabs[0]:
             "Final package cost (₹)": _final_cost_for(chosen_id),
         })
 
-    # Confirm flow (user & admin)
     st.markdown("### Confirm booking")
     with st.form("confirm_form"):
         booking_date = st.date_input("Booking date", value=date.today())
@@ -906,7 +892,6 @@ with tabs[0]:
         fetch_updates_joined.clear()
         st.rerun()
 
-    # Admin revert status / change booking date
     if is_admin:
         st.markdown("### Admin: Change status / booking date")
         with st.form("admin_form"):
@@ -946,8 +931,6 @@ with tabs[1]:
         _clear_force_refresh()
     else:
         df_latest = latest_per_client(fetch_updates_joined(), fu)
-
-        # Ensure columns
         df_latest = _ensure_columns(df_latest, {
             "ach_id":"", "client_name":"", "client_mobile":"", "final_route":"", "start_date":pd.NaT, "end_date":pd.NaT,
             "status":"", "assigned_to":"", "rep_name":"", "_booking":pd.NaT, "advance_amount":0, "utr":"", "itinerary_id":""
@@ -964,7 +947,6 @@ with tabs[1]:
             m4.metric("🟠 Under discussion (unique)", counts["under_discussion"])
             m5.metric("🔴 Cancelled (unique)", counts["cancelled"])
 
-            # Attach final cost
             id_list = df_latest["itinerary_id"].astype(str).tolist()
             fc_map_all = _final_cost_map(id_list)
             df_latest["final_cost"] = df_latest["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
@@ -1035,23 +1017,22 @@ with tabs[2]:
                 st.info("No incentives for the selected month.")
             else:
                 details = _ensure_columns(details, {
-                    "itinerary_id":"", "ACH ID":"", "Client":"", "Mobile":"", "Route":"", "Booking date":pd.NaT,
-                    "Final package (₹)":0, "Incentive (₹)":0
+                    "itinerary_id":"", "ACH ID":"", "Client":"", "Mobile":"", "Route":"", "Travel date":pd.NaT,
+                    "Booking date":pd.NaT, "Final package (₹)":0, "Incentive (₹)":0
                 })
-                st.markdown(f"**Customer-wise incentives for {chosen_month}**")
+
+                st.markdown("**Customer totals**")
                 agg = details.groupby(["Client","Mobile"], as_index=False)["Incentive (₹)"].sum().sort_values("Incentive (₹)", ascending=False)
                 c1, c2 = st.columns([1,1])
                 with c1:
-                    st.markdown("**Customer totals**")
                     st.dataframe(agg, use_container_width=True, hide_index=True)
                 with c2:
-                    st.markdown("**Package-wise details**")
+                    st.markdown("**Package-wise details (unique)**")
                     st.dataframe(details.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
 
-                # Admin booking date editor
                 if is_admin:
                     st.markdown("### ✏️ Admin: Edit booking dates for this month")
-                    edit_df = details[["itinerary_id","ACH ID","Client","Mobile","Route","Booking date","Final package (₹)","Incentive (₹)"]].copy()
+                    edit_df = details[["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date","Final package (₹)","Incentive (₹)"]].copy()
                     edit_df.rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}, inplace=True)
                     edited = st.data_editor(
                         edit_df,
@@ -1061,7 +1042,7 @@ with tabs[2]:
                             "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
                             "final_package_cost": st.column_config.NumberColumn("Final package (₹)", step=500, min_value=0),
                         },
-                        disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Incentive (₹)"]
+                        disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)"]
                     )
                     if st.button("💾 Save booking date changes"):
                         try:
