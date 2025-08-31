@@ -207,13 +207,19 @@ def load_attendance(driver: str, start: date, end: date) -> pd.DataFrame:
             "billable_ot_units": _to_int(r.get("billable_ot_units", 0)),
             "billable_ot_amount": _to_int(r.get("billable_ot_amount", 0)),
         })
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         "date","driver","car","in_time","out_time","status",
         "outstation_overnight","overnight_client","overnight_client_name",
         "bhasmarathi","bhas_client_name","notes",
         "cust_itinerary_id","cust_ach_id","cust_name","cust_is_custom",
         "billable_salary","billable_ot_units","billable_ot_amount"
     ])
+    if not df.empty:
+        # stable row id for editor (driver|date)
+        df["row_id"] = df.apply(lambda r: f'{r["driver"]}|{pd.to_datetime(r["date"]).date().isoformat()}', axis=1)
+        # keep OT amount derived
+        df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
+    return df
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def load_advances(driver: str, start: date, end: date) -> pd.DataFrame:
@@ -326,7 +332,7 @@ def calc_salary(df_att: pd.DataFrame, df_adv: pd.DataFrame, month_start: date, m
     }
 
 # ==============================
-# PDF Slip (ASCII-safe, invoice-style, table kept inside border)
+# PDF Slip (ASCII-safe)
 # ==============================
 def _ascii_downgrade(s: str) -> str:
     if s is None:
@@ -338,7 +344,6 @@ def _ascii_downgrade(s: str) -> str:
         .replace("™", "(TM)")
     )
 
-# Org header/lines like your invoice
 ORG = {
     "title": "TravelaajKal® – Achala Holidays Pvt. Ltd.",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
@@ -409,15 +414,13 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
 
     left = 16
     th = 8
-    # Keep table inside right border (right edge at x=202). With left=16, max width=186.
     col1_w, col2_w, col3_w = 88, 40, 58  # sum = 186 (fits)
-    # Statement header
+
     pdf.set_font("Helvetica", "", 11)
     pdf.set_x(left)
     pdf.cell(0, 6, pdf._txt(f"{month_label} (Salary Statement: {period_label})"), ln=1)
     pdf.ln(1)
 
-    # Employee
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_x(left)
     pdf.cell(0, 6, pdf._txt(f"EMP NAME:  {emp_name}"), ln=1)
@@ -485,6 +488,98 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
 # ==============================
+# Shared: editor + saver
+# ==============================
+def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bool = True) -> pd.DataFrame:
+    """Return edited DataFrame using st.data_editor with proper widgets."""
+    if df.empty:
+        st.info("No entries found for the selected period.")
+        return df
+
+    # Derived column – keep visible but read-only
+    df = df.copy()
+    df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
+
+    base_cols = [
+        "row_id","date","driver","car","in_time","out_time","status",
+        "outstation_overnight","overnight_client","overnight_client_name",
+        "bhasmarathi","bhas_client_name","notes",
+        "billable_salary","billable_ot_units","billable_ot_amount"
+    ]
+    cust_cols = ["cust_itinerary_id","cust_ach_id","cust_name","cust_is_custom"]
+    cols = base_cols + (cust_cols if allow_customer_cols else [])
+
+    for c in cols:
+        if c not in df.columns:
+            df[c] = "" if c not in ["outstation_overnight","overnight_client","bhasmarathi","cust_is_custom"] else False
+
+    edited = st.data_editor(
+        df[cols].sort_values("date"),
+        hide_index=True,
+        use_container_width=True,
+        key=key,
+        column_config={
+            "row_id": st.column_config.TextColumn("row_id", help="hidden id", disabled=True, visible=False),
+            "date": st.column_config.DateColumn("date", help="Attendance date", disabled=True),
+            "driver": st.column_config.TextColumn("driver", disabled=True),
+            "car": st.column_config.SelectboxColumn("car", options=[""] + CARS),
+            "in_time": st.column_config.TextColumn("in_time", help="e.g., 08:00"),
+            "out_time": st.column_config.TextColumn("out_time", help="e.g., 20:30"),
+            "status": st.column_config.SelectboxColumn("status", options=["Present","Leave"]),
+            "outstation_overnight": st.column_config.CheckboxColumn("outstation_overnight"),
+            "overnight_client": st.column_config.CheckboxColumn("overnight_client"),
+            "overnight_client_name": st.column_config.TextColumn("overnight_client_name"),
+            "bhasmarathi": st.column_config.CheckboxColumn("bhasmarathi"),
+            "bhas_client_name": st.column_config.TextColumn("bhas_client_name"),
+            "notes": st.column_config.TextColumn("notes", width="large"),
+            "billable_salary": st.column_config.NumberColumn("billable_salary", min_value=0, step=100),
+            "billable_ot_units": st.column_config.NumberColumn("billable_ot_units", min_value=0, step=1),
+            "billable_ot_amount": st.column_config.NumberColumn("billable_ot_amount", help="auto = units × 300", disabled=True),
+            # optional customer linkage columns (admin may choose to edit)
+            "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id", help="Itinerary ID"),
+            "cust_ach_id": st.column_config.TextColumn("cust_ach_id", help="ACH ID"),
+            "cust_name": st.column_config.TextColumn("cust_name"),
+            "cust_is_custom": st.column_config.CheckboxColumn("cust_is_custom"),
+        }
+    )
+    return edited
+
+def save_table_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> int:
+    """Persist all rows from edited_df by upserting each row."""
+    if edited_df.empty:
+        return 0
+
+    cnt = 0
+    for _, r in edited_df.iterrows():
+        day = _d(r["date"])
+        if not day:
+            continue
+        upsert_attendance(
+            driver = str(r.get("driver","")),
+            day    = day,
+            car    = str(r.get("car","")),
+            in_time= str(r.get("in_time","")),
+            out_time=str(r.get("out_time","")),
+            status = str(r.get("status","Present")),
+            outstation_overnight = bool(r.get("outstation_overnight", False)),
+            overnight_client      = bool(r.get("overnight_client", False)),
+            overnight_client_name = str(r.get("overnight_client_name","")),
+            bhasmarathi           = bool(r.get("bhasmarathi", False)),
+            bhas_client_name      = str(r.get("bhas_client_name","")),
+            notes                 = str(r.get("notes","")),
+            cust_itinerary_id     = str(r.get("cust_itinerary_id","")),
+            cust_ach_id           = str(r.get("cust_ach_id","")),
+            cust_name             = str(r.get("cust_name","")),
+            cust_is_custom        = bool(r.get("cust_is_custom", False)),
+            billable_salary       = _to_int(r.get("billable_salary",0)),
+            billable_ot_units     = _to_int(r.get("billable_ot_units",0)),
+        )
+        cnt += 1
+    # clear caches so metrics recalc
+    load_attendance.clear()
+    return cnt
+
+# ==============================
 # UI – Tabs: Driver / Admin
 # ==============================
 tab_driver, tab_admin = st.tabs(["Driver Entry & My Salary", "Admin Panel"]) if is_admin else (st.container(), None)
@@ -532,18 +627,15 @@ with tab_driver:
             cust_is_custom = True
             cust_name = st.text_input("Enter customer name (free text)", key="drv_cust_custom")
     else:
-        # Build unique client list by (name + mobile); show ONE row per client
         confirmed["key"] = (
             confirmed["client_name"].str.strip().str.lower() + " | " +
             confirmed["client_mobile"].str.strip()
         )
         unique_clients = confirmed.drop_duplicates(subset=["key"]).copy()
-        # Label: Name – Mobile (ACH optional)
         unique_clients["label"] = (
             unique_clients["client_name"].str.strip() + " — " +
             unique_clients["client_mobile"].str.strip()
         )
-        # First picker: unique client
         unique_opts = ["", "➕ Add new / other"] + unique_clients["label"].tolist()
         first_pick = st.selectbox("Search / pick client (unique)", unique_opts, index=0, key="drv_cust_first")
 
@@ -551,14 +643,11 @@ with tab_driver:
             cust_is_custom = True
             cust_name = st.text_input("Enter customer name (free text)", key="drv_cust_custom")
         elif first_pick:
-            # Get the client key back
             name_part, mobile_part = [p.strip() for p in first_pick.split(" — ", 1)]
             client_key = name_part.lower() + " | " + mobile_part
-            # All itineraries for this client
             all_for_client = confirmed[confirmed["key"] == client_key].copy()
             cust_name = name_part
             cust_ach_id = (all_for_client["ach_id"].iloc[0] if not all_for_client.empty else "")
-            # Second picker: choose specific itinerary (shows ACH | IID); default to first
             all_for_client["iid_label"] = all_for_client["ach_id"].fillna("") + " | " + all_for_client["itinerary_id"]
             iid_options = all_for_client["iid_label"].tolist()
             sel_iid_lbl = st.selectbox("Select package (ACH | IID)", iid_options, index=0, key="drv_cust_iid_pick")
@@ -607,8 +696,18 @@ with tab_driver:
     k5.metric("Deductions", inr(calc["leave_ded"] + calc["advances"]))
     k6.metric("Net Pay", inr(calc["net"]))
 
-    with st.expander("Show my entries (this month)"):
-        st.dataframe(df_att.sort_values("date"), use_container_width=True, hide_index=True)
+    with st.expander("Edit my entries (this month)", expanded=True):
+        edited_df = render_editable_table(df_att, key="drv_editor", allow_customer_cols=False)
+        c1, c2 = st.columns([1,3])
+        if c1.button("✅ Apply changes", key="drv_apply_changes"):
+            saved = save_table_changes(df_att, edited_df)
+            if saved:
+                st.success(f"Updated {saved} row(s).")
+                load_attendance.clear()
+                st.experimental_rerun()
+            else:
+                st.info("No changes to save.")
+
     with st.expander("Advances (this month)"):
         st.dataframe(df_adv.sort_values("date"), use_container_width=True, hide_index=True)
 
@@ -672,7 +771,26 @@ if is_admin and tab_admin is not None:
                 st.warning("Enter amount > 0")
 
         st.divider()
-        st.subheader("Review & Generate Salary Slip")
+        st.subheader("Review, Edit & Generate Salary Slip")
+        df_att_m = load_attendance(admin_driver, mstart, mend)
+        df_adv_m = load_advances(admin_driver, mstart, mend)
+
+        with st.expander("Attendance (month) — editable", expanded=True):
+            edited_admin_df = render_editable_table(df_att_m, key="adm_editor", allow_customer_cols=True)
+            c1, c2 = st.columns([1,3])
+            if c1.button("✅ Apply changes (admin)", key="adm_apply_changes"):
+                saved = save_table_changes(df_att_m, edited_admin_df)
+                if saved:
+                    st.success(f"Updated {saved} row(s).")
+                    load_attendance.clear()
+                    st.experimental_rerun()
+                else:
+                    st.info("No changes to save.")
+
+        with st.expander("Advances (month)", expanded=False):
+            st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
+
+        # Recompute after potential edits
         df_att_m = load_attendance(admin_driver, mstart, mend)
         df_adv_m = load_advances(admin_driver, mstart, mend)
         calc_m = calc_salary(df_att_m, df_adv_m, mstart, mend)
@@ -682,11 +800,6 @@ if is_admin and tab_admin is not None:
         k2.metric("OT units", calc_m["ot_units"])
         k3.metric("Advances", inr(calc_m["advances"]))
         k4.metric("Net Pay", inr(calc_m["net"]))
-
-        with st.expander("Attendance (month)", expanded=False):
-            st.dataframe(df_att_m.sort_values("date"), use_container_width=True, hide_index=True)
-        with st.expander("Advances (month)", expanded=False):
-            st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
 
         # Export customer allocations for expense posting
         st.markdown("#### Export customer-wise allocations (for expense posting)")
