@@ -20,8 +20,19 @@ st.title("🚖 Driver Attendance & Salary")
 
 TTL = 90  # short cache keeps UI snappy
 
+# --- Freeze headers for dataframes/editors ---
+st.markdown("""
+<style>
+/* Make headers sticky inside data editor / dataframe scroll areas */
+div[data-testid="stDataEditor"] thead tr th,
+div[data-testid="stDataFrame"] thead tr th {
+  position: sticky; top: 0; z-index: 2; background: var(--background-color,#fff);
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ==============================
-# Admin gate (like your admin pages)
+# Admin gate
 # ==============================
 def require_admin() -> bool:
     ADMIN_PASS_DEFAULT = "Arpith&92"
@@ -34,7 +45,6 @@ def require_admin() -> bool:
     st.session_state["user"] = "Admin" if ok else st.session_state.get("user", "Driver")
     return ok
 
-# Let page show both views: if admin not authenticated, we show Driver self-entry only
 is_admin = require_admin()
 
 # ==============================
@@ -65,9 +75,8 @@ def _get_client() -> MongoClient:
     return cli
 
 DB = _get_client()["TAK_DB"]
-col_att = DB["driver_attendance"]   # one doc per driver+date
-col_adv = DB["driver_advances"]     # arbitrary advances
-# For confirmed-customer list (read-only)
+col_att = DB["driver_attendance"]
+col_adv = DB["driver_advances"]
 col_updates = DB["package_updates"]
 col_itins   = DB["itineraries"]
 
@@ -85,7 +94,7 @@ DRIVERS = ["Priyansh"]  # extend later
 CARS = ["TAK Sedan", "TAK Ertiga"]
 BASE_SALARY = 12000
 LEAVE_DEDUCT = 400
-OVERTIME_ADD = 300  # for each counted unit: overnight_outstation, overnight_client, bhasmarathi
+OVERTIME_ADD = 300
 
 ORG_LOGO = ".streamlit/logo.png"
 ORG_SIGN = ".streamlit/signature.png"
@@ -132,14 +141,7 @@ def _as_bytes(x) -> bytes:
 # ==============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def load_confirmed_customers() -> pd.DataFrame:
-    """
-    Returns rows with itinerary_id, ach_id, client_name, client_mobile.
-    Only for package_updates with status == confirmed.
-    """
-    ups = list(col_updates.find(
-        {"status": "confirmed"},
-        {"_id":0, "itinerary_id":1}
-    ))
+    ups = list(col_updates.find({"status": "confirmed"}, {"_id":0, "itinerary_id":1}))
     if not ups:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile"])
     iids = [str(u.get("itinerary_id") or "") for u in ups if u.get("itinerary_id")]
@@ -147,8 +149,7 @@ def load_confirmed_customers() -> pd.DataFrame:
     if iids:
         obj_ids = [ObjectId(i) for i in iids if len(i) == 24]
         if obj_ids:
-            for r in col_itins.find({"_id": {"$in": obj_ids}},
-                                    {"ach_id":1,"client_name":1,"client_mobile":1}):
+            for r in col_itins.find({"_id": {"$in": obj_ids}}, {"ach_id":1,"client_name":1,"client_mobile":1}):
                 it_rows.append({
                     "itinerary_id": str(r["_id"]),
                     "ach_id": r.get("ach_id",""),
@@ -190,14 +191,13 @@ def load_attendance(driver: str, start: date, end: date) -> pd.DataFrame:
             "car": r.get("car",""),
             "in_time": r.get("in_time",""),
             "out_time": r.get("out_time",""),
-            "status": r.get("status","Present"),  # Present / Leave
+            "status": r.get("status","Present"),
             "outstation_overnight": bool(r.get("outstation_overnight", False)),
             "overnight_client": bool(r.get("overnight_client", False)),
             "overnight_client_name": r.get("overnight_client_name",""),
             "bhasmarathi": bool(r.get("bhasmarathi", False)),
             "bhas_client_name": r.get("bhas_client_name",""),
             "notes": r.get("notes",""),
-            # customer linkage & cost allocation
             "cust_itinerary_id": r.get("cust_itinerary_id",""),
             "cust_ach_id": r.get("cust_ach_id",""),
             "cust_name": r.get("cust_name",""),
@@ -236,7 +236,6 @@ def upsert_attendance(
     in_time: str, out_time: str, status: str,
     outstation_overnight: bool, overnight_client: bool, overnight_client_name: str,
     bhasmarathi: bool, bhas_client_name: str, notes: str,
-    # new customer-link & cost allocation
     cust_itinerary_id: str, cust_ach_id: str, cust_name: str, cust_is_custom: bool,
     billable_salary: int, billable_ot_units: int
 ):
@@ -255,12 +254,10 @@ def upsert_attendance(
         "bhasmarathi": bool(bhasmarathi),
         "bhas_client_name": bhas_client_name or "",
         "notes": notes or "",
-        # linkage
         "cust_itinerary_id": str(cust_itinerary_id or ""),
         "cust_ach_id": cust_ach_id or "",
         "cust_name": cust_name or "",
         "cust_is_custom": bool(cust_is_custom),
-        # allocation
         "billable_salary": int(billable_salary or 0),
         "billable_ot_units": int(billable_ot_units or 0),
         "billable_ot_amount": int(billable_ot_amount),
@@ -290,7 +287,6 @@ def bulk_upsert_range(
             overnight_client_name="",
             bhasmarathi=mark_bhas, bhas_client_name="",
             notes="(bulk update)",
-            # no customer link in bulk; keep blank
             cust_itinerary_id="", cust_ach_id="", cust_name="", cust_is_custom=False,
             billable_salary=0, billable_ot_units=0
         )
@@ -302,7 +298,6 @@ def bulk_upsert_range(
 def calc_salary(df_att: pd.DataFrame, df_adv: pd.DataFrame, month_start: date, month_end: date) -> dict:
     days_in_month = (month_end - month_start).days + 1
     leave_days = 0 if df_att.empty else int((df_att["status"] == "Leave").sum())
-    # Overtime units (each 300)
     ot_units = 0
     if not df_att.empty:
         ot_units += int(df_att["outstation_overnight"].fillna(False).sum())
@@ -502,6 +497,7 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
         df[cols].sort_values("date"),
         hide_index=True,
         use_container_width=True,
+        height=520,  # makes internal scroll, header stays visible
         key=key,
         column_config={
             "date": st.column_config.DateColumn("date", help="Attendance date", disabled=True),
@@ -519,7 +515,6 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
             "billable_salary": st.column_config.NumberColumn("billable_salary", min_value=0, step=100),
             "billable_ot_units": st.column_config.NumberColumn("billable_ot_units", min_value=0, step=1),
             "billable_ot_amount": st.column_config.NumberColumn("billable_ot_amount", help="auto = units × 300", disabled=True),
-            # optional customer linkage columns
             "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id", help="Itinerary ID"),
             "cust_ach_id": st.column_config.TextColumn("cust_ach_id", help="ACH ID"),
             "cust_name": st.column_config.TextColumn("cust_name"),
@@ -593,7 +588,7 @@ with tab_driver:
         bhasmarathi = st.checkbox("Bhasmarathi duty", value=False, key="drv_bhas")
         bhas_client = st.text_input("Bhasmarathi client", value="", key="drv_bhas_name", disabled=(not bhasmarathi))
 
-    # --- Customer link & per-customer cost allocation
+    # --- Customer link & cost allocation
     st.markdown("### Link to Customer (optional) & Cost Allocation")
     confirmed = load_confirmed_customers()
 
@@ -654,14 +649,13 @@ with tab_driver:
             outstation_overnight=outstation_overnight,
             overnight_client=overnight_client, overnight_client_name=overnight_client_name,
             bhasmarathi=bhasmarathi, bhas_client_name=bhas_client, notes=notes,
-            # linkage & allocation
             cust_itinerary_id=cust_itinerary_id, cust_ach_id=cust_ach_id,
             cust_name=cust_name, cust_is_custom=cust_is_custom,
             billable_salary=int(billable_salary), billable_ot_units=int(billable_ot_units)
         )
         load_attendance.clear()
         st.success("Saved.")
-        st.experimental_rerun()
+        st.rerun()  # << fixed
 
     st.divider()
     st.subheader("My Salary (this month)")
@@ -686,19 +680,18 @@ with tab_driver:
             if saved:
                 st.success(f"Updated {saved} row(s).")
                 load_attendance.clear()
-                st.experimental_rerun()
+                st.rerun()  # << fixed
             else:
                 st.info("No changes to save.")
 
     with st.expander("Advances (this month)"):
-        st.dataframe(df_adv.sort_values("date"), use_container_width=True, hide_index=True)
+        st.dataframe(df_adv.sort_values("date"), use_container_width=True, hide_index=True, height=320)
 
 # ---------------- ADMIN VIEW ----------------
 if is_admin and tab_admin is not None:
     with tab_admin:
         st.subheader("Admin — Bulk Update & Salary")
 
-        # Filters
         a1, a2 = st.columns(2)
         with a1:
             admin_driver = st.selectbox("Driver", DRIVERS, index=0, key="adm_driver_select")
@@ -707,7 +700,6 @@ if is_admin and tab_admin is not None:
         mstart, mend = month_bounds(ref_month)
         st.caption(f"Period: **{mstart} → {mend}**")
 
-        # Bulk update
         st.markdown("#### Bulk mark days")
         b1, b2 = st.columns(2)
         with b1:
@@ -765,12 +757,12 @@ if is_admin and tab_admin is not None:
                 if saved:
                     st.success(f"Updated {saved} row(s).")
                     load_attendance.clear()
-                    st.experimental_rerun()
+                    st.rerun()  # << fixed
                 else:
                     st.info("No changes to save.")
 
         with st.expander("Advances (month)", expanded=False):
-            st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True)
+            st.dataframe(df_adv_m.sort_values("date"), use_container_width=True, hide_index=True, height=320)
 
         # Recompute after potential edits
         df_att_m = load_attendance(admin_driver, mstart, mend)
@@ -783,7 +775,6 @@ if is_admin and tab_admin is not None:
         k3.metric("Advances", inr(calc_m["advances"]))
         k4.metric("Net Pay", inr(calc_m["net"]))
 
-        # Export customer allocations for expense posting
         st.markdown("#### Export customer-wise allocations (for expense posting)")
         alloc = df_att_m.copy()
         if not alloc.empty:
@@ -824,14 +815,12 @@ if is_admin and tab_admin is not None:
         # Preview + Download
         if "drv_pdf" in st.session_state and st.session_state["drv_pdf"]:
             slip_b = _as_bytes(st.session_state["drv_pdf"])
-
             st.markdown("#### Salary slip preview")
             b64s = base64.b64encode(slip_b).decode()
             st.components.v1.html(
                 f'<iframe src="data:application/pdf;base64,{b64s}" width="100%" height="600" style="border:1px solid #ddd;"></iframe>',
                 height=620,
             )
-
             st.download_button(
                 "⬇️ Download Salary Slip (PDF)",
                 data=slip_b,
