@@ -235,6 +235,15 @@ def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
         doc = col_itineraries.find_one({"itinerary_id": str(iid)}, projection)
     return doc or {}
 
+def _ensure_columns(df: pd.DataFrame, defaults: dict) -> pd.DataFrame:
+    """Guarantee columns exist before slicing/views."""
+    if df is None or df.empty:
+        return pd.DataFrame({k: [v] for k, v in defaults.items()}).iloc[0:0]
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+    return df
+
 # =========================
 # Final cost logic + SYNC
 # =========================
@@ -405,8 +414,9 @@ def fetch_updates_joined() -> pd.DataFrame:
 
     df = df_i.merge(df_u, on="itinerary_id", how="left")
 
-    # Representative visibility rule (from app.py): show to that rep only
-    # We'll enforce by filtering on assigned_to (followup) or rep_name (confirmed)
+    # Representative visibility alignment (app.py intent):
+    # - followup rows: assigned_to == rep who should see it
+    # - confirmed rows: rep_name == credited rep who should see it
     df["status"] = df["status"].fillna("followup")
     df["_booking"] = pd.to_datetime(df.get("booking_date"), errors="coerce", utc=True).dt.tz_convert(None)
     df["_created"] = pd.to_datetime(df.get("_created_utc"), errors="coerce")
@@ -424,9 +434,6 @@ def fetch_updates_joined() -> pd.DataFrame:
 def _filter_for_user(df: pd.DataFrame, who: str) -> pd.DataFrame:
     if is_admin or is_manager:
         return df  # admins can see all in tabs except where explicitly filtered
-    # For normal users:
-    # - Any row where assigned_to == user (followups)
-    # - OR rep_name == user (confirmed ownership)
     s = df["status"].fillna("")
     mask = ((s == "followup") & (df["assigned_to"] == who)) | ((s == "confirmed") & (df["rep_name"] == who))
     return df[mask]
@@ -442,7 +449,6 @@ def latest_per_client(df: pd.DataFrame, user_filter: Optional[str]=None) -> pd.D
         return pd.DataFrame()
     if user_filter:
         df = _filter_for_user(df, user_filter)
-    # Sort by client-key + booking desc + created desc
     df = df.sort_values(["_client_key","_booking","_created"], ascending=[True, False, False])
     latest = df.groupby("_client_key", as_index=False).first()
     return latest
@@ -460,17 +466,11 @@ def _unique_status_counts(df_latest: pd.DataFrame) -> Dict[str,int]:
     }
 
 def _between_ts(series: pd.Series, start_d: date, end_d: date) -> pd.Series:
-    """
-    Robust range check:
-    - Coerce to datetime, interpret as UTC if tz info exists (or missing), then drop tz.
-    - Compare against tz-naive lo/hi.
-    """
-    # Make everything UTC-aware first, then strip tz -> tz-naive in UTC
+    """Robust datetime window check (handles tz-aware/mixed)."""
     s = pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert(None)
     lo = pd.Timestamp(datetime.combine(start_d, dtime.min))
     hi = pd.Timestamp(datetime.combine(end_d, dtime.max))
     return s.ge(lo) & s.le(hi)
-
 
 def count_confirmed_unique_range(user_filter: Optional[str], start_d: date, end_d: date) -> int:
     df = fetch_updates_joined()
@@ -620,7 +620,6 @@ def upsert_update_status(
         upd["assigned_to"] = credit_user
 
     elif final_status == "confirmed":
-        # enforce booking fields
         bdt = datetime.combine(booking_date, dtime.min) if booking_date else None
         upd["booking_date"] = bdt
         upd["advance_amount"] = int(advance_amount or 0)
@@ -628,11 +627,9 @@ def upsert_update_status(
         upd["rep_name"] = credit_user
         upd["assigned_to"] = None
 
-        # handle final cost override (user enters final package amount here)
         fc = 0
         if final_package_cost_override is not None:
             fc = _to_int(final_package_cost_override)
-            # mirror to expenses & updates
             base_amt = fc
             disc_amt = 0
             col_expenses.update_one(
@@ -658,7 +655,6 @@ def upsert_update_status(
             "incentive": int(inc_val),
         })
 
-        # auto-confirm siblings by mobile
         _auto_confirm_other_packages(
             current_iid=str(iid),
             credit_user=credit_user,
@@ -723,11 +719,13 @@ with st.sidebar:
         st.markdown("### 📅 Monthly confirmed (unique latest)")
         today = _today_utc()
         first_this, last_this = month_bounds(today)
-        # Allow month override
         month_pick = st.date_input("Pick any date in month", value=first_this)
         m_start, m_end = month_bounds(month_pick)
-        # Build latest-unique set first, then filter confirmed in month
         df_base = latest_per_client(fetch_updates_joined(), None)
+        # Make sure columns exist before view
+        df_base = _ensure_columns(df_base, {
+            "client_name":"", "rep_name":"", "final_package_cost":0, "_booking": pd.NaT, "status":""
+        })
         msk = (df_base["status"]=="confirmed") & _between_ts(df_base["_booking"], m_start, m_end)
         view = df_base.loc[msk, ["client_name","rep_name","final_package_cost"]].copy()
         view.rename(columns={
@@ -762,16 +760,20 @@ with tabs[0]:
         st.stop()
 
     df_join = fetch_updates_joined()
-    # Only followup items visible per user; still dedupe per client
     df_follow = df_join[df_join["status"].fillna("followup") == "followup"].copy()
     df_follow = latest_per_client(df_follow, user_filter)
 
-    # KPIs
+    # Ensure columns exist for safe slicing
+    df_follow = _ensure_columns(df_follow, {
+        "ach_id":"", "client_name":"", "client_mobile":"", "start_date":pd.NaT, "end_date":pd.NaT,
+        "final_route":"", "assigned_to":"", "itinerary_id":""
+    })
+
+    # KPIs via next-followup date from trail
     today = _today_utc()
     tmr = today + timedelta(days=1)
     in7 = today + timedelta(days=7)
 
-    # Next followup is stored in followups trail; fetch last trail for each iid
     @st.cache_data(ttl=45, show_spinner=False)
     def fetch_latest_followup_log_map(itinerary_ids: List[str]) -> Dict[str, dict]:
         if not itinerary_ids: return {}
@@ -839,7 +841,6 @@ with tabs[0]:
         _clear_force_refresh()
         st.stop()
 
-    # Details & Update (User can confirm; Admin can revert)
     st.divider()
     st.subheader("Details & Update")
 
@@ -872,7 +873,7 @@ with tabs[0]:
             "Final package cost (₹)": _final_cost_for(chosen_id),
         })
 
-    # Confirm flow (user & admin) – all 4 fields mandatory for confirm
+    # Confirm flow (user & admin)
     st.markdown("### Confirm booking")
     with st.form("confirm_form"):
         booking_date = st.date_input("Booking date", value=date.today())
@@ -892,7 +893,7 @@ with tabs[0]:
             iid=chosen_id,
             status="confirmed",
             actor_user=user,
-            credit_user=user,   # rep credited is the actor by default
+            credit_user=user,
             next_followup_on=None,
             booking_date=booking_date,
             comment=comment,
@@ -945,6 +946,13 @@ with tabs[1]:
         _clear_force_refresh()
     else:
         df_latest = latest_per_client(fetch_updates_joined(), fu)
+
+        # Ensure columns
+        df_latest = _ensure_columns(df_latest, {
+            "ach_id":"", "client_name":"", "client_mobile":"", "final_route":"", "start_date":pd.NaT, "end_date":pd.NaT,
+            "status":"", "assigned_to":"", "rep_name":"", "_booking":pd.NaT, "advance_amount":0, "utr":"", "itinerary_id":""
+        })
+
         if df_latest.empty:
             st.info("No packages to display for the selected filter.")
         else:
@@ -956,6 +964,7 @@ with tabs[1]:
             m4.metric("🟠 Under discussion (unique)", counts["under_discussion"])
             m5.metric("🔴 Cancelled (unique)", counts["cancelled"])
 
+            # Attach final cost
             id_list = df_latest["itinerary_id"].astype(str).tolist()
             fc_map_all = _final_cost_map(id_list)
             df_latest["final_cost"] = df_latest["itinerary_id"].map(lambda x: fc_map_all.get(str(x), 0))
@@ -970,6 +979,11 @@ with tabs[1]:
                     view["ach_id"].astype(str).str.lower().str.contains(s2) |
                     view["final_route"].astype(str).str.lower().str.contains(s2)
                 ]
+
+            view = _ensure_columns(view, {
+                "ach_id":"", "client_name":"", "client_mobile":"", "final_route":"", "start_date":pd.NaT, "end_date":pd.NaT,
+                "status":"", "assigned_to":"", "rep_name":"", "_booking":pd.NaT, "advance_amount":0, "utr":"", "final_cost":0, "itinerary_id":""
+            })
 
             view = view[[
                 "ach_id","client_name","client_mobile","final_route","start_date","end_date","status",
@@ -1017,10 +1031,14 @@ with tabs[2]:
             month_end = (pd.Timestamp(month_start) + pd.offsets.MonthEnd(1)).date()
 
             details = fetch_user_customer_incentives_for_month(rep_for_view, month_start, month_end)
-            st.markdown(f"**Customer-wise incentives for {chosen_month}**")
             if details.empty:
                 st.info("No incentives for the selected month.")
             else:
+                details = _ensure_columns(details, {
+                    "itinerary_id":"", "ACH ID":"", "Client":"", "Mobile":"", "Route":"", "Booking date":pd.NaT,
+                    "Final package (₹)":0, "Incentive (₹)":0
+                })
+                st.markdown(f"**Customer-wise incentives for {chosen_month}**")
                 agg = details.groupby(["Client","Mobile"], as_index=False)["Incentive (₹)"].sum().sort_values("Incentive (₹)", ascending=False)
                 c1, c2 = st.columns([1,1])
                 with c1:
@@ -1065,7 +1083,6 @@ with tabs[2]:
 with tabs[3]:
     st.markdown("#### View all revisions (read-only) — does not affect counts or incentives")
     qtrail = st.text_input("Search (name / mobile / ACH)", "")
-    # pull raw itineraries (all revisions)
     cur = list(col_itineraries.find({}, {"_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"final_route":1,
                                          "start_date":1,"end_date":1,"upload_date":1,"revision_num":1}))
     if not cur:
