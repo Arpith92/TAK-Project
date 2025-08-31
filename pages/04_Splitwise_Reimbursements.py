@@ -21,6 +21,45 @@ CATEGORIES = ["Car", "Hotel", "Bhasmarathi", "Poojan", "PhotoFrame", "Other"]
 IST_TTL = 60  # short cache TTL so updates reflect quickly
 
 # =========================
+# Dark mode + Defer loads
+# =========================
+with st.sidebar:
+    dark_mode = st.toggle("🌙 Dark mode", value=False, help="Switch between dark and normal theme")
+    st.markdown("---")
+    defer_loads = st.toggle("⚡ Defer heavy loads", value=True,
+                            help="Skip loading big tables until you press Refresh or after a Save.")
+    refresh_now = st.button("🔄 Refresh data now", use_container_width=True)
+
+# apply a lightweight dark theme (background + core components)
+if dark_mode:
+    st.markdown("""
+        <style>
+        html, body, [data-testid="stAppViewContainer"] { background: #0f1115 !important; color: #e5e7eb !important; }
+        [data-testid="stHeader"] { background: #0f1115 !important; }
+        .stMarkdown, .stText, .stDataFrame, .stMetric { color: #e5e7eb !important; }
+        div[data-baseweb="select"] * { color: #e5e7eb !important; }
+        .st-af { background: #111318 !important; } /* expander */
+        .st-bc, .st-bb { background: #151822 !important; } /* cards */
+        .stButton > button { background:#1f2937;color:#e5e7eb;border-radius:8px;border:1px solid #374151; }
+        .stButton > button:hover { background:#374151; }
+        </style>
+    """, unsafe_allow_html=True)
+
+if refresh_now:
+    st.session_state["force_refresh"] = True
+
+def _defer_guard(msg: str) -> bool:
+    """Return True if we should SKIP heavy fetches based on defer setting."""
+    if defer_loads and not st.session_state.get("force_refresh", False):
+        st.info(f"Deferred: {msg}\n\nClick **🔄 Refresh data now** (sidebar) to load.")
+        return True
+    return False
+
+def _clear_force_refresh():
+    if st.session_state.get("force_refresh"):
+        st.session_state.pop("force_refresh", None)
+
+# =========================
 # Secrets & Mongo (parity)
 # =========================
 CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
@@ -174,7 +213,6 @@ def all_employees() -> List[str]:
     return [e for e in sorted(load_users().keys()) if e]
 
 def pack_label(r: pd.Series) -> str:
-    # Coerce to string before strip to avoid AttributeError on non-strings
     ach   = str(r.get("ach_id", "") or "").strip()
     name  = str(r.get("client_name", "") or "").strip()
     mob   = str(r.get("client_mobile", "") or "").strip()
@@ -208,24 +246,37 @@ def entry_to_row(d: dict) -> dict:
     }
 
 # =========================
-# Data fetchers (fast)
+# Data fetchers
 # =========================
 @st.cache_data(ttl=IST_TTL, show_spinner=False)
-def _confirmed_ids() -> List[str]:
-    cur = col_updates.find({"status": "confirmed"}, {"_id": 0, "itinerary_id": 1})
-    return [str(d.get("itinerary_id")) for d in cur if d.get("itinerary_id")]
+def _confirmed_updates_map() -> Dict[str, dict]:
+    """
+    Map of itinerary_id -> {'booking_date': datetime or None}
+    for confirmed packages.
+    """
+    cur = col_updates.find({"status": "confirmed"}, {"_id": 0, "itinerary_id": 1, "booking_date": 1})
+    out = {}
+    for d in cur:
+        iid = str(d.get("itinerary_id"))
+        bd  = pd.to_datetime(d.get("booking_date")) if d.get("booking_date") else None
+        out[iid] = {"booking_date": (bd.to_pydatetime() if isinstance(bd, pd.Timestamp) else bd)}
+    return out
 
 @st.cache_data(ttl=IST_TTL, show_spinner=False)
-def confirmed_itineraries_df() -> pd.DataFrame:
+def confirmed_itineraries_df_unique_clients() -> pd.DataFrame:
     """
-    Only itineraries that are CONFIRMED in package_updates.
-    Supports both ObjectId(_id) and legacy 'itinerary_id' string linkage.
+    Only itineraries that are CONFIRMED, deduped to show a single 'final revision' per client.
+    Final revision chosen by:
+      1) latest booking_date (if present)
+      2) fallback to latest ObjectId generation_time (creation)
+    Client identity key: prefer client_mobile, else ACH+name combo.
     """
-    ids = _confirmed_ids()
+    upd_map = _confirmed_updates_map()
+    ids = list(upd_map.keys())
     if not ids:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
 
-    # Try to fetch by _id (ObjectId) for ids of len 24
+    # Fetch itineraries by _id or by legacy 'itinerary_id'
     obj_ids = [ObjectId(i) for i in ids if len(i) == 24]
     docs_by_oid = []
     if obj_ids:
@@ -234,7 +285,6 @@ def confirmed_itineraries_df() -> pd.DataFrame:
             {"_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"start_date":1,"end_date":1,"final_route":1}
         ))
 
-    # Fallback: fetch by 'itinerary_id' string field (legacy data)
     str_ids = [i for i in ids if len(i) != 24]
     docs_by_str = []
     if str_ids:
@@ -243,25 +293,64 @@ def confirmed_itineraries_df() -> pd.DataFrame:
             {"_id":1,"itinerary_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"start_date":1,"end_date":1,"final_route":1}
         ))
 
-    # Normalize
-    all_docs: List[dict] = []
+    rows: List[dict] = []
+    # Normalize OID docs
     for r in docs_by_oid:
-        r["itinerary_id"] = str(r["_id"])
-        r["start_date"] = norm_date(r.get("start_date"))
-        r["end_date"]   = norm_date(r.get("end_date"))
-        r.pop("_id", None)
-        all_docs.append(r)
+        iid = str(r["_id"])
+        created_ts = ObjectId(iid).generation_time if ObjectId.is_valid(iid) else None
+        rows.append({
+            "itinerary_id": iid,
+            "ach_id": r.get("ach_id",""),
+            "client_name": r.get("client_name",""),
+            "client_mobile": r.get("client_mobile",""),
+            "start_date": norm_date(r.get("start_date")),
+            "end_date": norm_date(r.get("end_date")),
+            "final_route": r.get("final_route",""),
+            "_created": created_ts,
+            "_booking": upd_map.get(iid, {}).get("booking_date"),
+        })
+    # Normalize string-id docs
     for r in docs_by_str:
-        r["itinerary_id"] = str(r.get("itinerary_id") or r.get("_id"))
-        r["start_date"] = norm_date(r.get("start_date"))
-        r["end_date"]   = norm_date(r.get("end_date"))
-        r.pop("_id", None)
-        all_docs.append(r)
+        iid = str(r.get("itinerary_id") or r.get("_id"))
+        created_ts = ObjectId(iid).generation_time if ObjectId.is_valid(iid) else None
+        rows.append({
+            "itinerary_id": iid,
+            "ach_id": r.get("ach_id",""),
+            "client_name": r.get("client_name",""),
+            "client_mobile": r.get("client_mobile",""),
+            "start_date": norm_date(r.get("start_date")),
+            "end_date": norm_date(r.get("end_date")),
+            "final_route": r.get("final_route",""),
+            "_created": created_ts,
+            "_booking": upd_map.get(iid, {}).get("booking_date"),
+        })
 
-    if not all_docs:
+    if not rows:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"])
 
-    return pd.DataFrame(all_docs).drop_duplicates(subset=["itinerary_id"])
+    df = pd.DataFrame(rows)
+
+    # Build client identity key (prefer mobile)
+    def _ck(r):
+        mob = str(r.get("client_mobile") or "").strip()
+        if mob:
+            return f"M:{mob}"
+        ach = str(r.get("ach_id") or "").strip()
+        nam = str(r.get("client_name") or "").strip()
+        return f"A:{ach}|N:{nam}"
+    df["_client_key"] = df.apply(_ck, axis=1)
+
+    # Rank: first by booking_date (desc), then by created (desc)
+    df["_booking"] = pd.to_datetime(df["_booking"])
+    df["_created"] = pd.to_datetime(df["_created"])
+    df.sort_values(by=["_client_key","_booking","_created"], ascending=[True, False, False], inplace=True)
+
+    # Keep only the latest for each client
+    latest = df.groupby("_client_key", as_index=False).first()
+
+    # Final projected columns
+    out = latest[["itinerary_id","ach_id","client_name","client_mobile","start_date","end_date","final_route"]].copy()
+    return out.reset_index(drop=True)
 
 def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
                   employee: Optional[str] = None, itinerary_id: Optional[str] = None) -> pd.DataFrame:
@@ -330,9 +419,13 @@ def add_settlement(*, employee: str, amount: int, when: date, ref: str, notes: s
     })
 
 # =========================
-# Filters / controls
+# Filters / controls (deferred)
 # =========================
-df_confirmed = confirmed_itineraries_df()
+if _defer_guard("Filters and confirmed customer list"):
+    _clear_force_refresh()
+    st.stop()
+
+df_confirmed_unique = confirmed_itineraries_df_unique_clients()
 
 with st.container():
     f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.4, 2.2])
@@ -352,7 +445,7 @@ with st.container():
         search_txt = st.text_input("Search confirmed client/mobile/ACH", placeholder="Type to filter package list…")
 
 def choose_package(label="Select confirmed package", key="pkg_pick") -> Tuple[Optional[str], str, str]:
-    options = df_confirmed.copy()
+    options = df_confirmed_unique.copy()
     if options is None or options.empty:
         st.info("No confirmed packages found.")
         return None, "", ""
@@ -385,18 +478,21 @@ def choose_package(label="Select confirmed package", key="pkg_pick") -> Tuple[Op
     return rid, str(row.get("client_name","") or ""), str(row.get("ach_id","") or "")
 
 # =========================
-# KPIs for current user
+# KPIs for current user (deferred)
 # =========================
-st.subheader("My balances")
-exp_m, pay_m, bal_m = totals_for_employee(user, start, end)
-exp_all, pay_all, bal_all = totals_for_employee(user, None, None)
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Paid this period", f"₹ {exp_m:,}")
-k2.metric("Settled this period", f"₹ {pay_m:,}")
-k3.metric("Balance this period", f"₹ {bal_m:,}")
-k4.metric("Paid (all time)", f"₹ {exp_all:,}")
-k5.metric("Settled (all time)", f"₹ {pay_all:,}")
-k6.metric("Balance (all time)", f"₹ {bal_all:,}")
+if _defer_guard("My balances KPIs"):
+    pass
+else:
+    st.subheader("My balances")
+    exp_m, pay_m, bal_m = totals_for_employee(user, start, end)
+    exp_all, pay_all, bal_all = totals_for_employee(user, None, None)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Paid this period", f"₹ {exp_m:,}")
+    k2.metric("Settled this period", f"₹ {pay_m:,}")
+    k3.metric("Balance this period", f"₹ {bal_m:,}")
+    k4.metric("Paid (all time)", f"₹ {exp_all:,}")
+    k5.metric("Settled (all time)", f"₹ {pay_all:,}")
+    k6.metric("Balance (all time)", f"₹ {bal_all:,}")
 
 st.divider()
 
@@ -450,10 +546,12 @@ if submitted:
             category=category, subheader=subheader, amount=int(amount), when=when, notes=notes
         )
         st.success("Expense added.")
+        # Force reload after save only
+        st.session_state["force_refresh"] = True
         st.rerun()
 
 # =========================
-# Admin: settle balances
+# Admin: settle balances (deferred)
 # =========================
 if is_admin:
     st.subheader("💵 Admin – Settle employee balance")
@@ -475,78 +573,91 @@ if is_admin:
         else:
             add_settlement(employee=emp_to_pay, amount=int(pay_amt), when=pay_date, ref=ref, notes=notes_s)
             st.success("Settlement recorded.")
+            st.session_state["force_refresh"] = True
             st.rerun()
 
 st.divider()
 
 # =========================
-# Package ledger (confirmed only)
+# Package ledger (confirmed only) (deferred)
 # =========================
 st.subheader("📦 Package ledger (confirmed only)")
-iid_l, cust_l, ach_l = choose_package("Pick a confirmed package to view ledger", key="ledger_pick")
-if iid_l:
-    df_pkg = fetch_entries(start=None, end=None, itinerary_id=iid_l)
-    if df_pkg.empty:
-        st.info("No entries yet for this package.")
-    else:
-        exp_tbl = df_pkg[df_pkg["Kind"]=="expense"].copy()
-        exp_tbl = exp_tbl[["Date","Employee","Category","Subheader","Amount (₹)","Notes"]].sort_values("Date")
-        st.dataframe(exp_tbl, use_container_width=True, hide_index=True)
-        with st.expander("Show summaries"):
-            by_emp = exp_tbl.groupby("Employee", as_index=False)["Amount (₹)"].sum()
-            by_cat = exp_tbl.groupby("Category", as_index=False)["Amount (₹)"].sum()
-            csum1, csum2 = st.columns(2)
-            with csum1:
-                st.markdown("**By employee**")
-                st.dataframe(by_emp, use_container_width=True, hide_index=True)
-            with csum2:
-                st.markdown("**By category**")
-                st.dataframe(by_cat, use_container_width=True, hide_index=True)
-        st.caption("Settlements shown below are global for the employee (not tied to one package).")
-        st.dataframe(df_pkg[df_pkg["Kind"]=="settlement"][["Date","Employee","Amount (₹)","Ref","Notes"]],
-                     use_container_width=True, hide_index=True)
+if _defer_guard("Package ledger"):
+    pass
+else:
+    iid_l, cust_l, ach_l = choose_package("Pick a confirmed package to view ledger", key="ledger_pick")
+    if iid_l:
+        df_pkg = fetch_entries(start=None, end=None, itinerary_id=iid_l)
+        if df_pkg.empty:
+            st.info("No entries yet for this package.")
+        else:
+            exp_tbl = df_pkg[df_pkg["Kind"]=="expense"].copy()
+            exp_tbl = exp_tbl[["Date","Employee","Category","Subheader","Amount (₹)","Notes"]].sort_values("Date")
+            st.dataframe(exp_tbl, use_container_width=True, hide_index=True)
+            with st.expander("Show summaries"):
+                by_emp = exp_tbl.groupby("Employee", as_index=False)["Amount (₹)"].sum()
+                by_cat = exp_tbl.groupby("Category", as_index=False)["Amount (₹)"].sum()
+                csum1, csum2 = st.columns(2)
+                with csum1:
+                    st.markdown("**By employee**")
+                    st.dataframe(by_emp, use_container_width=True, hide_index=True)
+                with csum2:
+                    st.markdown("**By category**")
+                    st.dataframe(by_cat, use_container_width=True, hide_index=True)
+            st.caption("Settlements shown below are global for the employee (not tied to one package).")
+            st.dataframe(df_pkg[df_pkg["Kind"]=="settlement"][["Date","Employee","Amount (₹)","Ref","Notes"]],
+                         use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================
-# Team balances table (period + all-time)
+# Team balances table (period + all-time) (deferred)
 # =========================
 st.subheader("👥 Balances")
-search_emp = st.text_input("Search employee (optional)", key="emp_search")
-emps = emp_filter if emp_filter else all_employees()
-if search_emp.strip():
-    s = search_emp.strip().lower()
-    emps = [e for e in emps if s in e.lower()]
+if _defer_guard("Team balances"):
+    pass
+else:
+    search_emp = st.text_input("Search employee (optional)", key="emp_search")
+    emps = (emp_filter if emp_filter else all_employees()) or []
+    if search_emp and search_emp.strip():
+        s = search_emp.strip().lower()
+        emps = [e for e in emps if s in e.lower()]
 
-rows = []
-for e in emps:
-    em = totals_for_employee(e, start, end)
-    ea = totals_for_employee(e, None, None)
-    rows.append({
-        "Employee": e,
-        "Paid (period)": em[0],
-        "Settled (period)": em[1],
-        "Balance (period)": em[2],
-        "Paid (all time)": ea[0],
-        "Settled (all time)": ea[1],
-        "Balance (all time)": ea[2],
-    })
+    rows = []
+    for e in emps:
+        em = totals_for_employee(e, start, end)
+        ea = totals_for_employee(e, None, None)
+        rows.append({
+            "Employee": e,
+            "Paid (period)": em[0],
+            "Settled (period)": em[1],
+            "Balance (period)": em[2],
+            "Paid (all time)": ea[0],
+            "Settled (all time)": ea[1],
+            "Balance (all time)": ea[2],
+        })
 
-df_bal = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-    "Employee","Paid (period)","Settled (period)","Balance (period)","Paid (all time)","Settled (all time)","Balance (all time)"
-])
-df_bal = df_bal.sort_values(["Balance (period)","Balance (all time)"], ascending=False)
-st.dataframe(df_bal, use_container_width=True, hide_index=True)
+    df_bal = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        "Employee","Paid (period)","Settled (period)","Balance (period)","Paid (all time)","Settled (all time)","Balance (all time)"
+    ])
+    df_bal = df_bal.sort_values(["Balance (period)","Balance (all time)"], ascending=False)
+    st.dataframe(df_bal, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================
-# My entries (in selected period)
+# My entries (in selected period) (deferred)
 # =========================
 st.subheader("📜 My entries (in selected period)")
-df_me = fetch_entries(start, end, employee=user, itinerary_id=None)
-if df_me.empty:
-    st.info("No entries in this period.")
+if _defer_guard("My entries table"):
+    pass
 else:
-    show_cols = ["Kind","Date","Customer","ACH ID","Category","Subheader","Amount (₹)","Notes","Ref"]
-    st.dataframe(df_me[show_cols].sort_values(["Date","Kind"]), use_container_width=True, hide_index=True)
+    df_me = fetch_entries(start, end, employee=user, itinerary_id=None)
+    if df_me.empty:
+        st.info("No entries in this period.")
+    else:
+        show_cols = ["Kind","Date","Customer","ACH ID","Category","Subheader","Amount (₹)","Notes","Ref"]
+        st.dataframe(df_me[show_cols].sort_values(["Date","Kind"]), use_container_width=True, hide_index=True)
+
+# Clear force flag at end of successful load cycle
+_clear_force_refresh()
