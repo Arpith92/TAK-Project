@@ -250,6 +250,232 @@ def sync_initial_cost_to_expenses_and_updates(itinerary_id: str, total_package: 
         upsert=True,
     )
 
+#New Section_test
+# =========================
+# 🔧 NEW SECTION: Quick update existing packages
+# =========================
+st.divider()
+st.subheader("🔧 Quick update existing packages (edit & confirm/follow-up)")
+
+with st.expander("Open updater", expanded=False):
+    # --- Pick a package (latest first) ---
+    try:
+        # limit to recent items for faster UI; tweak as needed
+        cur = list(
+            col_it.find(
+                {},
+                {
+                    "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
+                    "start_date": 1, "end_date": 1, "representative": 1,
+                    "upload_date": 1, "revision_num": 1, "referred_by": 1, "referral_discount_pct": 1,
+                    "package_total": 1, "package_after_referral": 1
+                }
+            ).sort([("upload_date", -1), ("revision_num", -1)]).limit(500)
+        )
+    except Exception as e:
+        st.error(f"Could not load packages: {e}")
+        cur = []
+
+    if not cur:
+        st.info("No packages found to update yet.")
+        st.stop()
+
+    options = []
+    for r in cur:
+        iid = str(r["_id"])
+        ach = str(r.get("ach_id","") or "")
+        nm  = str(r.get("client_name","") or "")
+        mob = str(r.get("client_mobile","") or "")
+        stt = str(r.get("start_date","") or "")
+        rev = int(r.get("revision_num", 1) or 1)
+        label = f"{ach or '—'} | {nm} | {mob} | start:{stt or '—'} | rev:{rev} | {iid}"
+        options.append((label, iid))
+
+    sel = st.selectbox("Pick a package", [lbl for lbl,_ in options])
+    chosen_id = None
+    if sel:
+        for lbl,iid in options:
+            if lbl == sel:
+                chosen_id = iid
+                break
+
+    if not chosen_id:
+        st.stop()
+
+    # --- Load current docs ---
+    it_doc = col_it.find_one({"_id": ObjectId(chosen_id)}) or {}
+    up_doc = col_updates.find_one({"itinerary_id": str(chosen_id)}) or {}
+    ex_doc = col_expenses.find_one({"itinerary_id": str(chosen_id)}) or {}
+
+    # --- Defaults / helpers ---
+    def _norm_date_local(x):
+        try:
+            if not x: return None
+            return pd.to_datetime(x).date()
+        except Exception:
+            return None
+
+    # Pre-fill fields
+    ach_id      = str(it_doc.get("ach_id","") or "")
+    nm          = str(it_doc.get("client_name","") or "")
+    mob         = str(it_doc.get("client_mobile","") or "")
+    rep_cur     = str(it_doc.get("representative","") or "")
+    start_cur   = _norm_date_local(it_doc.get("start_date")) or dt.date.today()
+    end_cur     = _norm_date_local(it_doc.get("end_date")) or start_cur
+    upload_cur  = _norm_date_local(it_doc.get("upload_date")) or dt.date.today()
+
+    # Prefer explicit final from expenses, else itinerary package_total
+    final_default = (
+        int(ex_doc.get("final_package_cost", ex_doc.get("package_cost", 0)) or 0)
+        or int(it_doc.get("package_total", 0) or 0)
+    )
+
+    st.markdown("**Current selection**")
+    colsMeta = st.columns(4)
+    with colsMeta[0]: st.write({"ACH": ach_id})
+    with colsMeta[1]: st.write({"Client": nm})
+    with colsMeta[2]: st.write({"Mobile": mob})
+    with colsMeta[3]: st.write({"Last representative": rep_cur})
+
+    st.markdown("### Edit fields")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        rep_new = st.selectbox(
+            "Representative",
+            ["Arpith","Reena","Kuldeep","Teena"],
+            index=(["Arpith","Reena","Kuldeep","Teena"].index(rep_cur) if rep_cur in ["Arpith","Reena","Kuldeep","Teena"] else 0)
+        )
+    with c2:
+        start_new = st.date_input("Travel start date", value=start_cur)
+    with c3:
+        end_new = st.date_input("Travel end date", value=end_cur)
+    with c4:
+        upload_new = st.date_input("Upload date (optional)", value=upload_cur)
+
+    c5,c6 = st.columns(2)
+    with c5:
+        final_amt = st.number_input("Final package amount (₹)", min_value=0, step=500, value=int(final_default or 0))
+    with c6:
+        action = st.radio("Status next", ["Confirm now", "Follow-up"], horizontal=True)
+
+    # Extra fields when confirming
+    book_date = None; adv_amt = 0; utr = ""
+    if action == "Confirm now":
+        cc1,cc2,cc3 = st.columns(3)
+        with cc1:
+            book_date = st.date_input("Booking date", value=dt.date.today())
+        with cc2:
+            adv_amt = st.number_input("Advance amount (₹)", min_value=0, step=500)
+        with cc3:
+            utr = st.text_input("UTR / Payment reference", placeholder="e.g., UPI/NEFT ref")
+
+    note = st.text_area("Comment / note (optional)", "")
+
+    if st.button("💾 Update selected package", use_container_width=True):
+        try:
+            now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+
+            # 1) Update itinerary core fields
+            it_set = {
+                "representative": rep_new,
+                "start_date": str(start_new),
+                "end_date": str(end_new),
+            }
+            # Only touch upload_date if user provided a value (keep type as UTC datetime)
+            if upload_new:
+                it_set["upload_date"] = dt.datetime(
+                    upload_new.year, upload_new.month, upload_new.day, 12, 0, 0, tzinfo=dt.timezone.utc
+                )
+
+            # Mirror package_total on itinerary (optional; keeps dashboards in sync)
+            if final_amt and final_amt > 0:
+                it_set["package_total"] = int(final_amt)
+                it_set["package_cost"] = int(final_amt)
+                # respect referral if present
+                ref_pct = int(it_doc.get("referral_discount_pct", 0) or 0)
+                if ref_pct > 0:
+                    it_set["package_after_referral"] = max(int(final_amt) - int(round(final_amt * ref_pct / 100.0)), 0)
+
+            col_it.update_one({"_id": ObjectId(chosen_id)}, {"$set": it_set})
+
+            # 2) Mirror amount to expenses + updates fields
+            if final_amt and final_amt > 0:
+                sync_initial_cost_to_expenses_and_updates(chosen_id, int(final_amt))
+
+            # 3) Status handling in package_updates + followups trail
+            if action == "Follow-up":
+                # assign to representative and keep as follow-up
+                col_updates.update_one(
+                    {"itinerary_id": str(chosen_id)},
+                    {"$set": {
+                        "status": "followup",
+                        "assigned_to": rep_new,
+                        "updated_at": dt.datetime.utcnow(),
+                    }},
+                    upsert=True
+                )
+                col_followups.insert_one({
+                    "itinerary_id": str(chosen_id),
+                    "created_at": dt.datetime.utcnow(),
+                    "created_by": user,
+                    "status": "followup",
+                    "comment": f"{note or 'Updated via Quick updater; set to follow-up'}",
+                    "next_followup_on": None,
+                })
+                # persist representative alignment
+                upsert_update_from_rep(str(chosen_id), rep_new, actor_user=user)
+
+            else:
+                # Confirm now
+                if not book_date:
+                    st.error("Please select a booking date to confirm.")
+                    st.stop()
+                if adv_amt <= 0:
+                    st.error("Advance amount must be > 0 to confirm.")
+                    st.stop()
+                if not (utr or "").strip():
+                    st.error("UTR / payment reference is required to confirm.")
+                    st.stop()
+
+                bdt = dt.datetime.combine(book_date, dt.time(0,0))
+                # ensure costs are mirrored too
+                if final_amt and final_amt > 0:
+                    sync_initial_cost_to_expenses_and_updates(chosen_id, int(final_amt))
+
+                col_updates.update_one(
+                    {"itinerary_id": str(chosen_id)},
+                    {"$set": {
+                        "status": "confirmed",
+                        "booking_date": bdt,
+                        "advance_amount": int(adv_amt),
+                        "utr": str(utr).strip(),
+                        "rep_name": rep_new,
+                        "assigned_to": None,
+                        "updated_at": dt.datetime.utcnow(),
+                        # mirror cost fields here as well (defensive)
+                        "package_cost": int(final_amt or 0),
+                        "final_package_cost": int(final_amt or 0),
+                        "base_package_cost": int(final_amt or 0),
+                        "discount": 0,
+                    }},
+                    upsert=True
+                )
+                col_followups.insert_one({
+                    "itinerary_id": str(chosen_id),
+                    "created_at": dt.datetime.utcnow(),
+                    "created_by": user,
+                    "status": "confirmed",
+                    "comment": f"{note or 'Confirmed via Quick updater'}",
+                    "next_followup_on": None,
+                })
+
+            st.success("✅ Updated successfully. This will reflect across Dashboard/Follow-up pages.")
+        except Exception as e:
+            st.error(f"Update failed: {e}")
+#New Section-test end
+
+
+
 # ---------- Sidebar: User Trail ----------
 with st.sidebar.expander("👤 User trail (last 25)"):
     try:
