@@ -6,7 +6,7 @@ from __future__ import annotations
 # ==============================
 import os, base64
 from datetime import datetime, date, time as dtime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -168,7 +168,6 @@ def load_confirmed_customers() -> pd.DataFrame:
     if not it_rows:
         return pd.DataFrame(columns=["itinerary_id","ach_id","client_name","client_mobile"])
     df = pd.DataFrame(it_rows).drop_duplicates(subset=["itinerary_id"]).reset_index(drop=True)
-    # normalize strings
     for c in ("ach_id","client_name","client_mobile","itinerary_id"):
         df[c] = df[c].fillna("").astype(str)
     return df
@@ -215,9 +214,6 @@ def load_attendance(driver: str, start: date, end: date) -> pd.DataFrame:
         "billable_salary","billable_ot_units","billable_ot_amount"
     ])
     if not df.empty:
-        # stable row id for editor (driver|date)
-        df["row_id"] = df.apply(lambda r: f'{r["driver"]}|{pd.to_datetime(r["date"]).date().isoformat()}', axis=1)
-        # keep OT amount derived
         df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
     return df
 
@@ -364,18 +360,13 @@ class SalaryPDF(FPDF):
         return _ascii_downgrade(s)
 
     def header(self):
-        # outer border
         self.set_draw_color(150,150,150)
         self.rect(8, 8, 194, 281)
-
-        # logo
         if ORG_LOGO and os.path.exists(ORG_LOGO):
             try:
                 self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception:
                 pass
-
-        # center text
         self.set_xy(50, 12)
         self.set_font("Helvetica", "B", 14)
         self.cell(0, 7, self._txt(ORG["title"]), align="C", ln=1)
@@ -399,8 +390,7 @@ def inr_ascii(n) -> str:
         return f"Rs {n}"
 
 def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc: dict) -> bytes:
-    BASE_SALARY_LINE = 12000  # display policy
-
+    BASE_SALARY_LINE = 12000
     days_in_month = int(calc.get("days_in_month", 0))
     leave_days    = int(calc.get("leave_days", 0))
     leave_ded     = int(calc.get("leave_ded", 0) or calc.get("leave_deduction", 0))
@@ -414,7 +404,7 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
 
     left = 16
     th = 8
-    col1_w, col2_w, col3_w = 88, 40, 58  # sum = 186 (fits)
+    col1_w, col2_w, col3_w = 88, 40, 58
 
     pdf.set_font("Helvetica", "", 11)
     pdf.set_x(left)
@@ -426,7 +416,6 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     pdf.cell(0, 6, pdf._txt(f"EMP NAME:  {emp_name}"), ln=1)
     pdf.ln(2)
 
-    # Table header
     pdf.set_font("Helvetica", "B", 10)
     y = pdf.get_y()
     pdf.rect(left, y, col1_w, th)
@@ -455,7 +444,6 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     row("Over-time", ot_units, ot_amount)
     row("Advances (deduct)", "-", advances)
 
-    # Net total
     pdf.ln(2)
     pdf.set_font("Helvetica", "B", 11)
     y = pdf.get_y()
@@ -466,11 +454,9 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
     pdf.cell(col3_w - 2, th, pdf._txt(inr_ascii(net)), align="R")
     pdf.ln(th + 10)
 
-    # Note
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5, pdf._txt("Note: This is a computer-generated statement."))
 
-    # Signature
     pdf.ln(6)
     sig_w = 50
     sig_x = pdf.w - 16 - sig_w
@@ -496,12 +482,11 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
         st.info("No entries found for the selected period.")
         return df
 
-    # Derived column – keep visible but read-only
     df = df.copy()
     df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
 
     base_cols = [
-        "row_id","date","driver","car","in_time","out_time","status",
+        "date","driver","car","in_time","out_time","status",
         "outstation_overnight","overnight_client","overnight_client_name",
         "bhasmarathi","bhas_client_name","notes",
         "billable_salary","billable_ot_units","billable_ot_amount"
@@ -519,7 +504,6 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
         use_container_width=True,
         key=key,
         column_config={
-            "row_id": st.column_config.TextColumn("row_id", help="hidden id", disabled=True, visible=False),
             "date": st.column_config.DateColumn("date", help="Attendance date", disabled=True),
             "driver": st.column_config.TextColumn("driver", disabled=True),
             "car": st.column_config.SelectboxColumn("car", options=[""] + CARS),
@@ -535,7 +519,7 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
             "billable_salary": st.column_config.NumberColumn("billable_salary", min_value=0, step=100),
             "billable_ot_units": st.column_config.NumberColumn("billable_ot_units", min_value=0, step=1),
             "billable_ot_amount": st.column_config.NumberColumn("billable_ot_amount", help="auto = units × 300", disabled=True),
-            # optional customer linkage columns (admin may choose to edit)
+            # optional customer linkage columns
             "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id", help="Itinerary ID"),
             "cust_ach_id": st.column_config.TextColumn("cust_ach_id", help="ACH ID"),
             "cust_name": st.column_config.TextColumn("cust_name"),
@@ -544,11 +528,10 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
     )
     return edited
 
-def save_table_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> int:
-    """Persist all rows from edited_df by upserting each row."""
+def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
+    """Persist all rows from edited_df by upserting each row (keyed on driver+date)."""
     if edited_df.empty:
         return 0
-
     cnt = 0
     for _, r in edited_df.iterrows():
         day = _d(r["date"])
@@ -575,7 +558,6 @@ def save_table_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> in
             billable_ot_units     = _to_int(r.get("billable_ot_units",0)),
         )
         cnt += 1
-    # clear caches so metrics recalc
     load_attendance.clear()
     return cnt
 
@@ -611,7 +593,7 @@ with tab_driver:
         bhasmarathi = st.checkbox("Bhasmarathi duty", value=False, key="drv_bhas")
         bhas_client = st.text_input("Bhasmarathi client", value="", key="drv_bhas_name", disabled=(not bhasmarathi))
 
-    # --- Customer link & per-customer cost allocation (Unique search UX)
+    # --- Customer link & per-customer cost allocation
     st.markdown("### Link to Customer (optional) & Cost Allocation")
     confirmed = load_confirmed_customers()
 
