@@ -6,7 +6,7 @@ from __future__ import annotations
 # ==============================
 import os, base64
 from datetime import datetime, date, time as dtime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 import pandas as pd
 import streamlit as st
@@ -172,6 +172,32 @@ def load_confirmed_customers() -> pd.DataFrame:
     for c in ("ach_id","client_name","client_mobile","itinerary_id"):
         df[c] = df[c].fillna("").astype(str)
     return df
+
+def customer_pick_options() -> tuple[list[str], Dict[str, Dict[str, str]]]:
+    """
+    Build dropdown options and a reverse map:
+    label = "Name — Mobile | ACH | ItineraryID"
+    """
+    confirmed = load_confirmed_customers()
+    options = ["", "➕ Custom / Other"]
+    rev_map: Dict[str, Dict[str, str]] = {}
+    if confirmed.empty:
+        return options, rev_map
+    tmp = confirmed.copy()
+    tmp["label"] = (
+        tmp["client_name"].str.strip() + " — " + tmp["client_mobile"].str.strip()
+        + " | " + tmp["ach_id"].fillna("").astype(str).str.strip()
+        + " | " + tmp["itinerary_id"].astype(str).str.strip()
+    )
+    for _, r in tmp.iterrows():
+        lbl = r["label"]
+        options.append(lbl)
+        rev_map[lbl] = {
+            "cust_name": r.get("client_name",""),
+            "cust_ach_id": r.get("ach_id",""),
+            "cust_itinerary_id": r.get("itinerary_id",""),
+        }
+    return options, rev_map
 
 # ==============================
 # Cached loaders
@@ -471,8 +497,8 @@ def build_salary_pdf(*, emp_name: str, month_label: str, period_label: str, calc
 # ==============================
 # Shared: editor + saver
 # ==============================
-def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bool = True) -> pd.DataFrame:
-    """Return edited DataFrame using st.data_editor with proper widgets."""
+def render_editable_table(df: pd.DataFrame, *, key: str) -> pd.DataFrame:
+    """Return edited DataFrame using st.data_editor with proper widgets, including customer dropdown."""
     if df.empty:
         st.info("No entries found for the selected period.")
         return df
@@ -480,24 +506,41 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
     df = df.copy()
     df["billable_ot_amount"] = df["billable_ot_units"].fillna(0).astype(int) * OVERTIME_ADD
 
-    base_cols = [
+    # customer dropdown options (confirmed only)
+    cust_opts, _ = customer_pick_options()
+
+    cols = [
         "date","driver","car","in_time","out_time","status",
         "outstation_overnight","overnight_client","overnight_client_name",
         "bhasmarathi","bhas_client_name","notes",
-        "billable_salary","billable_ot_units","billable_ot_amount"
+        # customer helper + details
+        "customer_pick", "cust_name","cust_ach_id","cust_itinerary_id","cust_is_custom",
+        # allocation
+        "billable_salary","billable_ot_units","billable_ot_amount",
     ]
-    cust_cols = ["cust_itinerary_id","cust_ach_id","cust_name","cust_is_custom"]
-    cols = base_cols + (cust_cols if allow_customer_cols else [])
 
+    # Ensure required cols exist
     for c in cols:
         if c not in df.columns:
-            df[c] = "" if c not in ["outstation_overnight","overnight_client","bhasmarathi","cust_is_custom"] else False
+            if c in ["outstation_overnight","overnight_client","bhasmarathi","cust_is_custom"]:
+                df[c] = False
+            elif c == "billable_ot_units":
+                df[c] = 0
+            elif c == "billable_ot_amount":
+                df[c] = 0
+            else:
+                df[c] = ""
+
+    # Derive a default 'customer_pick' label if data matches a confirmed customer
+    if "customer_pick" not in df.columns:
+        df["customer_pick"] = ""
+    # (We keep it blank; users can choose an option. Matching back requires mobile which we don't store.)
 
     edited = st.data_editor(
         df[cols].sort_values("date"),
         hide_index=True,
         use_container_width=True,
-        height=520,  # makes internal scroll, header stays visible
+        height=520,  # internal scroll -> sticky header visible
         key=key,
         column_config={
             "date": st.column_config.DateColumn("date", help="Attendance date", disabled=True),
@@ -512,13 +555,21 @@ def render_editable_table(df: pd.DataFrame, *, key: str, allow_customer_cols: bo
             "bhasmarathi": st.column_config.CheckboxColumn("bhasmarathi"),
             "bhas_client_name": st.column_config.TextColumn("bhas_client_name"),
             "notes": st.column_config.TextColumn("notes", width="large"),
+
+            # Customer selection & details
+            "customer_pick": st.column_config.SelectboxColumn(
+                "customer (confirmed)",
+                options=cust_opts,
+                help="Pick a confirmed customer+package (Name — Mobile | ACH | IID) or choose '➕ Custom / Other' and fill 'cust_name'."
+            ),
+            "cust_name": st.column_config.TextColumn("cust_name"),
+            "cust_ach_id": st.column_config.TextColumn("cust_ach_id"),
+            "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id"),
+            "cust_is_custom": st.column_config.CheckboxColumn("cust_is_custom"),
+
             "billable_salary": st.column_config.NumberColumn("billable_salary", min_value=0, step=100),
             "billable_ot_units": st.column_config.NumberColumn("billable_ot_units", min_value=0, step=1),
             "billable_ot_amount": st.column_config.NumberColumn("billable_ot_amount", help="auto = units × 300", disabled=True),
-            "cust_itinerary_id": st.column_config.TextColumn("cust_itinerary_id", help="Itinerary ID"),
-            "cust_ach_id": st.column_config.TextColumn("cust_ach_id", help="ACH ID"),
-            "cust_name": st.column_config.TextColumn("cust_name"),
-            "cust_is_custom": st.column_config.CheckboxColumn("cust_is_custom"),
         }
     )
     return edited
@@ -527,11 +578,30 @@ def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
     """Persist all rows from edited_df by upserting each row (keyed on driver+date)."""
     if edited_df.empty:
         return 0
+    _, cust_map = customer_pick_options()
+
     cnt = 0
     for _, r in edited_df.iterrows():
         day = _d(r["date"])
         if not day:
             continue
+
+        # Resolve customer from dropdown, if selected
+        cust_is_custom = bool(r.get("cust_is_custom", False))
+        cust_name = str(r.get("cust_name",""))
+        cust_ach_id = str(r.get("cust_ach_id",""))
+        cust_itinerary_id = str(r.get("cust_itinerary_id",""))
+        pick = str(r.get("customer_pick","")).strip()
+
+        if pick and not pick.startswith("➕") and pick in cust_map:
+            # Overwrite from confirmed pick
+            ref = cust_map[pick]
+            cust_name = ref.get("cust_name","")
+            cust_ach_id = ref.get("cust_ach_id","")
+            cust_itinerary_id = ref.get("cust_itinerary_id","")
+            cust_is_custom = False
+        # else keep whatever is typed, incl. custom
+
         upsert_attendance(
             driver = str(r.get("driver","")),
             day    = day,
@@ -545,10 +615,10 @@ def save_table_changes(_: pd.DataFrame, edited_df: pd.DataFrame) -> int:
             bhasmarathi           = bool(r.get("bhasmarathi", False)),
             bhas_client_name      = str(r.get("bhas_client_name","")),
             notes                 = str(r.get("notes","")),
-            cust_itinerary_id     = str(r.get("cust_itinerary_id","")),
-            cust_ach_id           = str(r.get("cust_ach_id","")),
-            cust_name             = str(r.get("cust_name","")),
-            cust_is_custom        = bool(r.get("cust_is_custom", False)),
+            cust_itinerary_id     = cust_itinerary_id,
+            cust_ach_id           = cust_ach_id,
+            cust_name             = cust_name,
+            cust_is_custom        = cust_is_custom,
             billable_salary       = _to_int(r.get("billable_salary",0)),
             billable_ot_units     = _to_int(r.get("billable_ot_units",0)),
         )
@@ -588,7 +658,7 @@ with tab_driver:
         bhasmarathi = st.checkbox("Bhasmarathi duty", value=False, key="drv_bhas")
         bhas_client = st.text_input("Bhasmarathi client", value="", key="drv_bhas_name", disabled=(not bhasmarathi))
 
-    # --- Customer link & cost allocation
+    # --- Customer link & cost allocation (single-entry form)
     st.markdown("### Link to Customer (optional) & Cost Allocation")
     confirmed = load_confirmed_customers()
 
@@ -655,7 +725,7 @@ with tab_driver:
         )
         load_attendance.clear()
         st.success("Saved.")
-        st.rerun()  # << fixed
+        st.rerun()
 
     st.divider()
     st.subheader("My Salary (this month)")
@@ -672,15 +742,15 @@ with tab_driver:
     k5.metric("Deductions", inr(calc["leave_ded"] + calc["advances"]))
     k6.metric("Net Pay", inr(calc["net"]))
 
-    with st.expander("Edit my entries (this month)", expanded=True):
-        edited_df = render_editable_table(df_att, key="drv_editor", allow_customer_cols=False)
+    with st.expander("Edit my entries (this month) — customer details included", expanded=True):
+        edited_df = render_editable_table(df_att, key="drv_editor")
         c1, c2 = st.columns([1,3])
         if c1.button("✅ Apply changes", key="drv_apply_changes"):
             saved = save_table_changes(df_att, edited_df)
             if saved:
                 st.success(f"Updated {saved} row(s).")
                 load_attendance.clear()
-                st.rerun()  # << fixed
+                st.rerun()
             else:
                 st.info("No changes to save.")
 
@@ -749,15 +819,15 @@ if is_admin and tab_admin is not None:
         df_att_m = load_attendance(admin_driver, mstart, mend)
         df_adv_m = load_advances(admin_driver, mstart, mend)
 
-        with st.expander("Attendance (month) — editable", expanded=True):
-            edited_admin_df = render_editable_table(df_att_m, key="adm_editor", allow_customer_cols=True)
+        with st.expander("Attendance (month) — editable with customer dropdown", expanded=True):
+            edited_admin_df = render_editable_table(df_att_m, key="adm_editor")
             c1, c2 = st.columns([1,3])
             if c1.button("✅ Apply changes (admin)", key="adm_apply_changes"):
                 saved = save_table_changes(df_att_m, edited_admin_df)
                 if saved:
                     st.success(f"Updated {saved} row(s).")
                     load_attendance.clear()
-                    st.rerun()  # << fixed
+                    st.rerun()
                 else:
                     st.info("No changes to save.")
 
