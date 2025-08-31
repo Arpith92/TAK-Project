@@ -408,7 +408,7 @@ def fetch_updates_joined() -> pd.DataFrame:
     # Representative visibility rule (from app.py): show to that rep only
     # We'll enforce by filtering on assigned_to (followup) or rep_name (confirmed)
     df["status"] = df["status"].fillna("followup")
-    df["_booking"] = pd.to_datetime(df.get("booking_date"), errors="coerce")
+    df["_booking"] = pd.to_datetime(df.get("booking_date"), errors="coerce", utc=True).dt.tz_convert(None)
     df["_created"] = pd.to_datetime(df.get("_created_utc"), errors="coerce")
 
     # client key: prefer mobile; else ach+name
@@ -460,11 +460,17 @@ def _unique_status_counts(df_latest: pd.DataFrame) -> Dict[str,int]:
     }
 
 def _between_ts(series: pd.Series, start_d: date, end_d: date) -> pd.Series:
-    # robust comparison: coerce to datetime64; others become NaT
-    s = pd.to_datetime(series, errors="coerce")
+    """
+    Robust range check:
+    - Coerce to datetime, interpret as UTC if tz info exists (or missing), then drop tz.
+    - Compare against tz-naive lo/hi.
+    """
+    # Make everything UTC-aware first, then strip tz -> tz-naive in UTC
+    s = pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert(None)
     lo = pd.Timestamp(datetime.combine(start_d, dtime.min))
     hi = pd.Timestamp(datetime.combine(end_d, dtime.max))
-    return (s >= lo) & (s <= hi)
+    return s.ge(lo) & s.le(hi)
+
 
 def count_confirmed_unique_range(user_filter: Optional[str], start_d: date, end_d: date) -> int:
     df = fetch_updates_joined()
