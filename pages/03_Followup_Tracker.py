@@ -401,7 +401,7 @@ def _auto_confirm_other_packages(current_iid: str, credit_user: str, booking_dat
 # Cached fetchers (existing)
 # =========================
 @st.cache_data(ttl=45, show_spinner=False)
-def fetch_assigned_followups_raw(assigned_to: Optional[str]) -> pd.DataFrame:
+def fetch_assigned_followups_raw(assigned_to: Optional[str] = None) -> pd.DataFrame:
     q = {"status": "followup"}
     if assigned_to is not None:
         q["assigned_to"] = assigned_to
@@ -774,7 +774,8 @@ with st.sidebar:
 # Admin/Manager quick overview
 if is_admin or is_manager:
     if not _defer_guard("Follow-ups by assignee"):
-        df_over = fetch_assigned_followups_raw(user_filter=None)
+        @st.cache_data(ttl=45, show_spinner=False)
+        def fetch_assigned_followups_raw(assigned_to: Optional[str] = None) -> pd.DataFrame:
         if not df_over.empty:
             st.markdown("### 👥 Follow-ups by assignee")
             # Aggregate unique-by-client latest followups per assignee
