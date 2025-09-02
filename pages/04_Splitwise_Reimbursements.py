@@ -57,9 +57,10 @@ if refresh_now:
 
 
 def _defer_guard(msg: str) -> bool:
-    """Return True if we should SKIP heavy fetches based on defer setting."""
     if defer_loads and not st.session_state.get("force_refresh", False):
-        st.info(f"Deferred: {msg}
+        st.info("Deferred: {}\n\nClick **🔄 Refresh data now** (sidebar) to load.".format(msg))
+        return True
+    return False
 
 Click **🔄 Refresh data now** (sidebar) to load.")
         return True
