@@ -169,6 +169,20 @@ is_admin   = (str(user).strip().lower() in {"arpith","kuldeep"})
 is_manager = (str(user).strip() == "Kuldeep")
 can_reassign = is_admin or is_manager
 
+#Addtion-new
+def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
+    """Fetch a single itinerary by ID with optional projection."""
+    try:
+        oid = ObjectId(iid) if ObjectId.is_valid(str(iid)) else iid
+        doc = col_itineraries.find_one({"_id": oid}, projection or {})
+        return doc or {}
+    except Exception as e:
+        st.error(f"Error fetching itinerary {iid}: {e}")
+        return {}
+
+
+
+
 # =========================
 # Utils
 # =========================
