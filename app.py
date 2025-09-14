@@ -1178,7 +1178,7 @@ elif mode == "Search itinerary":
                 "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
             )
 
-            final_output = itinerary_text + "\n\n" + inclusions_block + "\n\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n\n" + pay + "\n\n" + acct
+            final_output = itinerary_text + "\n\n" + inclusions_block + "\n\n" + exclusions + "\n\n" + notes + "\n" + cxl + "\n\n" + pay + "\n\n" + acct
 
             # Next revision #
             mx = -1
