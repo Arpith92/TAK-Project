@@ -751,7 +751,7 @@ if mode == "Create new itinerary":
                 "Early check-in and late check-out are subject to room availability."
             ]
 
-        inclusions = "*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)]) if inc else "*Inclusions:-*\n1. As per itinerary."
+        inclusions = "*Inclusions:-*" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)]) if inc else "*Inclusions:-*\n1. As per itinerary."
 
         details_bits = [x for x in [car_types or None, hotel_types or None, bhas_desc_str or None] if x]
         details_line = "(" + ",".join(details_bits) + ")" if details_bits else ""
@@ -771,7 +771,7 @@ if mode == "Create new itinerary":
             "7. Extra sightseeing not listed."
         ])
 
-        notes = "\n*Important Notes:-*\n" + "\n".join([
+        notes = "*Important Notes:-*\n" + "\n".join([
             "1. Any attractions not in itinerary will be chargeable.",
             "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
             "3. Bhasm-Aarti: we provide tickets; arrival/seating beyond our control; cost at actuals; subject to availability & cancellations by temple.",
