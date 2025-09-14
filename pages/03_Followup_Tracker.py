@@ -10,7 +10,6 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
-import datetime as dt
 
 # =========================
 # App config
@@ -974,56 +973,23 @@ with tabs[2]:
             buf = st.session_state["inc_buffers"][key_id]
             edit_df = buf["df"]
 
-                # ---- Admin Editing Section ----
-        # ---- Admin Editing Section ----
-    st.markdown("### ✏️ Edit Booking Details (This Month)")
+            st.markdown("### ✏️ Admin: Edit booking dates for this month")
+            editor_view = edit_df[["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date",
+                                   "Final package (₹)","Incentive (₹)","Rep","Duplicate?"]].copy()
+            editor_view.rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}, inplace=True)
 
-    today = dt.date.today()
-    month_start = today.replace(day=1)
-    month_end = (month_start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
-
-    packages = list(
-        package_updates_col.find({
-            "booking_date": {
-                "$gte": month_start.strftime("%Y-%m-%d"),
-                "$lte": month_end.strftime("%Y-%m-%d"),
-            }
-        })
-    )
-
-    if not packages:
-        st.info("No bookings this month.")
-    else:
-        for pkg in packages:
-            pkg_id = str(pkg["_id"])
-            st.markdown(
-                f"#### 🧳 {pkg.get('customer_name', 'Unknown')} ({pkg.get('client_mobile', '')})"
+            edited = st.data_editor(
+                editor_view,
+                key=f"inc_editor_{key_id}",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+                    "final_package_cost": st.column_config.NumberColumn("Final package (₹)", step=500, min_value=0),
+                    "Duplicate?": st.column_config.CheckboxColumn("Duplicate?", disabled=True),
+                },
+                disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Rep"]
             )
-
-            with st.form(f"edit_{pkg_id}"):
-                rep = st.text_input("Representative", pkg.get("representative", ""))
-                adv_payment = st.number_input("Advance Payment",
-                                              value=float(pkg.get("advance_payment", 0)), step=500.0)
-                travel_date = st.date_input("Travel Date", value=to_date(pkg.get("travel_date")))
-                booking_date = st.date_input("Booking Date", value=to_date(pkg.get("booking_date")))
-                final_amt = st.number_input("Final Package Amount",
-                                            value=float(pkg.get("final_package_amount", 0)), step=1000.0)
-                rep_share = st.number_input("Representative Share",
-                                            value=float(pkg.get("rep_share", 0)), step=500.0)
-
-                submitted = st.form_submit_button("💾 Save Changes")
-                if submitted:
-                    updates = {
-                        "representative": rep,
-                        "advance_payment": adv_payment,
-                        "travel_date": str(travel_date),
-                        "booking_date": str(booking_date),
-                        "final_package_amount": final_amt,
-                        "rep_share": rep_share,
-                        "incentive": calc_incentive(final_amt),
-                    }
-                    update_multiple_fields(pkg_id, updates)
-                    st.success(f"✅ Updated booking for {pkg.get('customer_name')}")
 
             # Persist edits into buffer
             edited_back = edited.rename(columns={"booking_date":"Booking date","final_package_cost":"Final package (₹)"})
