@@ -10,6 +10,7 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
+import datetime as dt
 
 # =========================
 # App config
@@ -974,13 +975,13 @@ with tabs[2]:
             edit_df = buf["df"]
 
                 # ---- Admin Editing Section ----
+        # ---- Admin Editing Section ----
     st.markdown("### ✏️ Edit Booking Details (This Month)")
 
-    today = datetime.date.today()
+    today = dt.date.today()
     month_start = today.replace(day=1)
-    month_end = (month_start + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
+    month_end = (month_start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
 
-    # Fetch this month's packages
     packages = list(
         updates_col.find({
             "booking_date": {
@@ -1000,32 +1001,15 @@ with tabs[2]:
             )
 
             with st.form(f"edit_{pkg_id}"):
-                rep = st.text_input(
-                    "Representative", pkg.get("representative", "")
-                )
-                adv_payment = st.number_input(
-                    "Advance Payment",
-                    value=float(pkg.get("advance_payment", 0)),
-                    step=500.0,
-                )
-                travel_date = st.date_input(
-                    "Travel Date",
-                    value=to_date(pkg.get("travel_date")),
-                )
-                booking_date = st.date_input(
-                    "Booking Date",
-                    value=to_date(pkg.get("booking_date")),
-                )
-                final_amt = st.number_input(
-                    "Final Package Amount",
-                    value=float(pkg.get("final_package_amount", 0)),
-                    step=1000.0,
-                )
-                rep_share = st.number_input(
-                    "Representative Share",
-                    value=float(pkg.get("rep_share", 0)),
-                    step=500.0,
-                )
+                rep = st.text_input("Representative", pkg.get("representative", ""))
+                adv_payment = st.number_input("Advance Payment",
+                                              value=float(pkg.get("advance_payment", 0)), step=500.0)
+                travel_date = st.date_input("Travel Date", value=to_date(pkg.get("travel_date")))
+                booking_date = st.date_input("Booking Date", value=to_date(pkg.get("booking_date")))
+                final_amt = st.number_input("Final Package Amount",
+                                            value=float(pkg.get("final_package_amount", 0)), step=1000.0)
+                rep_share = st.number_input("Representative Share",
+                                            value=float(pkg.get("rep_share", 0)), step=500.0)
 
                 submitted = st.form_submit_button("💾 Save Changes")
                 if submitted:
