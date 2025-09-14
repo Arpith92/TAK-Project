@@ -983,7 +983,7 @@ with tabs[2]:
     month_end = (month_start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
 
     packages = list(
-        updates_col.find({
+        package_updates_col.find({
             "booking_date": {
                 "$gte": month_start.strftime("%Y-%m-%d"),
                 "$lte": month_end.strftime("%Y-%m-%d"),
