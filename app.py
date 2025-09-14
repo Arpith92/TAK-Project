@@ -805,7 +805,7 @@ if mode == "Create new itinerary":
             "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
         )
 
-        final_output = itinerary_text + "\n\n" + inclusions + "\n" + exclusions + "\n\n" + notes + "\n\n" + cxl + "\n" + pay + "\n" + acct
+        final_output = itinerary_text + "\n\n" + inclusions + "\n\n" + exclusions + "\n" + notes + "\n\n" + cxl + "\n" + pay + "\n" + acct
 
         rows_serialized = base.copy()
         rows_serialized["Date"] = pd.to_datetime(rows_serialized["Date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
