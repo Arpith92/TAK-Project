@@ -276,27 +276,29 @@ def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) 
 def incentives_for(emp: str, start: date, end: date) -> int:
     q = {
         "status": "confirmed",
-        "rep_name": emp,
+        "rep_name": emp,   # <-- use latest rep_name always
         "booking_date": {
             "$gte": datetime.combine(start, datetime.min.time()),
             "$lte": datetime.combine(end,   datetime.max.time()),
         }
     }
     rows = list(col_updates.find(q, {
+        "itinerary_id": 1,
         "client_mobile": 1,
         "client_name": 1,
         "final_route": 1,
         "start_date": 1,
         "booking_date": 1,
         "incentive": 1,
-        "revision": 1
+        "revision": 1,
+        "rep_name": 1,   # keep for reference
     }))
     if not rows:
         return 0
 
     df = pd.DataFrame(rows)
 
-    # Ensure all cols
+    # Ensure columns
     for col in ["client_mobile","client_name","final_route","start_date","booking_date","incentive","revision"]:
         if col not in df.columns:
             df[col] = None
@@ -312,12 +314,14 @@ def incentives_for(emp: str, start: date, end: date) -> int:
     # Unique key includes route
     df["_key"] = df[["client_mobile","Travel date","final_route"]].astype(str).agg("-".join, axis=1)
 
+    # Always pick last revision per package
     if "revision" in df.columns:
         df = df.sort_values(["_key","revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
     else:
         df = df.groupby("_key", as_index=False).first()
 
     return int(df["incentive"].sum())
+
 
 
 
