@@ -286,6 +286,7 @@ def incentives_for(emp: str, start: date, end: date) -> int:
         "client_mobile": 1,
         "client_name": 1,
         "start_date": 1,
+        "booking_date": 1,
         "incentive": 1,
         "revision": 1
     }))
@@ -294,11 +295,22 @@ def incentives_for(emp: str, start: date, end: date) -> int:
         return 0
 
     df = pd.DataFrame(rows)
-    df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+
+    # Use start_date if available, else booking_date
+    if "start_date" in df.columns and df["start_date"].notna().any():
+        df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+    else:
+        df["Travel date"] = pd.to_datetime(df.get("booking_date"), errors="coerce").dt.date
+
+    # Unique key per client + travel date
     df["_key"] = df[["client_mobile", "client_name", "Travel date"]].astype(str).agg("-".join, axis=1)
 
-    # keep latest revision only
-    df = df.sort_values(["_key","revision"], ascending=[True, False])
+    # Keep only latest revision if exists
+    if "revision" in df.columns:
+        df = df.sort_values(["_key","revision"], ascending=[True, False])
+    else:
+        df = df.sort_values(["_key"], ascending=[True])
+
     df = df.groupby("_key", as_index=False).first()
 
     return int(df["incentive"].sum())
@@ -359,6 +371,7 @@ def calc_components(emp: str, start: date, end: date) -> dict:
         "net_pay": net_pay,
         "df_exp": df_exp,
     }
+
 
 # =============================
 # Calculators — DRIVER (attendance based)
