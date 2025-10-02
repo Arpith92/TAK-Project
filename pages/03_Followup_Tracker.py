@@ -899,12 +899,19 @@ with tabs[2]:
             dup_mask = details.duplicated(subset=["Client"], keep=False)
             details["Duplicate?"] = dup_mask.astype(bool)
 
-    # Month-wise totals (for single rep)
-    if rep_scope:
-        month_totals = fetch_user_months_with_totals(rep_scope)
-        if not month_totals.empty:
-            st.markdown("**Month-wise totals (selected rep)**")
-            st.dataframe(month_totals, use_container_width=True, hide_index=True)
+    # ----- Month-wise totals (for single rep, unique by client/travel date) -----
+if rep_scope:
+    if details.empty:
+        month_totals = pd.DataFrame(columns=["Month", "Total Incentive (₹)"])
+    else:
+        tmp = details.copy()
+        tmp["Month"] = pd.to_datetime(tmp["Booking date"], errors="coerce").dt.strftime("%Y-%m")
+        month_totals = tmp.groupby("Month")["Incentive (₹)"].sum().reset_index()
+        month_totals = month_totals.rename(columns={"Incentive (₹)": "Total Incentive (₹)"})
+    if not month_totals.empty:
+        st.markdown("**Month-wise totals (unique clients)**")
+        st.dataframe(month_totals, use_container_width=True, hide_index=True)
+
 
     if details.empty:
         st.info("No incentives for the selected scope/month.")
