@@ -963,13 +963,27 @@ with tabs[2]:
                 column_config["Action"] = st.column_config.TextColumn("Action", disabled=True)
                 column_config["Rep"] = st.column_config.TextColumn("Representative", disabled=True)
 
-            edited = st.data_editor(
-                editor_view,
-                key=f"inc_editor_{key_id}",
-                use_container_width=True,
-                hide_index=True,
-                column_config=column_config,
-                disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Duplicate?"]
+            # Force data editor to expand full width
+st.markdown("""
+    <style>
+    [data-testid="stDataFrameResizable"] {
+        width: 100% !important;
+    }
+    [data-testid="stHorizontalBlock"] {
+        justify-content: flex-start !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.data_editor(
+    editor_view,
+    key=f"inc_editor_{key_id}",
+    use_container_width=True,
+    hide_index=True,
+    column_config=column_config,
+    disabled=[...]
+)
+
             )
 
             # Persist edits into buffer
