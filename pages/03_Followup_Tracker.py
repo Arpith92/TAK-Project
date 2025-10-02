@@ -964,31 +964,32 @@ with tabs[2]:
                 column_config["Rep"] = st.column_config.TextColumn("Representative", disabled=True)
 
             # Force data editor to expand full width
-st.markdown("""
-    <style>
-    [data-testid="stDataFrameResizable"] {
-        width: 100% !important;
-    }
-    [data-testid="stHorizontalBlock"] {
-        justify-content: flex-start !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+            st.markdown("""
+                <style>
+                [data-testid="stDataFrameResizable"] {
+                    width: 100% !important;
+                }
+                [data-testid="stHorizontalBlock"] {
+                    justify-content: flex-start !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
 
-st.data_editor(
-    editor_view,
-    key=f"inc_editor_{key_id}",
-    use_container_width=True,
-    hide_index=True,
-    column_config=column_config,
-    disabled=[...]
-)
-
+            edited = st.data_editor(
+                editor_view,
+                key=f"inc_editor_{key_id}",
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+                disabled=[
+                    "itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Duplicate?"
+                ]
+            )
 
             # Persist edits into buffer
             edited_back = edited.rename(columns={
-                "booking_date":"Booking date",
-                "final_package_cost":"Final package (₹)"
+                "booking_date": "Booking date",
+                "final_package_cost": "Final package (₹)"
             })
             merge_cols = ["itinerary_id","Booking date","Final package (₹)","Rep","Action"]
             st.session_state["inc_buffers"][key_id]["df"] = edit_df.drop(
@@ -1071,35 +1072,3 @@ st.data_editor(
 
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
-
-# =========================
-# TAB 4: 🧾 Revisions Trail
-# =========================
-with tabs[3]:
-    st.markdown("#### View all revisions (read-only) — does not affect counts or incentives")
-    qtrail = st.text_input("Search (name / mobile / ACH)", "")
-    cur = list(col_itineraries.find({}, {"_id":1,"ach_id":1,"client_name":1,"client_mobile":1,"final_route":1,
-                                         "start_date":1,"end_date":1,"upload_date":1,"revision_num":1}))
-    if not cur:
-        st.info("No itineraries found yet.")
-    else:
-        df_allrevs = pd.DataFrame([{
-            "itinerary_id": str(r["_id"]),
-            "ACH ID": r.get("ach_id",""),
-            "Client": r.get("client_name",""),
-            "Mobile": r.get("client_mobile",""),
-            "Route": r.get("final_route",""),
-            "Start": pd.to_datetime(r.get("start_date")).date() if r.get("start_date") else None,
-            "End": pd.to_datetime(r.get("end_date")).date() if r.get("end_date") else None,
-            "Uploaded": pd.to_datetime(r.get("upload_date"), errors="coerce"),
-            "Revision": int(r.get("revision_num", 1) or 1),
-        } for r in cur])
-        if qtrail.strip():
-            s = qtrail.strip().lower()
-            df_allrevs = df_allrevs[
-                df_allrevs["Client"].astype(str).str.lower().str.contains(s) |
-                df_allrevs["Mobile"].astype(str).str.lower().str.contains(s) |
-                df_allrevs["ACH ID"].astype(str).str.lower().str.contains(s)
-            ]
-        df_allrevs.sort_values(["Mobile","Start","Revision"], ascending=[True, False, False], inplace=True)
-        st.dataframe(df_allrevs.drop(columns=["itinerary_id"]), use_container_width=True, hide_index=True)
