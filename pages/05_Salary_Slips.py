@@ -203,7 +203,7 @@ def all_employees() -> List[str]:
     return sorted(load_users().keys())
 
 def _ym_key(d: date) -> str:
-    return d.strftime("%Y-%m")  # e.g., 2025-08
+    return d.strftime("%Y-%m")
 
 def load_payroll_record(emp: str, month_key: str) -> dict:
     return col_payroll.find_one({"employee": emp, "month": month_key}, {"_id":0}) or {}
@@ -220,7 +220,7 @@ def save_or_update_pay(
         "paid_on": datetime.combine(paid_on, datetime.min.time()) if (paid_on and paid_flag) else None,
         "utr": (utr or "").strip(),
         "notes": (notes or "").strip(),
-        "components": components,   # snapshot of calc parts used for net pay
+        "components": components,
         "updated_at": datetime.utcnow(),
         "updated_by": st.session_state.get("user",""),
     }
@@ -270,7 +270,7 @@ def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) 
     return applied
 
 # =============================
-# Calculators — EMPLOYEES
+# FIXED incentives_for()
 # =============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
@@ -285,6 +285,7 @@ def incentives_for(emp: str, start: date, end: date) -> int:
     rows = list(col_updates.find(q, {
         "client_mobile": 1,
         "client_name": 1,
+        "final_route": 1,
         "start_date": 1,
         "booking_date": 1,
         "incentive": 1,
@@ -295,32 +296,29 @@ def incentives_for(emp: str, start: date, end: date) -> int:
 
     df = pd.DataFrame(rows)
 
-    # Ensure required cols exist
-    for col in ["client_mobile", "client_name", "start_date", "booking_date", "incentive", "revision"]:
+    # Ensure all cols
+    for col in ["client_mobile","client_name","final_route","start_date","booking_date","incentive","revision"]:
         if col not in df.columns:
             df[col] = None
 
-    # Travel date fallback
     df["Travel date"] = pd.to_datetime(
         df["start_date"].fillna(df["booking_date"]), errors="coerce"
     ).dt.date
 
-    # Fill missing IDs/names with blanks
     df["client_mobile"] = df["client_mobile"].fillna("").astype(str)
     df["client_name"]   = df["client_name"].fillna("").astype(str)
+    df["final_route"]   = df["final_route"].fillna("").astype(str)
 
-    # Unique key per client + travel date
-    df["_key"] = df[["client_mobile", "client_name", "Travel date"]].astype(str).agg("-".join, axis=1)
+    # Unique key includes route
+    df["_key"] = df[["client_mobile","Travel date","final_route"]].astype(str).agg("-".join, axis=1)
 
-    # Keep only latest revision if exists
     if "revision" in df.columns:
-        df = df.sort_values(["_key", "revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
+        df = df.sort_values(["_key","revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
     else:
         df = df.groupby("_key", as_index=False).first()
 
     return int(df["incentive"].sum())
 
-# (rest of your script stays unchanged)
 
 
 
