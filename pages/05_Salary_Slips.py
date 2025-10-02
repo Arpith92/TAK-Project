@@ -290,30 +290,38 @@ def incentives_for(emp: str, start: date, end: date) -> int:
         "incentive": 1,
         "revision": 1
     }))
-
     if not rows:
         return 0
 
     df = pd.DataFrame(rows)
 
-    # Use start_date if available, else booking_date
-    if "start_date" in df.columns and df["start_date"].notna().any():
-        df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
-    else:
-        df["Travel date"] = pd.to_datetime(df.get("booking_date"), errors="coerce").dt.date
+    # Ensure required cols exist
+    for col in ["client_mobile", "client_name", "start_date", "booking_date", "incentive", "revision"]:
+        if col not in df.columns:
+            df[col] = None
+
+    # Travel date fallback
+    df["Travel date"] = pd.to_datetime(
+        df["start_date"].fillna(df["booking_date"]), errors="coerce"
+    ).dt.date
+
+    # Fill missing IDs/names with blanks
+    df["client_mobile"] = df["client_mobile"].fillna("").astype(str)
+    df["client_name"]   = df["client_name"].fillna("").astype(str)
 
     # Unique key per client + travel date
     df["_key"] = df[["client_mobile", "client_name", "Travel date"]].astype(str).agg("-".join, axis=1)
 
     # Keep only latest revision if exists
     if "revision" in df.columns:
-        df = df.sort_values(["_key","revision"], ascending=[True, False])
+        df = df.sort_values(["_key", "revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
     else:
-        df = df.sort_values(["_key"], ascending=[True])
-
-    df = df.groupby("_key", as_index=False).first()
+        df = df.groupby("_key", as_index=False).first()
 
     return int(df["incentive"].sum())
+
+# (rest of your script stays unchanged)
+
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
