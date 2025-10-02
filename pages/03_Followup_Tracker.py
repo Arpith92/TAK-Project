@@ -925,100 +925,139 @@ with tabs[2]:
             st.dataframe(details.drop(columns=["itinerary_id"]).style.apply(_styler, axis=None),
                          use_container_width=True, hide_index=True)
 
-        # ---------- Stateful editor buffer ----------
-        key_id = f"incbuf::{rep_scope or 'ALL'}::{month_start.strftime('%Y-%m')}"
-        if "inc_buffers" not in st.session_state:
-            st.session_state["inc_buffers"] = {}
-        if key_id not in st.session_state["inc_buffers"]:
-            # include Action column default blank
-            tmp = details.copy()
-            tmp["Action"] = ""  # "", "Push back to pending"
-            st.session_state["inc_buffers"][key_id] = {"orig": tmp.copy(), "df": tmp.copy()}
-        buf = st.session_state["inc_buffers"][key_id]
-        edit_df = buf["df"]
+                 # ---------- Stateful editor buffer ----------
+            key_id = f"incbuf::{rep_scope or 'ALL'}::{month_start.strftime('%Y-%m')}"
+            if "inc_buffers" not in st.session_state:
+                st.session_state["inc_buffers"] = {}
+            if key_id not in st.session_state["inc_buffers"]:
+                # include Action column default blank
+                tmp = details.copy()
+                tmp["Action"] = ""  # "", "Push back to pending"
+                st.session_state["inc_buffers"][key_id] = {"orig": tmp.copy(), "df": tmp.copy()}
+            buf = st.session_state["inc_buffers"][key_id]
+            edit_df = buf["df"]
 
-        st.markdown("### ✏️ Admin: Edit booking dates or push back confirmations")
-        editor_view = edit_df[["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Booking date",
-                               "Final package (₹)","Incentive (₹)","Rep","Duplicate?","Action"]].copy()
-        editor_view.rename(columns={"Booking date":"booking_date","Final package (₹)":"final_package_cost"}, inplace=True)
+            st.markdown("### ✏️ Admin: Edit booking dates, reps, or push back confirmations")
+            editor_view = edit_df[[
+                "itinerary_id","ACH ID","Client","Mobile","Route","Travel date",
+                "Booking date","Final package (₹)","Incentive (₹)","Rep","Duplicate?","Action"
+            ]].copy()
+            editor_view.rename(columns={
+                "Booking date":"booking_date",
+                "Final package (₹)":"final_package_cost"
+            }, inplace=True)
 
-        column_config = {
-            "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
-            "final_package_cost": st.column_config.NumberColumn("Final package (₹)", step=500, min_value=0),
-            "Duplicate?": st.column_config.CheckboxColumn("Duplicate?", disabled=True),
-        }
-        if is_admin:
-            column_config["Action"] = st.column_config.SelectboxColumn(
-                "Action", options=["", "Push back to pending"]
-            )
-        else:
-            # hide/disable Action for non-admins
-            column_config["Action"] = st.column_config.TextColumn("Action", disabled=True)
-
-        edited = st.data_editor(
-            editor_view,
-            key=f"inc_editor_{key_id}",
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config,
-            disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Rep"] if is_admin else
-                     ["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Rep","Action"]
-        )
-
-        # Persist edits into buffer
-        edited_back = edited.rename(columns={"booking_date":"Booking date","final_package_cost":"Final package (₹)"})
-        merge_cols = ["itinerary_id","Booking date","Final package (₹)","Action"]
-        st.session_state["inc_buffers"][key_id]["df"] = edit_df.drop(columns=["Booking date","Final package (₹)","Action"]) \
-            .merge(edited_back[merge_cols], on="itinerary_id", how="left")
-
-        if st.button("💾 Save changes"):
-            try:
-                orig = st.session_state["inc_buffers"][key_id]["orig"]
-                cur  = st.session_state["inc_buffers"][key_id]["df"]
-
-                comp = cur.merge(
-                    orig[["itinerary_id","Booking date","Final package (₹)","Action"]],
-                    on="itinerary_id", how="left", suffixes=("", "_orig")
+            column_config = {
+                "booking_date": st.column_config.DateColumn("Booking date", format="YYYY-MM-DD"),
+                "final_package_cost": st.column_config.NumberColumn("Final package (₹)", step=500, min_value=0),
+                "Duplicate?": st.column_config.CheckboxColumn("Duplicate?", disabled=True),
+            }
+            if is_admin:
+                column_config["Action"] = st.column_config.SelectboxColumn(
+                    "Action", options=["", "Push back to pending"]
                 )
+                column_config["Rep"] = st.column_config.SelectboxColumn(
+                    "Representative", options=ALL_USERS
+                )
+            else:
+                column_config["Action"] = st.column_config.TextColumn("Action", disabled=True)
+                column_config["Rep"] = st.column_config.TextColumn("Representative", disabled=True)
 
-                # Rows with date/cost changes
-                changed = comp[(comp["Booking date"] != comp["Booking date_orig"]) |
-                               (comp["Final package (₹)"] != comp["Final package (₹)_orig"])]
+            edited = st.data_editor(
+                editor_view,
+                key=f"inc_editor_{key_id}",
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+                disabled=["itinerary_id","ACH ID","Client","Mobile","Route","Travel date","Incentive (₹)","Duplicate?"]
+            )
 
-                # Rows to push back
-                to_push = comp[comp["Action"] == "Push back to pending"]
+            # Persist edits into buffer
+            edited_back = edited.rename(columns={
+                "booking_date":"Booking date",
+                "final_package_cost":"Final package (₹)"
+            })
+            merge_cols = ["itinerary_id","Booking date","Final package (₹)","Rep","Action"]
+            st.session_state["inc_buffers"][key_id]["df"] = edit_df.drop(
+                columns=["Booking date","Final package (₹)","Rep","Action"]
+            ).merge(edited_back[merge_cols], on="itinerary_id", how="left")
 
-                updated = 0
-                pushed  = 0
+            if st.button("💾 Save changes", type="primary"):
+                try:
+                    orig = st.session_state["inc_buffers"][key_id]["orig"]
+                    cur  = st.session_state["inc_buffers"][key_id]["df"]
 
-                if not changed.empty:
-                    rows = changed.rename(columns={
-                        "Booking date":"booking_date",
-                        "Final package (₹)":"final_package_cost"
-                    })[["itinerary_id","booking_date","final_package_cost"]].to_dict(orient="records")
-                    updated = batch_update_booking_dates(rows, actor_user=user)
+                    comp = cur.merge(
+                        orig[["itinerary_id","Booking date","Final package (₹)","Rep","Action"]],
+                        on="itinerary_id", how="left", suffixes=("", "_orig")
+                    )
 
-                if is_admin and not to_push.empty:
-                    for _, r in to_push.iterrows():
-                        push_back_to_pending(str(r["itinerary_id"]), actor_user=user)
-                        pushed += 1
+                    updated = 0
+                    pushed  = 0
+                    repchg  = 0
 
-                # Refresh caches, reset buffer, and reload
-                fetch_updates_joined.clear()
-                _final_cost_map.clear()
-                st.session_state["inc_buffers"].pop(key_id, None)
+                    for _, r in comp.iterrows():
+                        iid = str(r["itinerary_id"])
+                        # Push back to pending
+                        if is_admin and r.get("Action") == "Push back to pending":
+                            col_updates.update_one(
+                                {"itinerary_id": iid},
+                                {"$set": {"status": "pending", "updated_at": datetime.utcnow()}}
+                            )
+                            col_followups.insert_one({
+                                "itinerary_id": iid,
+                                "created_at": datetime.utcnow(),
+                                "created_by": user,
+                                "status": "pending",
+                                "comment": "Admin pushed back from confirmed to pending",
+                                "credited_to": r.get("Rep",""),
+                            })
+                            pushed += 1
+                            continue
 
-                msg = []
-                if updated: msg.append(f"updated {updated} booking date(s)")
-                if pushed:  msg.append(f"pushed back {pushed} package(s) to pending")
-                if not msg:
-                    st.info("No changes to save.")
-                else:
-                    st.success("Saved: " + " and ".join(msg))
-                st.rerun()
+                        # Booking date / cost changes
+                        if (r["Booking date"] != r["Booking date_orig"]) or \
+                           (r["Final package (₹)"] != r["Final package (₹)_orig"]):
+                            rows = [{
+                                "itinerary_id": iid,
+                                "booking_date": r["Booking date"],
+                                "final_package_cost": r["Final package (₹)"]
+                            }]
+                            updated += batch_update_booking_dates(rows, actor_user=user)
 
-            except Exception as e:
-                st.error(f"Failed to save: {e}")
+                        # Rep change
+                        if is_admin and r["Rep"] != r["Rep_orig"]:
+                            col_updates.update_one(
+                                {"itinerary_id": iid},
+                                {"$set": {"rep_name": r["Rep"], "updated_at": datetime.utcnow()}}
+                            )
+                            col_followups.insert_one({
+                                "itinerary_id": iid,
+                                "created_at": datetime.utcnow(),
+                                "created_by": user,
+                                "status": "confirmed",
+                                "comment": f"Admin changed rep from {r['Rep_orig']} to {r['Rep']}",
+                                "credited_to": r.get("Rep",""),
+                            })
+                            repchg += 1
+
+                    # Refresh caches, reset buffer
+                    fetch_updates_joined.clear()
+                    _final_cost_map.clear()
+                    st.session_state["inc_buffers"].pop(key_id, None)
+
+                    msg = []
+                    if updated: msg.append(f"updated {updated} booking/cost")
+                    if repchg: msg.append(f"changed {repchg} rep(s)")
+                    if pushed: msg.append(f"pushed back {pushed} package(s)")
+                    if not msg:
+                        st.info("No changes to save.")
+                    else:
+                        st.success("Saved: " + " and ".join(msg))
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
 
 # =========================
 # TAB 4: 🧾 Revisions Trail
