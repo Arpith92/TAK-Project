@@ -984,7 +984,6 @@ st.data_editor(
     disabled=[...]
 )
 
-            )
 
             # Persist edits into buffer
             edited_back = edited.rename(columns={
