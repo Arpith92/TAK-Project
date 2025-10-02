@@ -199,9 +199,84 @@ def _as_bytes(x) -> bytes:
     except Exception: return str(x).encode("latin-1", errors="ignore")
 
 @st.cache_data(ttl=TTL, show_spinner=False)
+def all_employees() -> List[str]:
+    return sorted(load_users().keys())
+
+def _ym_key(d: date) -> str:
+    return d.strftime("%Y-%m")
+
+def load_payroll_record(emp: str, month_key: str) -> dict:
+    return col_payroll.find_one({"employee": emp, "month": month_key}, {"_id":0}) or {}
+
+def save_or_update_pay(
+    emp: str, month_key: str, *, amount: int, paid_on: Optional[date],
+    utr: str, notes: str, components: dict, paid_flag: bool
+):
+    payload = {
+        "employee": emp,
+        "month": month_key,
+        "amount": int(amount),
+        "paid": bool(paid_flag),
+        "paid_on": datetime.combine(paid_on, datetime.min.time()) if (paid_on and paid_flag) else None,
+        "utr": (utr or "").strip(),
+        "notes": (notes or "").strip(),
+        "components": components,
+        "updated_at": datetime.utcnow(),
+        "updated_by": st.session_state.get("user",""),
+    }
+    col_payroll.update_one({"employee": emp, "month": month_key}, {"$set": payload}, upsert=True)
+
+def load_all_payroll_for_month(month_key: str) -> List[dict]:
+    return list(col_payroll.find({"month": month_key}, {"_id":0}))
+
+def load_all_payroll_all_months() -> pd.DataFrame:
+    rows = list(col_payroll.find({}, {"_id":0}))
+    if not rows:
+        return pd.DataFrame(columns=["employee","month","amount","paid","components"])
+    return pd.DataFrame(rows)
+
+# ===== Carry-forward helpers =====
+def previous_pending_amount(emp: str, current_month_key: str) -> int:
+    cur = list(col_payroll.find(
+        {"employee": emp, "month": {"$lt": current_month_key}},
+        {"_id":0, "amount":1, "components":1}
+    ))
+    total_due = sum(_to_int((r.get("components") or {}).get("net_pay", 0)) for r in cur)
+    total_paid = sum(_to_int(r.get("amount", 0)) for r in cur)
+    return max(total_due - total_paid, 0)
+
+def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) -> int:
+    amt = int(amount or 0)
+    if amt <= 0:
+        return 0
+    rows = list(col_payroll.find(
+        {"employee": emp, "month": {"$lt": current_month_key}},
+        {"_id":1, "amount":1, "components":1, "month":1}
+    ).sort("month", 1))
+    applied = 0
+    for r in rows:
+        due = _to_int((r.get("components") or {}).get("net_pay", 0))
+        paid = _to_int(r.get("amount", 0))
+        gap = due - paid
+        if gap <= 0: continue
+        pay = min(gap, amt - applied)
+        if pay <= 0: break
+        col_payroll.update_one(
+            {"_id": r["_id"]},
+            {"$inc": {"amount": int(pay)}, "$set": {"updated_at": datetime.utcnow(), "updated_by": st.session_state.get("user","")}}
+        )
+        applied += pay
+        if applied >= amt: break
+    return applied
+
+# =============================
+# FIXED incentives_for()
+# =============================
+@st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     q = {
         "status": "confirmed",
+        "rep_name": emp,
         "booking_date": {
             "$gte": datetime.combine(start, datetime.min.time()),
             "$lte": datetime.combine(end,   datetime.max.time()),
@@ -214,28 +289,27 @@ def incentives_for(emp: str, start: date, end: date) -> int:
         "start_date": 1,
         "booking_date": 1,
         "incentive": 1,
-        "revision": 1,
-        "rep_name": 1,
-        "assigned_rep": 1  # 👈 new field from followup tracker reassignments
+        "revision": 1
     }))
     if not rows:
         return 0
 
     df = pd.DataFrame(rows)
 
-    # Prefer assigned_rep if present, else fall back to rep_name
-    df["rep_effective"] = df["assigned_rep"].fillna(df["rep_name"])
-
-    # Filter for the employee in question
-    df = df[df["rep_effective"] == emp]
-
-    if df.empty:
-        return 0
+    # Ensure all cols
+    for col in ["client_mobile","client_name","final_route","start_date","booking_date","incentive","revision"]:
+        if col not in df.columns:
+            df[col] = None
 
     df["Travel date"] = pd.to_datetime(
         df["start_date"].fillna(df["booking_date"]), errors="coerce"
     ).dt.date
 
+    df["client_mobile"] = df["client_mobile"].fillna("").astype(str)
+    df["client_name"]   = df["client_name"].fillna("").astype(str)
+    df["final_route"]   = df["final_route"].fillna("").astype(str)
+
+    # Unique key includes route
     df["_key"] = df[["client_mobile","Travel date","final_route"]].astype(str).agg("-".join, axis=1)
 
     if "revision" in df.columns:
@@ -244,7 +318,6 @@ def incentives_for(emp: str, start: date, end: date) -> int:
         df = df.groupby("_key", as_index=False).first()
 
     return int(df["incentive"].sum())
-
 
 
 
