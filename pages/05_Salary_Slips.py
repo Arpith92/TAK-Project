@@ -282,7 +282,27 @@ def incentives_for(emp: str, start: date, end: date) -> int:
             "$lte": datetime.combine(end,   datetime.max.time()),
         }
     }
-    return sum(_to_int(d.get("incentive",0)) for d in col_updates.find(q, {"incentive":1}))
+    rows = list(col_updates.find(q, {
+        "client_mobile": 1,
+        "client_name": 1,
+        "start_date": 1,
+        "incentive": 1,
+        "revision": 1
+    }))
+
+    if not rows:
+        return 0
+
+    df = pd.DataFrame(rows)
+    df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+    df["_key"] = df[["client_mobile", "client_name", "Travel date"]].astype(str).agg("-".join, axis=1)
+
+    # keep latest revision only
+    df = df.sort_values(["_key","revision"], ascending=[True, False])
+    df = df.groupby("_key", as_index=False).first()
+
+    return int(df["incentive"].sum())
+
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def splitwise_expenses(emp: str, start: date, end: date) -> pd.DataFrame:
