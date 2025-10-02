@@ -798,6 +798,31 @@ with tabs[1]:
 # =========================
 # TAB 3: 💰 Incentives (+ Admin booking-date editor & push back)
 # =========================
+# =========================
+# Incentives fetchers / sums (booking date based)
+# =========================
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_user_months_with_totals(rep_name: str) -> pd.DataFrame:
+    q = {
+        "status": "confirmed",
+        "rep_name": rep_name,
+        "booking_date": {"$gte": datetime.combine(INCENTIVE_START_DATE, dtime.min)}
+    }
+    cur = list(col_updates.find(q, {"_id":0, "booking_date":1, "incentive":1}))
+    if not cur:
+        return pd.DataFrame(columns=["Month", "Total Incentive (₹)"])
+    df = pd.DataFrame(cur)
+    df["booking_date"] = pd.to_datetime(df["booking_date"], errors="coerce")
+    df = df[df["booking_date"].notna()]
+    df["Month"] = df["booking_date"].dt.strftime("%Y-%m")
+    df["incentive"] = df["incentive"].apply(_to_int)
+    out = df.groupby("Month")["incentive"].sum().reset_index().rename(columns={"incentive": "Total Incentive (₹)"})
+    out.sort_values("Month", inplace=True)
+    return out
+
+
+
+
 with tabs[2]:
     st.markdown("#### View incentives (booking-date based, policy from **01-Aug-2025**)")
 
