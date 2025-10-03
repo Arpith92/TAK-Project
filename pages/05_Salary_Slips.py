@@ -269,58 +269,70 @@ def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) 
         if applied >= amt: break
     return applied
 
-# =============================
-# FIXED incentives_for()
-# =============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
+    """
+    Booking-date based incentives for an employee.
+    Dedup logic matches Follow-up Tracker:
+      - Unique by (Mobile, Client, Travel date)
+      - Keep last revision per client/travel
+    We JOIN itineraries to get mobile/name/route/start_date, because updates may not carry them.
+    """
     q = {
         "status": "confirmed",
-        "rep_name": emp,   # <-- use latest rep_name always
+        "rep_name": emp,
         "booking_date": {
             "$gte": datetime.combine(start, datetime.min.time()),
             "$lte": datetime.combine(end,   datetime.max.time()),
         }
     }
-    rows = list(col_updates.find(q, {
+    upd_rows = list(col_updates.find(q, {
+        "_id": 0,
         "itinerary_id": 1,
-        "client_mobile": 1,
-        "client_name": 1,
-        "final_route": 1,
-        "start_date": 1,
         "booking_date": 1,
         "incentive": 1,
-        "revision": 1,
-        "rep_name": 1,   # keep for reference
+        "final_package_cost": 1,
     }))
-    if not rows:
+    if not upd_rows:
         return 0
 
-    df = pd.DataFrame(rows)
+    df_u = pd.DataFrame(upd_rows)
+    df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
 
-    # Ensure columns
-    for col in ["client_mobile","client_name","final_route","start_date","booking_date","incentive","revision"]:
-        if col not in df.columns:
-            df[col] = None
+    # Pull itinerary fields that we need for stable uniqueness & revision
+    it_ids = [ObjectId(x) for x in df_u["itinerary_id"].unique() if ObjectId.is_valid(x)]
+    its = list(db["itineraries"].find(
+        {"_id": {"$in": it_ids}},
+        {"_id":1,"client_mobile":1,"client_name":1,"final_route":1,"start_date":1,"revision_num":1}
+    ))
+    if not its:
+        # fall back: sum incentives directly (shouldn't happen in normal flow)
+        return int(df_u["incentive"].apply(_to_int).sum())
 
-    df["Travel date"] = pd.to_datetime(
-        df["start_date"].fillna(df["booking_date"]), errors="coerce"
-    ).dt.date
+    df_i = pd.DataFrame([{
+        "itinerary_id": str(r["_id"]),
+        "Mobile": (r.get("client_mobile") or ""),
+        "Client": (r.get("client_name") or ""),
+        "Route":  (r.get("final_route") or ""),
+        "Travel date": pd.to_datetime(r.get("start_date") or None, errors="coerce").date(),
+        "_rev": int(r.get("revision_num", 1) or 1)
+    } for r in its])
 
-    df["client_mobile"] = df["client_mobile"].fillna("").astype(str)
-    df["client_name"]   = df["client_name"].fillna("").astype(str)
-    df["final_route"]   = df["final_route"].fillna("").astype(str)
+    df = df_u.merge(df_i, on="itinerary_id", how="left")
+    # Travel date fallback to booking_date if itinerary.start_date is missing
+    bk = pd.to_datetime(df["booking_date"], errors="coerce").dt.date
+    df["Travel date"] = df["Travel date"].fillna(bk)
 
-    # Unique key includes route
-    df["_key"] = df[["client_mobile","Travel date","final_route"]].astype(str).agg("-".join, axis=1)
+    # Build unique key consistent with Follow-up Tracker incentives table
+    df["_key"] = df[["Mobile","Client","Travel date"]].astype(object).agg(tuple, axis=1)
 
-    # Always pick last revision per package
-    if "revision" in df.columns:
-        df = df.sort_values(["_key","revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
-    else:
-        df = df.groupby("_key", as_index=False).first()
+    # Keep last revision per key, using (_rev, booking_date) for tiebreak
+    df["_rev"] = df["_rev"].fillna(1).astype(int)
+    df = df.sort_values(["_key","_rev","booking_date"], ascending=[True, False, False])
+    unique_df = df.groupby("_key", as_index=False).first()
 
-    return int(df["incentive"].sum())
+    return int(unique_df["incentive"].apply(_to_int).sum())
+
 
 
 
