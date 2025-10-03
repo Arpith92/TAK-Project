@@ -70,8 +70,10 @@ if not user:
             st.error("Invalid PIN")
     st.stop()
 
+all_emps = list(load_users().keys())
+
 # =========================
-# Form
+# Form (wrapped so inputs persist until submit)
 # =========================
 with st.form("direct_car_form", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
@@ -90,18 +92,21 @@ with st.form("direct_car_form", clear_on_submit=True):
     with c6:
         recv_in = st.radio("Received In", ["Company Account", "Personal Account"], horizontal=True)
 
-    emp = None
+    emp_list = []
     if recv_in == "Personal Account":
-        emp = st.selectbox("Payment received by", list(load_users().keys()), index=0)
+        emp_list = st.multiselect("Payment received by (employee(s))", all_emps)
 
     notes = st.text_area("Notes", placeholder="Any remarks…")
 
-    submitted = st.form_submit_button("Save booking")
+    submitted = st.form_submit_button("💾 Save booking")
 
 if submitted:
     if amount <= 0:
         st.error("Amount must be > 0")
+    elif recv_in == "Personal Account" and not emp_list:
+        st.error("Please select at least one employee")
     else:
+        # Store booking in DB
         doc = {
             "date": datetime.combine(when, datetime.min.time()),
             "client_name": client,
@@ -109,25 +114,27 @@ if submitted:
             "amount": int(amount),
             "car_type": car_type,
             "received_in": recv_in,
-            "employee": emp if recv_in == "Personal Account" else "",
+            "employees": emp_list if recv_in == "Personal Account" else [],
             "notes": notes,
             "created_by": user,
             "created_at": datetime.utcnow(),
         }
         col_cars.insert_one(doc)
 
-        # If Personal → push to Splitwise as settlement
-        if recv_in == "Personal Account" and emp:
-            col_split.insert_one({
-                "kind": "settlement",
-                "created_at": datetime.utcnow(),
-                "created_by": user,
-                "date": datetime.combine(when, datetime.min.time()),
-                "employee": emp,
-                "amount": int(amount),
-                "ref": f"Direct Car ({car_type})",
-                "notes": f"Direct booking for {client or 'N/A'}",
-            })
+        # If personal account → split among employees equally
+        if recv_in == "Personal Account" and emp_list:
+            per_emp_amount = int(amount / len(emp_list))
+            for emp in emp_list:
+                col_split.insert_one({
+                    "kind": "settlement",
+                    "created_at": datetime.utcnow(),
+                    "created_by": user,
+                    "date": datetime.combine(when, datetime.min.time()),
+                    "employee": emp,
+                    "amount": per_emp_amount,
+                    "ref": f"Direct Car ({car_type})",
+                    "notes": f"Direct booking for {client or 'N/A'} | Bulk entry",
+                })
 
         st.success("Booking saved successfully ✅")
         st.rerun()
@@ -142,5 +149,7 @@ if not docs:
 else:
     df = pd.DataFrame(docs)
     if "_id" in df: df["_id"] = df["_id"].astype(str)
-    st.dataframe(df[["date","client_name","trip_plan","amount","car_type","received_in","employee","notes"]],
-                 use_container_width=True, hide_index=True)
+    show_cols = ["date","client_name","trip_plan","amount","car_type","received_in","employees","notes"]
+    for c in show_cols:
+        if c not in df: df[c] = ""
+    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
