@@ -177,7 +177,7 @@ if submitted:
                 })
 
         st.success("Booking saved successfully ✅")
-        st.experimental_rerun()   # ensure first click saves immediately
+        st.rerun()   # fixed: works in new streamlit
 
 # =========================
 # Recent bookings
@@ -193,3 +193,46 @@ else:
     for c in show_cols:
         if c not in df: df[c] = ""
     st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
+# =========================
+# Monthly Report
+# =========================
+st.subheader("📅 Monthly Car Bookings Report")
+month_choice = st.date_input("Select Month", value=date.today())
+
+if month_choice:
+    start_m = month_choice.replace(day=1)
+    if start_m.month == 12:
+        end_m = start_m.replace(year=start_m.year+1, month=1, day=1)
+    else:
+        end_m = start_m.replace(month=start_m.month+1, day=1)
+
+    cur = col_cars.find({"date": {"$gte": start_m, "$lt": end_m}}).sort("date", 1)
+    rows = list(cur)
+    if not rows:
+        st.info("No bookings for this month.")
+    else:
+        dfm = pd.DataFrame(rows)
+        dfm["_id"] = dfm["_id"].astype(str)
+        dfm.reset_index(drop=True, inplace=True)
+        dfm.index = dfm.index + 1
+        dfm.rename_axis("Sr No", inplace=True)
+
+        # Pick main columns
+        show_cols = ["date","car_type","client_name","trip_plan","amount","received_in","employees","notes"]
+        for c in show_cols:
+            if c not in dfm: dfm[c] = ""
+        table = dfm[show_cols]
+
+        # Totals
+        total_all = dfm["amount"].sum()
+        total_cash = dfm.loc[dfm["received_in"]=="Company Account", "amount"].sum()
+        total_personal = dfm.loc[dfm["received_in"]=="Personal Account", "amount"].sum()
+
+        st.dataframe(table, use_container_width=True)
+
+        st.markdown(f"""
+        **Total this month: ₹{total_all:,}**  
+        • Company Account (Bank): ₹{total_cash:,}  
+        • Personal Account (Cash to Employees): ₹{total_personal:,}
+        """)
