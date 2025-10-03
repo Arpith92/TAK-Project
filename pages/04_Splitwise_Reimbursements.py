@@ -105,7 +105,7 @@ db = get_db()
 col_itineraries = db["itineraries"]
 col_updates     = db["package_updates"]
 col_split       = db["expense_splitwise"]
-col_cars        = db["direct_car_bookings"]   # 🔹 NEW
+col_cars        = db["direct_car_bookings"]
 
 # =========================
 # Users & login
@@ -205,7 +205,6 @@ def entry_to_row(d: dict) -> dict:
         "created_by": d.get("created_by",""),
         "created_at": d.get("created_at"),
     }
-
 # =========================
 # 🔹 Direct Car integration
 # =========================
@@ -238,6 +237,47 @@ def directcar_to_rows(start: Optional[date], end: Optional[date]) -> List[dict]:
     return rows
 
 # =========================
+# Confirmed packages helper
+# =========================
+@st.cache_data(ttl=IST_TTL, show_spinner=False)
+def confirmed_itineraries_df_unique_clients() -> pd.DataFrame:
+    """Get unique confirmed itineraries (latest revision per client+date)."""
+    q = {"status": "confirmed"}
+    cur = col_itineraries.find(q, {
+        "_id": 1, "client_name": 1, "client_mobile": 1,
+        "start_date": 1, "ach_id": 1, "created_at": 1
+    })
+    docs = list(cur)
+    if not docs:
+        return pd.DataFrame(columns=["itinerary_id","client_name","client_mobile","ach_id","start_date"])
+    rows=[]
+    for d in docs:
+        rows.append({
+            "itinerary_id": str(d.get("_id","")),
+            "client_name": d.get("client_name",""),
+            "client_mobile": d.get("client_mobile",""),
+            "ach_id": d.get("ach_id",""),
+            "start_date": norm_date(d.get("start_date")),
+            "created_at": d.get("created_at"),
+        })
+    df=pd.DataFrame(rows)
+    # keep latest per client_mobile + start_date
+    df=df.sort_values("created_at").drop_duplicates(
+        subset=["client_mobile","start_date"], keep="last"
+    )
+    return df
+
+def pack_options(df: pd.DataFrame) -> List[str]:
+    if df is None or df.empty: return []
+    labels=[]
+    for _,r in df.iterrows():
+        labels.append(
+            f"{r.get('client_name','')} ({r.get('client_mobile','')}) "
+            f"| {r.get('start_date','')} | {r.get('ach_id','')} | {r.get('itinerary_id','')}"
+        )
+    return labels
+
+# =========================
 # Data fetchers
 # =========================
 def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
@@ -266,18 +306,6 @@ def totals_for_employee(emp: str, start: Optional[date]=None, end: Optional[date
     return exp_sum, pay_sum, (exp_sum - pay_sum)
 
 # =========================
-# (Rest of UI logic remains unchanged – balances, KPIs, forms, ledger, etc.)
-# =========================
-# All your existing sections (filters, KPIs, add expense, admin settlement,
-# package ledger, team balances, my entries) remain exactly the same.
-# Because they already call fetch_entries() and totals_for_employee(),
-# direct car bookings will now automatically appear there.
-
-# Clear force flag at end of successful load cycle
-_clear_force_refresh()
-
-
-# =========================
 # DB ops
 # =========================
 def add_expense(*, payer: str, itinerary_id: str, customer_name: str, ach_id: str,
@@ -298,7 +326,6 @@ def add_settlement(*, employee: str, amount: int, when: date, ref: str, notes: s
     })
 
 def add_direct_car_settlement(*, employee: str, amount: int, when: date, car_type: str, client: str):
-    """Settlement when direct car booking paid into employee personal account."""
     col_split.insert_one({
         "kind": "settlement", "created_at": datetime.utcnow(), "created_by": user,
         "date": datetime.combine(when, datetime.min.time()), "employee": employee,
@@ -307,12 +334,7 @@ def add_direct_car_settlement(*, employee: str, amount: int, when: date, car_typ
     })
 
 # =========================
-# (Rest of UI logic remains unchanged – balances, KPIs, forms, ledger, etc.)
-# =========================
-
-
-# =========================
-# Filters / controls (deferred)
+# Filters / controls
 # =========================
 if _defer_guard("Filters and confirmed customer list"):
     _clear_force_refresh()
@@ -337,45 +359,10 @@ with st.container():
     with f4:
         search_txt = st.text_input("Search confirmed client/mobile/ACH", placeholder="Type to filter package list…")
 
-def choose_package(label="Select confirmed package", key="pkg_pick") -> Tuple[Optional[str], str, str]:
-    options = df_confirmed_unique.copy()
-    if options is None or options.empty:
-        st.info("No confirmed packages found.")
-        return None, "", ""
-
-    if search_txt.strip():
-        s = search_txt.strip().lower()
-        for c in ["client_name","client_mobile","ach_id"]:
-            if c not in options.columns:
-                options[c] = ""
-        options = options[
-            options["client_name"].astype(str).str.lower().str.contains(s, na=False) |
-            options["client_mobile"].astype(str).str.lower().str.contains(s, na=False) |
-            options["ach_id"].astype(str).str.lower().str.contains(s, na=False)
-        ]
-
-    opt_labels = pack_options(options)
-    if not opt_labels:
-        st.info("No matching confirmed packages.")
-        return None, "", ""
-
-    sel = st.selectbox(label, opt_labels, index=0, key=key)
-    if not sel:
-        return None, "", ""
-
-    rid = sel.split(" | ")[-1].strip()
-    row = options[options["itinerary_id"].astype(str).str.strip() == rid]
-    if row.empty:
-        return rid, "", ""
-    row = row.iloc[0]
-    return rid, str(row.get("client_name","") or ""), str(row.get("ach_id","") or "")
-
 # =========================
-# KPIs for current user (deferred)
+# KPIs for current user
 # =========================
-if _defer_guard("My balances KPIs"):
-    pass
-else:
+if not _defer_guard("My balances KPIs"):
     st.subheader("My balances")
     exp_m, pay_m, bal_m = totals_for_employee(user, start, end)
     exp_all, pay_all, bal_all = totals_for_employee(user, None, None)
@@ -399,52 +386,59 @@ with st.form("add_expense_form", clear_on_submit=False):
     if mode == "Linked to confirmed package":
         c1, c2, c3 = st.columns([2,1,1])
         with c1:
-            iid, cust_name, ach = choose_package("Confirmed package / customer", key="add_pkg")
+            iid, cust_name, ach = "", "", ""
+            opt_labels = pack_options(df_confirmed_unique)
+            if opt_labels:
+                sel = st.selectbox("Confirmed package / customer", opt_labels)
+                if sel:
+                    rid = sel.split(" | ")[-1].strip()
+                    row = df_confirmed_unique[df_confirmed_unique["itinerary_id"]==rid].iloc[0]
+                    iid, cust_name, ach = rid, row["client_name"], row["ach_id"]
         with c2:
             when = st.date_input("Date", value=date.today())
         with c3:
             amount = st.number_input("Amount (₹)", min_value=0, step=100, value=0)
-        c4, c5 = st.columns([1,1])
+        c4, c5 = st.columns(2)
         with c4:
             category = st.selectbox("Category", CATEGORIES, index=0)
         with c5:
-            subheader = st.text_input("Subheader (detail)", placeholder="e.g., Airport transfer / Room upgrade")
-        notes = st.text_area("Notes (optional)", placeholder="Anything helpful for accounting")
+            subheader = st.text_input("Subheader (detail)")
+        notes = st.text_area("Notes (optional)")
     else:
         c1, c2, c3 = st.columns([2,1,1])
         with c1:
-            cust_name = st.text_input("Beneficiary / Customer (free text)", placeholder="e.g., Office supplies / Misc")
+            cust_name = st.text_input("Beneficiary / Customer (free text)")
         with c2:
             when = st.date_input("Date", value=date.today(), key="oth_date")
         with c3:
             amount = st.number_input("Amount (₹)", min_value=0, step=100, value=0, key="oth_amt")
-        c4, c5 = st.columns([1,1])
+        c4, c5 = st.columns(2)
         with c4:
-            category = st.selectbox("Category", CATEGORIES, index=5, key="oth_cat")  # default Other
+            category = st.selectbox("Category", CATEGORIES, index=5, key="oth_cat")
         with c5:
-            subheader = st.text_input("Subheader (detail)", placeholder="e.g., Courier / Printouts", key="oth_sub")
-        notes = st.text_area("Notes (optional)", placeholder="Anything helpful for accounting", key="oth_notes")
-        iid, ach = "", ""  # not tied to any itinerary
+            subheader = st.text_input("Subheader (detail)", key="oth_sub")
+        notes = st.text_area("Notes (optional)", key="oth_notes")
+        iid, ach = "", ""
 
     submitted = st.form_submit_button("Save expense")
 
 if submitted:
     if amount <= 0:
         st.error("Amount must be > 0.")
-    elif mode == "Linked to confirmed package" and not iid:
-        st.error("Please choose a confirmed package/customer.")
     else:
         add_expense(
-            payer=user, itinerary_id=str(iid or ""), customer_name=cust_name, ach_id=str(ach or ""),
-            category=category, subheader=subheader, amount=int(amount), when=when, notes=notes
+            payer=user, itinerary_id=str(iid or ""), customer_name=cust_name,
+            ach_id=str(ach or ""), category=category, subheader=subheader,
+            amount=int(amount), when=when, notes=notes
         )
         st.success("Expense added.")
-        # Force reload after save only
         st.session_state["force_refresh"] = True
         st.rerun()
 
+st.divider()
+
 # =========================
-# Admin: settle balances (deferred)
+# Admin settlements
 # =========================
 if is_admin:
     st.subheader("💵 Admin – Settle employee balance")
@@ -458,65 +452,49 @@ if is_admin:
             pay_amt = st.number_input("Amount (₹)", min_value=0, step=500, value=0)
         with a4:
             ref = st.text_input("Ref / Mode", placeholder="UPI/NEFT/Receipt #")
-        notes_s = st.text_area("Notes (optional)", placeholder="e.g., July reimbursement")
+        notes_s = st.text_area("Notes (optional)")
         pay_btn = st.form_submit_button("Record settlement")
-    if pay_btn:
-        if not emp_to_pay or pay_amt <= 0:
-            st.error("Choose employee and enter amount > 0.")
-        else:
-            add_settlement(employee=emp_to_pay, amount=int(pay_amt), when=pay_date, ref=ref, notes=notes_s)
-            st.success("Settlement recorded.")
-            st.session_state["force_refresh"] = True
-            st.rerun()
+    if pay_btn and emp_to_pay and pay_amt>0:
+        add_settlement(employee=emp_to_pay, amount=int(pay_amt), when=pay_date, ref=ref, notes=notes_s)
+        st.success("Settlement recorded.")
+        st.session_state["force_refresh"] = True
+        st.rerun()
 
 st.divider()
 
 # =========================
-# Package ledger (confirmed only) (deferred)
+# Package ledger
 # =========================
 st.subheader("📦 Package ledger (confirmed only)")
-if _defer_guard("Package ledger"):
-    pass
-else:
-    iid_l, cust_l, ach_l = choose_package("Pick a confirmed package to view ledger", key="ledger_pick")
-    if iid_l:
-        df_pkg = fetch_entries(start=None, end=None, itinerary_id=iid_l)
-        if df_pkg.empty:
-            st.info("No entries yet for this package.")
-        else:
-            exp_tbl = df_pkg[df_pkg["Kind"]=="expense"].copy()
-            exp_tbl = exp_tbl[["Date","Employee","Category","Subheader","Amount (₹)","Notes"]].sort_values("Date")
-            st.dataframe(exp_tbl, use_container_width=True, hide_index=True)
-            with st.expander("Show summaries"):
-                by_emp = exp_tbl.groupby("Employee", as_index=False)["Amount (₹)"].sum()
-                by_cat = exp_tbl.groupby("Category", as_index=False)["Amount (₹)"].sum()
-                csum1, csum2 = st.columns(2)
-                with csum1:
-                    st.markdown("**By employee**")
-                    st.dataframe(by_emp, use_container_width=True, hide_index=True)
-                with csum2:
-                    st.markdown("**By category**")
-                    st.dataframe(by_cat, use_container_width=True, hide_index=True)
-            st.caption("Settlements shown below are global for the employee (not tied to one package).")
-            st.dataframe(df_pkg[df_pkg["Kind"]=="settlement"][["Date","Employee","Amount (₹)","Ref","Notes"]],
-                         use_container_width=True, hide_index=True)
+if not _defer_guard("Package ledger"):
+    opt_labels = pack_options(df_confirmed_unique)
+    if opt_labels:
+        sel = st.selectbox("Pick a confirmed package to view ledger", opt_labels)
+        if sel:
+            rid = sel.split(" | ")[-1].strip()
+            df_pkg = fetch_entries(start=None, end=None, itinerary_id=rid)
+            if df_pkg.empty:
+                st.info("No entries yet for this package.")
+            else:
+                exp_tbl = df_pkg[df_pkg["Kind"]=="expense"].copy()
+                exp_tbl = exp_tbl[["Date","Employee","Category","Subheader","Amount (₹)","Notes"]].sort_values("Date")
+                st.dataframe(exp_tbl, use_container_width=True, hide_index=True)
+                with st.expander("Summaries"):
+                    by_emp = exp_tbl.groupby("Employee", as_index=False)["Amount (₹)"].sum()
+                    by_cat = exp_tbl.groupby("Category", as_index=False)["Amount (₹)"].sum()
+                    c1, c2 = st.columns(2)
+                    c1.dataframe(by_emp, use_container_width=True, hide_index=True)
+                    c2.dataframe(by_cat, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================
-# Team balances table (period + all-time) (deferred)
+# Team balances
 # =========================
 st.subheader("👥 Balances")
-if _defer_guard("Team balances"):
-    pass
-else:
-    search_emp = st.text_input("Search employee (optional)", key="emp_search")
-    emps = (emp_filter if emp_filter else all_employees()) or []
-    if search_emp and search_emp.strip():
-        s = search_emp.strip().lower()
-        emps = [e for e in emps if s in e.lower()]
-
-    rows = []
+if not _defer_guard("Team balances"):
+    emps = emp_filter if emp_filter else all_employees()
+    rows=[]
     for e in emps:
         em = totals_for_employee(e, start, end)
         ea = totals_for_employee(e, None, None)
@@ -529,28 +507,25 @@ else:
             "Settled (all time)": ea[1],
             "Balance (all time)": ea[2],
         })
-
-    df_bal = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        "Employee","Paid (period)","Settled (period)","Balance (period)","Paid (all time)","Settled (all time)","Balance (all time)"
-    ])
-    df_bal = df_bal.sort_values(["Balance (period)","Balance (all time)"], ascending=False)
+    df_bal=pd.DataFrame(rows)
     st.dataframe(df_bal, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================
-# My entries (in selected period) (deferred)
+# My entries
 # =========================
 st.subheader("📜 My entries (in selected period)")
-if _defer_guard("My entries table"):
-    pass
-else:
+if not _defer_guard("My entries table"):
     df_me = fetch_entries(start, end, employee=user, itinerary_id=None)
     if df_me.empty:
         st.info("No entries in this period.")
     else:
-        show_cols = ["Kind","Date","Customer","ACH ID","Category","Subheader","Amount (₹)","Notes","Ref"]
-        st.dataframe(df_me[show_cols].sort_values(["Date","Kind"]), use_container_width=True, hide_index=True)
+        show_cols=["Kind","Date","Customer","ACH ID","Category","Subheader","Amount (₹)","Notes","Ref"]
+        st.dataframe(df_me[show_cols].sort_values(["Date","Kind"]),
+                     use_container_width=True, hide_index=True)
 
-# Clear force flag at end of successful load cycle
+# =========================
+# End cycle clear
+# =========================
 _clear_force_refresh()
