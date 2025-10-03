@@ -642,7 +642,8 @@ if mode == "All employees (overview)":
                 paid_flag=payload["paid"],
             )
         st.success("Saved all updates.")
-        st.experimental_set_query_params(_ts=datetime.now().timestamp()) st.stop()
+        st.experimental_set_query_params(_ts=datetime.now().timestamp()) 
+        st.stop()
 
 
 # =============================
@@ -707,7 +708,8 @@ if mode == "Single employee" and view_emp:
                 paid_flag=paid_yes,
             )
             st.success("Saved payment.")
-            st.experimental_set_query_params(_ts=datetime.now().timestamp()) st.stop()
+            st.experimental_set_query_params(_ts=datetime.now().timestamp()) 
+            st.stop()
 
 
 # =============================
