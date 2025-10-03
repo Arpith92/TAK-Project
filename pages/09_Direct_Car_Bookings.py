@@ -50,30 +50,71 @@ col_cars = db["direct_car_bookings"]
 col_split = db["expense_splitwise"]
 
 # =========================
-# User Login (parity with other pages)
+# Users & Login (same as Splitwise page)
 # =========================
 def load_users() -> dict:
-    users = st.secrets.get("users", {})
-    return users if isinstance(users, dict) else {}
+    users = st.secrets.get("users", None)
+    if isinstance(users, dict) and users:
+        return users
+    try:
+        try:
+            import tomllib
+        except Exception:
+            import tomli as tomllib
+        with open(".streamlit/secrets.toml", "rb") as f:
+            data = tomllib.load(f)
+        u = data.get("users", {})
+        if isinstance(u, dict) and u:
+            with st.sidebar:
+                st.warning("Using users from repo .streamlit/secrets.toml. For production, set them in Manage app → Secrets.")
+            return u
+    except Exception:
+        pass
+    return {}
 
-user = st.session_state.get("user")
-if not user:
+ADMIN_USERS = set(st.secrets.get("admin_users", ["Arpith", "Kuldeep"]))
+
+def _login() -> Optional[str]:
+    with st.sidebar:
+        if st.session_state.get("user"):
+            st.markdown(f"**Signed in as:** {st.session_state['user']}")
+            if st.button("Log out"):
+                st.session_state.pop("user", None)
+                st.rerun()
+    if st.session_state.get("user"):
+        return st.session_state["user"]
+
     users_map = load_users()
-    st.markdown("### 🔐 Login required")
-    u = st.selectbox("User", list(users_map.keys()))
-    p = st.text_input("PIN", type="password")
-    if st.button("Login"):
-        if str(users_map.get(u)) == str(p):
-            st.session_state["user"] = u
+    if not users_map:
+        st.error("Login not configured yet. Add to Manage app → Secrets:\n\nmongo_uri=\"...\"\n\n[users]\nArpith=\"1234\" ...")
+        st.stop()
+
+    st.markdown("### 🔐 Login")
+    c1, c2 = st.columns(2)
+    with c1:
+        name = st.selectbox("User", list(users_map.keys()), key="login_user")
+    with c2:
+        pin = st.text_input("PIN", type="password", key="login_pin")
+    if st.button("Sign in"):
+        if str(users_map.get(name, "")).strip() == str(pin).strip():
+            st.session_state["user"] = name
+            st.success(f"Welcome, {name}!")
             st.rerun()
         else:
-            st.error("Invalid PIN")
+            st.error("Invalid PIN"); st.stop()
+    return None
+
+user = _login()
+if not user:
     st.stop()
 
-all_emps = list(load_users().keys())
+# consistent employee list (like splitwise)
+@st.cache_data(ttl=60)
+def all_employees() -> list[str]:
+    return [e for e in sorted(load_users().keys()) if e]
 
 # =========================
-# Form (wrapped so inputs persist until submit)
+# Form
 # =========================
 with st.form("direct_car_form", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
@@ -94,7 +135,7 @@ with st.form("direct_car_form", clear_on_submit=True):
 
     emp_list = []
     if recv_in == "Personal Account":
-        emp_list = st.multiselect("Payment received by (employee(s))", all_emps)
+        emp_list = st.multiselect("Payment received by (employee(s))", all_employees())
 
     notes = st.text_area("Notes", placeholder="Any remarks…")
 
@@ -106,7 +147,6 @@ if submitted:
     elif recv_in == "Personal Account" and not emp_list:
         st.error("Please select at least one employee")
     else:
-        # Store booking in DB
         doc = {
             "date": datetime.combine(when, datetime.min.time()),
             "client_name": client,
@@ -121,7 +161,6 @@ if submitted:
         }
         col_cars.insert_one(doc)
 
-        # If personal account → split among employees equally
         if recv_in == "Personal Account" and emp_list:
             per_emp_amount = int(amount / len(emp_list))
             for emp in emp_list:
@@ -140,7 +179,7 @@ if submitted:
         st.rerun()
 
 # =========================
-# Show recent
+# Recent bookings
 # =========================
 st.subheader("📜 Recent Direct Car Bookings")
 docs = list(col_cars.find().sort("date", -1).limit(20))
