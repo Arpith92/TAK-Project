@@ -146,32 +146,6 @@ is_admin   = (str(user).strip().lower() in {"arpith","kuldeep"})
 is_manager = (str(user).strip() == "Kuldeep")
 can_reassign = is_admin or is_manager
 
-# --- Month picker helper (no day) ---
-import calendar
-
-def month_picker(label: str, *, default: Optional[date]=None, key: Optional[str]=None) -> Tuple[date, date]:
-    """
-    UI: Year + Month select boxes. Returns (month_start, month_end).
-    """
-    today = date.today()
-    default = default or today.replace(day=1)
-
-    years = list(range(today.year - 3, today.year + 2))  # 5-year window
-    year = st.selectbox(f"{label} – Year", years, index=years.index(default.year), key=(key or f"{label}_yr"))
-    months = list(range(1, 13))
-    mnames = [calendar.month_abbr[m] for m in months]
-    m_idx = default.month - 1
-    month_name = st.selectbox(f"{label} – Month", mnames, index=m_idx, key=(key or f"{label}_mo"))
-    month = mnames.index(month_name) + 1
-
-    start = date(year, month, 1)
-    # last day of month
-    next_first = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    end = next_first - timedelta(days=1)
-    st.caption(f"Period: **{start} → {end}**")
-    return start, end
-
-
 # ---------------- Helpers ----------------
 def _get_itinerary(iid: str, projection: Optional[dict] = None) -> dict:
     try:
@@ -860,8 +834,11 @@ with tabs[2]:
         rep_scope = user
         st.caption(f"Showing incentives for **{rep_scope}**")
 
-# Month picker (no day)
-month_start, month_end = month_picker("Pick month", default=_today_utc().replace(day=1), key="inc_mo")
+    # Month picker
+    today = _today_utc()
+    first_this, _ = month_bounds(today)
+    month_pick = st.date_input("Pick month", value=first_this)
+    month_start, month_end = month_bounds(month_pick)
 
     # Build details for scope (all reps or single rep)
     start_window = max(month_start, INCENTIVE_START_DATE)
