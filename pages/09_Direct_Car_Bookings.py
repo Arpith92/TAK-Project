@@ -101,22 +101,23 @@ def _login() -> Optional[str]:
             st.success(f"Welcome, {name}!")
             st.rerun()
         else:
-            st.error("Invalid PIN"); st.stop()
+            st.error("Invalid PIN")
+            st.stop()
     return None
 
 user = _login()
 if not user:
     st.stop()
 
-# consistent employee list (like splitwise)
+# consistent employee list from users
 @st.cache_data(ttl=60)
 def all_employees() -> list[str]:
     return [e for e in sorted(load_users().keys()) if e]
 
 # =========================
-# Form
+# Direct Car Booking Form
 # =========================
-with st.form("direct_car_form", clear_on_submit=True):
+with st.form("direct_car_form", clear_on_submit=False):   # KEEP values after first click
     c1, c2, c3 = st.columns(3)
     with c1:
         when = st.date_input("Date", value=date.today())
@@ -139,7 +140,7 @@ with st.form("direct_car_form", clear_on_submit=True):
 
     notes = st.text_area("Notes", placeholder="Any remarks…")
 
-    submitted = st.form_submit_button("💾 Save booking")
+    submitted = st.form_submit_button("💾 Save booking", use_container_width=True)
 
 if submitted:
     if amount <= 0:
@@ -176,7 +177,7 @@ if submitted:
                 })
 
         st.success("Booking saved successfully ✅")
-        st.rerun()
+        st.experimental_rerun()   # ensure first click saves immediately
 
 # =========================
 # Recent bookings
