@@ -105,6 +105,7 @@ db = get_db()
 col_itineraries = db["itineraries"]
 col_updates     = db["package_updates"]
 col_split       = db["expense_splitwise"]
+col_cars        = db["direct_car_bookings"]   # 🔹 NEW
 
 # =========================
 # Users & login
@@ -206,6 +207,37 @@ def entry_to_row(d: dict) -> dict:
     }
 
 # =========================
+# 🔹 Direct Car integration
+# =========================
+def directcar_to_rows(start: Optional[date], end: Optional[date]) -> List[dict]:
+    q = {}
+    if start and end:
+        q["date"] = {"$gte": datetime.combine(start, datetime.min.time()),
+                     "$lte": datetime.combine(end, datetime.max.time())}
+    docs = list(col_cars.find(q))
+    rows=[]
+    for d in docs:
+        base = {
+            "kind":"expense",
+            "date": d.get("date"),
+            "customer_name": d.get("client_name",""),
+            "category":"Car",
+            "subheader": d.get("trip_plan",""),
+            "amount": d.get("amount",0),
+            "notes": d.get("notes",""),
+            "ref":"Direct Car",
+            "_id": str(d.get("_id",""))
+        }
+        if d.get("received_in")=="Company Account":
+            base["payer"]="Company"
+            rows.append(entry_to_row(base))
+        else:
+            for emp in d.get("employees",[]):
+                base2=base.copy(); base2["payer"]=emp
+                rows.append(entry_to_row(base2))
+    return rows
+
+# =========================
 # Data fetchers
 # =========================
 def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
@@ -223,18 +255,27 @@ def fetch_entries(start: Optional[date] = None, end: Optional[date] = None,
                                         "amount":1,"notes":1,"ref":1,"itinerary_id":1,
                                         "created_by":1,"created_at":1}).sort("date", 1)
     rows = [entry_to_row(d) for d in cur]
+    # 🔹 merge direct car bookings
+    rows += directcar_to_rows(start, end)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=list(entry_to_row({}).keys()))
 
 def totals_for_employee(emp: str, start: Optional[date]=None, end: Optional[date]=None) -> Tuple[int,int,int]:
-    q_exp: Dict = {"kind":"expense","payer":emp}
-    q_pay: Dict = {"kind":"settlement","employee":emp}
-    if start and end:
-        span = {"$gte": datetime.combine(start, datetime.min.time()),
-                "$lte": datetime.combine(end, datetime.max.time())}
-        q_exp["date"] = span; q_pay["date"] = span
-    exp_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_exp, {"amount":1}))
-    pay_sum = sum(_to_int(d.get("amount",0)) for d in col_split.find(q_pay, {"amount":1}))
+    df = fetch_entries(start, end, employee=emp)
+    exp_sum = int(df[df["Kind"]=="expense"]["Amount (₹)"].sum())
+    pay_sum = int(df[df["Kind"]=="settlement"]["Amount (₹)"].sum())
     return exp_sum, pay_sum, (exp_sum - pay_sum)
+
+# =========================
+# (Rest of UI logic remains unchanged – balances, KPIs, forms, ledger, etc.)
+# =========================
+# All your existing sections (filters, KPIs, add expense, admin settlement,
+# package ledger, team balances, my entries) remain exactly the same.
+# Because they already call fetch_entries() and totals_for_employee(),
+# direct car bookings will now automatically appear there.
+
+# Clear force flag at end of successful load cycle
+_clear_force_refresh()
+
 
 # =========================
 # DB ops
