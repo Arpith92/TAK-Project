@@ -1,5 +1,5 @@
+# pages/09_Direct_Car_Bookings.py
 from __future__ import annotations
-
 from datetime import datetime, date
 from typing import Optional
 import os
@@ -50,7 +50,7 @@ col_cars = db["direct_car_bookings"]
 col_split = db["expense_splitwise"]
 
 # =========================
-# Users & Login (same as Splitwise page)
+# Users & Login
 # =========================
 def load_users() -> dict:
     users = st.secrets.get("users", None)
@@ -63,14 +63,9 @@ def load_users() -> dict:
             import tomli as tomllib
         with open(".streamlit/secrets.toml", "rb") as f:
             data = tomllib.load(f)
-        u = data.get("users", {})
-        if isinstance(u, dict) and u:
-            with st.sidebar:
-                st.warning("Using users from repo .streamlit/secrets.toml. For production, set them in Manage app → Secrets.")
-            return u
+        return data.get("users", {})
     except Exception:
-        pass
-    return {}
+        return {}
 
 ADMIN_USERS = set(st.secrets.get("admin_users", ["Arpith", "Kuldeep"]))
 
@@ -86,30 +81,25 @@ def _login() -> Optional[str]:
 
     users_map = load_users()
     if not users_map:
-        st.error("Login not configured yet. Add to Manage app → Secrets:\n\nmongo_uri=\"...\"\n\n[users]\nArpith=\"1234\" ...")
+        st.error("Login not configured. Add in Secrets.")
         st.stop()
 
     st.markdown("### 🔐 Login")
     c1, c2 = st.columns(2)
-    with c1:
-        name = st.selectbox("User", list(users_map.keys()), key="login_user")
-    with c2:
-        pin = st.text_input("PIN", type="password", key="login_pin")
+    with c1: name = st.selectbox("User", list(users_map.keys()), key="login_user")
+    with c2: pin = st.text_input("PIN", type="password", key="login_pin")
     if st.button("Sign in"):
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
             st.success(f"Welcome, {name}!")
             st.rerun()
         else:
-            st.error("Invalid PIN")
-            st.stop()
+            st.error("Invalid PIN"); st.stop()
     return None
 
 user = _login()
-if not user:
-    st.stop()
+if not user: st.stop()
 
-# consistent employee list from users
 @st.cache_data(ttl=60)
 def all_employees() -> list[str]:
     return [e for e in sorted(load_users().keys()) if e]
@@ -117,29 +107,22 @@ def all_employees() -> list[str]:
 # =========================
 # Direct Car Booking Form
 # =========================
-with st.form("direct_car_form", clear_on_submit=False):   # KEEP values after first click
+with st.form("direct_car_form", clear_on_submit=False):
     c1, c2, c3 = st.columns(3)
-    with c1:
-        when = st.date_input("Date", value=date.today())
-    with c2:
-        client = st.text_input("Client Name (optional)")
-    with c3:
-        trip = st.text_input("Trip Plan (optional)")
+    with c1: when = st.date_input("Date", value=date.today())
+    with c2: client = st.text_input("Client Name (optional)")
+    with c3: trip = st.text_input("Trip Plan (optional)")
 
     c4, c5, c6 = st.columns(3)
-    with c4:
-        amount = st.number_input("Amount (₹)", min_value=0, step=500)
-    with c5:
-        car_type = st.selectbox("Car Type", ["Sedan", "Ertiga"])
-    with c6:
-        recv_in = st.radio("Received In", ["Company Account", "Personal Account"], horizontal=True)
+    with c4: amount = st.number_input("Amount (₹)", min_value=0, step=500)
+    with c5: car_type = st.selectbox("Car Type", ["Sedan", "Ertiga"])
+    with c6: recv_in = st.radio("Received In", ["Company Account", "Personal Account"], horizontal=True)
 
     emp_list = []
     if recv_in == "Personal Account":
         emp_list = st.multiselect("Payment received by (employee(s))", all_employees())
 
     notes = st.text_area("Notes", placeholder="Any remarks…")
-
     submitted = st.form_submit_button("💾 Save booking", use_container_width=True)
 
 if submitted:
@@ -148,15 +131,16 @@ if submitted:
     elif recv_in == "Personal Account" and not emp_list:
         st.error("Please select at least one employee")
     else:
+        # ensure safe types for Mongo
         doc = {
             "date": datetime.combine(when, datetime.min.time()),
-            "client_name": client,
-            "trip_plan": trip,
+            "client_name": str(client or ""),
+            "trip_plan": str(trip or ""),
             "amount": int(amount),
-            "car_type": car_type,
-            "received_in": recv_in,
-            "employees": emp_list if recv_in == "Personal Account" else [],
-            "notes": notes,
+            "car_type": str(car_type),
+            "received_in": str(recv_in),
+            "employees": [str(e) for e in (emp_list or [])],
+            "notes": str(notes or ""),
             "created_by": user,
             "created_at": datetime.utcnow(),
         }
@@ -170,14 +154,14 @@ if submitted:
                     "created_at": datetime.utcnow(),
                     "created_by": user,
                     "date": datetime.combine(when, datetime.min.time()),
-                    "employee": emp,
+                    "employee": str(emp),
                     "amount": per_emp_amount,
                     "ref": f"Direct Car ({car_type})",
-                    "notes": f"Direct booking for {client or 'N/A'} | Bulk entry",
+                    "notes": f"Direct booking for {client or 'N/A'}",
                 })
 
         st.success("Booking saved successfully ✅")
-        st.rerun()   # fixed: works in new streamlit
+        st.rerun()
 
 # =========================
 # Recent bookings
@@ -209,25 +193,28 @@ if month_choice:
 
     cur = col_cars.find({"date": {"$gte": start_m, "$lt": end_m}}).sort("date", 1)
     rows = list(cur)
+
     if not rows:
         st.info("No bookings for this month.")
     else:
+        # ensure safe dataframe
+        for r in rows:
+            r["_id"] = str(r.get("_id", ""))
+            r["date"] = r.get("date").date() if isinstance(r.get("date"), datetime) else r.get("date")
+
         dfm = pd.DataFrame(rows)
-        dfm["_id"] = dfm["_id"].astype(str)
         dfm.reset_index(drop=True, inplace=True)
         dfm.index = dfm.index + 1
         dfm.rename_axis("Sr No", inplace=True)
 
-        # Pick main columns
         show_cols = ["date","car_type","client_name","trip_plan","amount","received_in","employees","notes"]
         for c in show_cols:
             if c not in dfm: dfm[c] = ""
         table = dfm[show_cols]
 
-        # Totals
-        total_all = dfm["amount"].sum()
-        total_cash = dfm.loc[dfm["received_in"]=="Company Account", "amount"].sum()
-        total_personal = dfm.loc[dfm["received_in"]=="Personal Account", "amount"].sum()
+        total_all = int(dfm["amount"].sum())
+        total_cash = int(dfm.loc[dfm["received_in"]=="Company Account", "amount"].sum())
+        total_personal = int(dfm.loc[dfm["received_in"]=="Personal Account", "amount"].sum())
 
         st.dataframe(table, use_container_width=True)
 
