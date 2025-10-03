@@ -437,20 +437,28 @@ def calc_driver_month(driver: str, start: date, end: date) -> dict:
 # =============================
 # PDF Helpers (header + employee slip)
 # =============================
-def _ascii(s: str) -> str:
-    if s is None: return ""
-    return (str(s)
-            .replace("₹", "Rs ")
-            .replace("—", "-").replace("–", "-").replace("•", "-")
-            .replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-            .replace("™", "(TM)")
-            )
 
-def inr_ascii(n) -> str:
+# ✅ Use Unicode-capable font if available
+FONT_PATH = ".streamlit/DejaVuSans.ttf"
+
+def ensure_font(pdf: FPDF):
+    if os.path.exists(FONT_PATH):
+        try:
+            pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
+            pdf.add_font("DejaVu", "B", FONT_PATH, uni=True)
+            pdf.set_font("DejaVu", "", 11)
+            return "DejaVu"
+        except Exception:
+            pass
+    # fallback
+    pdf.set_font("Helvetica", "", 11)
+    return "Helvetica"
+
+def inr_fmt(n) -> str:
     try:
-        return f"Rs {int(round(float(n))):,}"
+        return f"₹ {int(round(float(n))):,}"
     except Exception:
-        return f"Rs {n}"
+        return str(n)
 
 ORG = {
     "title": "TravelaajKal® – Achala Holidays Pvt. Ltd.",
@@ -465,6 +473,7 @@ class InvoiceHeaderPDF(FPDF):
         self.set_auto_page_break(auto=True, margin=18)
         self.set_title("Salary Statement")
         self.set_author("Achala Holidays Pvt. Ltd.")
+        self.fontname = ensure_font(self)
 
     def header(self):
         self.set_draw_color(150,150,150)
@@ -473,18 +482,19 @@ class InvoiceHeaderPDF(FPDF):
             try: self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception: pass
         self.set_xy(50, 12)
-        self.set_font("Helvetica", "B", 14); self.cell(0, 7, _ascii(ORG["title"]), align="C", ln=1)
-        self.set_font("Helvetica", "", 10)
-        self.cell(0, 6, _ascii(ORG["line1"]), align="C", ln=1)
-        self.cell(0, 6, _ascii(ORG["line2"]), align="C", ln=1)
+        self.set_font(self.fontname, "B", 14); self.cell(0, 7, ORG["title"], align="C", ln=1)
+        self.set_font(self.fontname, "", 10)
+        self.cell(0, 6, ORG["line1"], align="C", ln=1)
+        self.cell(0, 6, ORG["line2"], align="C", ln=1)
         self.ln(2); self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y()); self.ln(4)
 
     def footer(self):
         self.set_y(-15)
-        self.set_font("Helvetica", "", 8)
-        self.cell(0, 5, _ascii(ORG["footer_rights"]), ln=1, align="C")
-# ---- Employee PDF (2-column table) ----
+        self.set_font(self.fontname, "", 8)
+        self.cell(0, 5, ORG["footer_rights"], ln=1, align="C")
+
+
 def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: dict, carry_forward: int, total_due: int) -> bytes:
     pdf = InvoiceHeaderPDF()
     pdf.add_page()
@@ -493,29 +503,29 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
     th = 8
     col1_w, col2_w = 120, 66
 
-    pdf.set_font("Helvetica", "", 11)
-    pdf.set_x(left); pdf.cell(0, 6, _ascii(f"{month_label} (Salary Statement: {period_label})"), ln=1)
+    pdf.set_font(pdf.fontname, "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, f"{month_label} (Salary Statement: {period_label})", ln=1)
     pdf.ln(1)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_x(left); pdf.cell(0, 6, _ascii(f"EMP NAME:  {emp}"), ln=1)
+    pdf.set_font(pdf.fontname, "B", 11)
+    pdf.set_x(left); pdf.cell(0, 6, f"EMP NAME:  {emp}", ln=1)
     pdf.ln(2)
 
     def header_row():
         y = pdf.get_y()
-        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_font(pdf.fontname, "B", 10)
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
-        pdf.text(left + 2, y + th - 2, _ascii("Particulars"))
-        pdf.text(left + col1_w + 2, y + th - 2, _ascii("Amount"))
+        pdf.text(left + 2, y + th - 2, "Particulars")
+        pdf.text(left + col1_w + 2, y + th - 2, "Amount")
         pdf.ln(th)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(pdf.fontname, "", 10)
 
     def row(label: str, amount):
         y = pdf.get_y()
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
-        pdf.text(left + 2, y + th - 2, _ascii(label))
-        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, _ascii(inr_ascii(amount)), align="R")
+        pdf.text(left + 2, y + th - 2, str(label))
+        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt(amount), align="R")
         pdf.ln(th)
 
     header_row()
@@ -529,15 +539,15 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
 
     pdf.ln(2)
     y = pdf.get_y()
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_font(pdf.fontname, "B", 11)
     pdf.rect(left, y, col1_w, th)
     pdf.rect(left + col1_w, y, col2_w, th)
-    pdf.text(left + 2, y + th - 2, _ascii("Total Due"))
-    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, _ascii(inr_ascii(total_due)), align="R")
+    pdf.text(left + 2, y + th - 2, "Total Due")
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt(total_due), align="R")
     pdf.ln(th + 10)
 
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, _ascii("Note: This is a computer-generated statement."))
+    pdf.set_font(pdf.fontname, "", 9)
+    pdf.multi_cell(0, 5, "Note: This is a computer-generated statement.")
 
     pdf.ln(6)
     sig_w = 50
@@ -547,8 +557,8 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
         try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
         except Exception: pass
     pdf.set_xy(sig_x, sig_y + 18)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(sig_w, 6, _ascii("Authorised Signatory"), ln=1, align="C")
+    pdf.set_font(pdf.fontname, "", 10)
+    pdf.cell(sig_w, 6, "Authorised Signatory", ln=1, align="C")
 
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
