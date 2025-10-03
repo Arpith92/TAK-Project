@@ -1,194 +1,282 @@
-# pages/09_Direct_Car_Bookings.py
 from __future__ import annotations
 from datetime import datetime, date
 from typing import Optional
-import os, pandas as pd, streamlit as st
+import os
+import pandas as pd
+import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 
+# -------------------------------------------------
+# Page
+# -------------------------------------------------
 st.set_page_config(page_title="Direct Car Bookings", layout="wide")
 st.title("🚖 Direct Car Bookings (Cash / Employee Collection)")
 
-# -----------------------
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+def safe_dt_from_date(d: date) -> datetime:
+    """Convert a python date into a naive datetime at 00:00:00."""
+    return datetime.combine(d, datetime.min.time())
+
+def month_bounds(any_day: date) -> tuple[datetime, datetime]:
+    """Return [start_dt, end_dt) datetimes for the month of any_day."""
+    start_d = any_day.replace(day=1)
+    if start_d.month == 12:
+        next_month_d = start_d.replace(year=start_d.year + 1, month=1, day=1)
+    else:
+        next_month_d = start_d.replace(month=start_d.month + 1, day=1)
+    return safe_dt_from_date(start_d), safe_dt_from_date(next_month_d)
+
+def to_display_date(x) -> str:
+    if isinstance(x, datetime):
+        return x.strftime("%Y-%m-%d")
+    if isinstance(x, date):
+        return x.strftime("%Y-%m-%d")
+    return str(x or "")
+
+# -------------------------------------------------
 # Mongo Connection
-# -----------------------
-def _find_uri():
-    for k in ["mongo_uri","MONGO_URI","mongodb_uri","MONGODB_URI"]:
-        try: v = st.secrets.get(k)
-        except Exception: v = None
-        if v: return v
-    for k in ["mongo_uri","MONGO_URI","mongodb_uri","MONGODB_URI"]:
+# -------------------------------------------------
+CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
+
+def _find_uri() -> Optional[str]:
+    for k in CAND_KEYS:
+        try:
+            v = st.secrets.get(k)
+        except Exception:
+            v = None
+        if v:
+            return v
+    for k in CAND_KEYS:
         v = os.getenv(k)
-        if v: return v
+        if v:
+            return v
     return None
 
 @st.cache_resource
-def _get_client():
+def _get_client() -> Optional[MongoClient]:
     uri = _find_uri()
     if not uri:
         return None
     client = MongoClient(uri, appName="TAK_DirectCars", tz_aware=True)
-    try: client.admin.command("ping")
-    except ServerSelectionTimeoutError: return None
+    try:
+        client.admin.command("ping")
+    except ServerSelectionTimeoutError:
+        return None
     return client
 
-# -----------------------
-# Users & Login
-# -----------------------
+# -------------------------------------------------
+# Users & Login (same style as other pages)
+# -------------------------------------------------
 def load_users() -> dict:
     users = st.secrets.get("users", None)
-    if isinstance(users, dict) and users: return users
+    if isinstance(users, dict) and users:
+        return users
+    # fallback for dev
     try:
-        try: import tomllib
-        except: import tomli as tomllib
-        with open(".streamlit/secrets.toml","rb") as f:
-            return tomllib.load(f).get("users", {})
-    except: return {}
+        try:
+            import tomllib
+        except Exception:
+            import tomli as tomllib
+        with open(".streamlit/secrets.toml", "rb") as f:
+            data = tomllib.load(f)
+        u = data.get("users", {})
+        if isinstance(u, dict):
+            with st.sidebar:
+                st.warning("Using users from repo .streamlit/secrets.toml. For production, set them in Manage app → Secrets.")
+            return u
+    except Exception:
+        pass
+    return {}
 
-def _login():
-    if st.session_state.get("user"):
-        with st.sidebar:
+def all_employees() -> list[str]:
+    return sorted(load_users().keys())
+
+def _login() -> Optional[str]:
+    # if logged-in already
+    with st.sidebar:
+        if st.session_state.get("user"):
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
             if st.button("Log out"):
-                st.session_state.pop("user"); st.experimental_set_query_params()
-                st.stop()
+                st.session_state.pop("user", None)
+                st.rerun()
+
+    if st.session_state.get("user"):
         return st.session_state["user"]
 
     users_map = load_users()
     if not users_map:
-        st.sidebar.error("⚠️ No login config in secrets."); st.stop()
+        st.sidebar.error("⚠️ Login is not configured in Secrets.")
+        st.stop()
 
-    with st.sidebar:
-        st.markdown("### 🔐 Login")
-        name = st.selectbox("User", list(users_map.keys()))
-        pin = st.text_input("PIN", type="password")
-        if st.button("Sign in"):
-            if str(users_map.get(name,"")).strip() == str(pin).strip():
-                st.session_state["user"] = name
-                st.experimental_set_query_params()
-                st.experimental_rerun()
-            else: st.error("Invalid PIN"); st.stop()
+    st.sidebar.markdown("### 🔐 Login")
+    name = st.sidebar.selectbox("User", list(users_map.keys()), key="login_user")
+    pin = st.sidebar.text_input("PIN", type="password", key="login_pin")
+    if st.sidebar.button("Sign in"):
+        if str(users_map.get(name, "")).strip() == str(pin).strip():
+            st.session_state["user"] = name
+            st.rerun()
+        else:
+            st.sidebar.error("Invalid PIN")
+            st.stop()
     return None
 
 user = _login()
-if not user: st.stop()
+if not user:
+    st.stop()
 
-# -----------------------
-# DB only after login
-# -----------------------
 client = _get_client()
 if not client:
-    st.error("❌ Could not connect to MongoDB.")
+    st.error("❌ Could not connect to MongoDB. Check your URI in Secrets.")
     st.stop()
 
 db = client["TAK_DB"]
 col_cars = db["direct_car_bookings"]
 col_split = db["expense_splitwise"]
 
-def all_employees() -> list[str]:
-    return sorted(load_users().keys())
+# -------------------------------------------------
+# Manual refresh (avoid auto-refreshing)
+# -------------------------------------------------
+with st.sidebar:
+    if st.button("🔄 Refresh tables"):
+        st.session_state["refresh_now"] = True
+    else:
+        st.session_state["refresh_now"] = st.session_state.get("refresh_now", False)
 
-# -----------------------
-# Booking Form
-# -----------------------
+# -------------------------------------------------
+# Add Booking Form
+# -------------------------------------------------
 st.subheader("➕ Add Direct Car Booking")
 
 with st.form("car_form", clear_on_submit=True):
-    c1,c2,c3 = st.columns(3)
-    with c1: when = st.date_input("Date", value=date.today())
-    with c2: client = st.text_input("Client Name (optional)")
-    with c3: trip = st.text_input("Trip Plan (optional)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        when = st.date_input("Date", value=date.today())
+    with c2:
+        client_name = st.text_input("Client Name (optional)")
+    with c3:
+        trip_plan = st.text_input("Trip Plan (optional)")
 
-    c4,c5,c6 = st.columns(3)
-    with c4: amount = st.number_input("Amount (₹)", min_value=0, step=500)
-    with c5: car_type = st.selectbox("Car Type", ["Sedan","Ertiga"])
-    with c6: recv_in = st.radio("Received In", ["Company Account","Personal Account"], horizontal=True)
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        amount = st.number_input("Amount (₹)", min_value=0, step=500)
+    with c5:
+        car_type = st.selectbox("Car Type", ["Sedan", "Ertiga"])
+    with c6:
+        recv_in = st.radio("Received In", ["Company Account", "Personal Account"], horizontal=True)
 
-    emp_list=[]
-    if recv_in=="Personal Account":
+    emp_list: list[str] = []
+    if recv_in == "Personal Account":
         emp_list = st.multiselect("Payment received by (employee(s))", all_employees())
 
     notes = st.text_area("Notes", placeholder="Any remarks…")
-    submitted = st.form_submit_button("💾 Save booking")
+    submitted = st.form_submit_button("💾 Save booking", use_container_width=True)
 
 if submitted:
     if amount <= 0:
         st.error("Amount must be > 0")
-    elif recv_in=="Personal Account" and not emp_list:
+    elif recv_in == "Personal Account" and not emp_list:
         st.error("Please select at least one employee")
     else:
+        # Insert booking (sanitize ALL types)
         safe_doc = {
-            "date": datetime.combine(when, datetime.min.time()),
-            "client_name": str(client or ""),
-            "trip_plan": str(trip or ""),
+            "date": safe_dt_from_date(when),          # datetime
+            "client_name": str(client_name or ""),
+            "trip_plan": str(trip_plan or ""),
             "amount": int(amount),
             "car_type": str(car_type),
             "received_in": str(recv_in),
             "employees": [str(e) for e in (emp_list or [])],
             "notes": str(notes or ""),
             "created_by": str(user),
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
         }
         col_cars.insert_one(safe_doc)
 
-        if recv_in=="Personal Account" and emp_list:
-            per_emp = int(amount/len(emp_list))
+        # If money received in personal account, log settlements that reduce outstanding
+        if recv_in == "Personal Account" and emp_list:
+            per_emp_amt = int(amount / len(emp_list))
             for emp in emp_list:
                 col_split.insert_one({
                     "kind": "settlement",
                     "created_at": datetime.utcnow(),
                     "created_by": str(user),
-                    "date": datetime.combine(when, datetime.min.time()),
+                    "date": safe_dt_from_date(when),
                     "employee": str(emp),
-                    "amount": int(per_emp),
+                    "amount": int(per_emp_amt),
                     "ref": f"Direct Car ({car_type})",
-                    "notes": f"Booking for {client or 'N/A'}"
+                    "notes": f"Direct booking for {client_name or 'N/A'}",
                 })
-        st.success("✅ Booking saved successfully")
 
-# -----------------------
-# Recent Bookings
-# -----------------------
+        st.success("✅ Booking saved successfully")
+        # Do not rerun automatically; keep page stable
+
+# -------------------------------------------------
+# Recent Bookings (load only when asked OR after a save)
+# -------------------------------------------------
 st.subheader("📜 Recent Direct Car Bookings")
-docs = list(col_cars.find().sort("date",-1).limit(20))
-if docs:
-    for d in docs:
-        d["_id"] = str(d.get("_id",""))
-        if isinstance(d.get("date"), datetime):
-            d["date"] = d["date"].strftime("%Y-%m-%d")
-    df = pd.DataFrame(docs)
-    st.dataframe(df[["date","client_name","trip_plan","amount","car_type","received_in","employees","notes"]],
-                 use_container_width=True, hide_index=True)
+if st.session_state.get("refresh_now", False) or submitted:
+    recent_docs = list(col_cars.find().sort("date", -1).limit(20))
+else:
+    # first render: light query (still shows something without flicker)
+    recent_docs = list(col_cars.find().sort("date", -1).limit(20))
+
+if recent_docs:
+    for d in recent_docs:
+        d["_id"] = str(d.get("_id", ""))
+        d["date"] = to_display_date(d.get("date"))
+    df_recent = pd.DataFrame(recent_docs)
+    cols_recent = ["date", "client_name", "trip_plan", "amount", "car_type",
+                   "received_in", "employees", "notes"]
+    for c in cols_recent:
+        if c not in df_recent:
+            df_recent[c] = ""
+    st.dataframe(df_recent[cols_recent], use_container_width=True, hide_index=True)
 else:
     st.info("No bookings yet.")
 
-# -----------------------
-# Monthly Report
-# -----------------------
+# -------------------------------------------------
+# Monthly Report (with totals)
+# -------------------------------------------------
 st.subheader("📅 Monthly Car Bookings Report")
-month_choice = st.date_input("Select Month", value=date.today())
+sel_month = st.date_input("Select Month", value=date.today())
 
-if month_choice:
-    start_m = month_choice.replace(day=1)
-    if start_m.month==12: end_m=start_m.replace(year=start_m.year+1,month=1,day=1)
-    else: end_m=start_m.replace(month=start_m.month+1,day=1)
+if sel_month:
+    start_dt, end_dt = month_bounds(sel_month)  # both datetime -> BSON-safe
+    # query strictly with datetimes to avoid InvalidDocument
+    cursor = col_cars.find({"date": {"$gte": start_dt, "$lt": end_dt}}).sort("date", 1)
+    month_rows = list(cursor)
 
-    rows = list(col_cars.find({"date":{"$gte":start_m,"$lt":end_m}}).sort("date",1))
-    if rows:
-        for r in rows:
-            r["_id"] = str(r.get("_id",""))
-            if isinstance(r.get("date"), datetime):
-                r["date"] = r["date"].strftime("%Y-%m-%d")
-        dfm = pd.DataFrame(rows)
-        dfm.index = dfm.index+1; dfm.rename_axis("Sr No", inplace=True)
-        show = ["date","car_type","client_name","trip_plan","amount","received_in","employees","notes"]
-        for c in show: 
-            if c not in dfm: dfm[c] = ""
-        st.dataframe(dfm[show], use_container_width=True)
+    if month_rows:
+        # normalize for display
+        for r in month_rows:
+            r["_id"] = str(r.get("_id", ""))
+            r["date"] = to_display_date(r.get("date"))
 
-        total = int(dfm["amount"].sum())
-        comp = int(dfm.loc[dfm["received_in"]=="Company Account","amount"].sum())
-        pers = int(dfm.loc[dfm["received_in"]=="Personal Account","amount"].sum())
-        st.markdown(f"**Total: ₹{total:,}**  \n🏦 Bank (Company): ₹{comp:,}  \n👤 Cash (Personal): ₹{pers:,}")
+        dfm = pd.DataFrame(month_rows)
+        dfm.index = dfm.index + 1
+        dfm.rename_axis("Sr No", inplace=True)
+
+        # Table columns (as requested): SrNo (index), Car Type, Client Name, Package Cost (=amount)
+        # plus some useful context columns
+        show_cols = ["date", "car_type", "client_name", "trip_plan", "amount", "received_in", "employees", "notes"]
+        for c in show_cols:
+            if c not in dfm:
+                dfm[c] = ""
+
+        # Totals
+        total_all = int(pd.to_numeric(dfm["amount"], errors="coerce").fillna(0).sum())
+        total_bank = int(pd.to_numeric(dfm.loc[dfm["received_in"] == "Company Account", "amount"], errors="coerce").fillna(0).sum())
+        total_personal = int(pd.to_numeric(dfm.loc[dfm["received_in"] == "Personal Account", "amount"], errors="coerce").fillna(0).sum())
+
+        st.dataframe(dfm[show_cols], use_container_width=True)
+
+        st.markdown(
+            f"**Total this month (Package Cost): ₹{total_all:,}**  \n"
+            f"🏦 Cash received in **Bank/Company**: ₹{total_bank:,}  \n"
+            f"👤 Cash received in **Personal**: ₹{total_personal:,}"
+        )
     else:
         st.info("No bookings for this month.")
