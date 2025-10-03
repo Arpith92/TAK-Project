@@ -129,8 +129,9 @@ def _login() -> Optional[str]:
         if st.session_state.get("user"):
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
             if st.button("Log out"):
-                st.session_state.pop("user", None)
-                st.rerun()
+                st.experimental_set_query_params(_ts=datetime.now().timestamp())
+                st.stop()
+
 
     if st.session_state.get("user"):
         return st.session_state["user"]
@@ -150,7 +151,9 @@ def _login() -> Optional[str]:
         if str(users_map.get(name, "")).strip() == str(pin).strip():
             st.session_state["user"] = name
             st.success(f"Welcome, {name}!")
-            st.rerun()
+            st.experimental_set_query_params(_ts=datetime.now().timestamp())
+            st.stop()
+
         else:
             st.error("Invalid PIN"); st.stop()
     return None
@@ -343,13 +346,16 @@ def settlements_paid(emp: str, start: date, end: date) -> int:
 @st.cache_data(ttl=TTL, show_spinner=False)
 def cash_received(emp: str, start: date, end: date) -> int:
     q = {
-        "rep_name": emp,
-        "booking_date": {"$gte": datetime.combine(start, datetime.min.time()),
-                         "$lte": datetime.combine(end,   datetime.max.time())},
-        "status": {"$in": ["confirmed","paid"]}
+        "date": {"$gte": datetime.combine(start, datetime.min.time()),
+                 "$lte": datetime.combine(end,   datetime.max.time())}
     }
-    rows = list(col_cars.find(q, {"cash_received":1}))
-    return sum(_to_int(r.get("cash_received", 0)) for r in rows)
+    rows = list(col_cars.find(q, {"employees":1,"received_in":1,"amount":1}))
+    total = 0
+    for r in rows:
+        if emp in (r.get("employees") or []):
+            if r.get("received_in") == "Personal Account":
+                total += _to_int(r.get("amount", 0))
+    return total
 
 def calc_components(emp: str, start: date, end: date) -> dict:
     base_salary = _to_int(SALARY_MAP.get(emp, 0))
@@ -636,7 +642,7 @@ if mode == "All employees (overview)":
                 paid_flag=payload["paid"],
             )
         st.success("Saved all updates.")
-        st.rerun()
+        st.experimental_set_query_params(_ts=datetime.now().timestamp()) st.stop()
 
 
 # =============================
@@ -701,7 +707,7 @@ if mode == "Single employee" and view_emp:
                 paid_flag=paid_yes,
             )
             st.success("Saved payment.")
-            st.rerun()
+            st.experimental_set_query_params(_ts=datetime.now().timestamp()) st.stop()
 
 
 # =============================
