@@ -89,6 +89,7 @@ col_cars     = db["direct_car_bookings"] # direct car bookings
 # Users & login
 # =============================
 def load_users() -> dict:
+    """Load users->PIN map from st.secrets or local .streamlit/secrets.toml (dev)."""
     users = st.secrets.get("users", None)
     if isinstance(users, dict) and users:
         return users
@@ -124,38 +125,50 @@ FUEL_MAP    = {
     "Teena":  0,
 }
 
+def _normalize_user_key(x: str) -> str:
+    # Allow email-like usernames or names; compare case-insensitively
+    return (x or "").strip()
+
 def _login() -> Optional[str]:
     with st.sidebar:
         if st.session_state.get("user"):
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
             if st.button("Log out"):
-                st.experimental_set_query_params(_ts=datetime.now().timestamp())
-                st.stop()
-
+                # Clear and rerun safely (no deprecated experimental_set_query_params)
+                for k in ["user", "login_user", "login_pin"]:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.rerun()
 
     if st.session_state.get("user"):
         return st.session_state["user"]
 
-    users_map = load_users()
-    if not users_map:
+    users_map_raw = load_users()
+    if not users_map_raw:
         st.error("Login not configured. Add `mongo_uri` and a [users] table in Secrets.")
         st.stop()
+
+    # Build a normalized map but preserve display keys
+    users_display = list(users_map_raw.keys())
+    users_normmap = { _normalize_user_key(k).lower(): str(v) for k,v in users_map_raw.items() }
 
     st.markdown("### 🔐 Login")
     c1, c2 = st.columns(2)
     with c1:
-        name = st.selectbox("User", list(users_map.keys()), key="login_user")
+        name = st.selectbox("User", users_display, key="login_user")
     with c2:
         pin = st.text_input("PIN", type="password", key="login_pin")
-    if st.button("Sign in"):
-        if str(users_map.get(name, "")).strip() == str(pin).strip():
-            st.session_state["user"] = name
+    if st.button("Sign in", use_container_width=True):
+        key = _normalize_user_key(name).lower()
+        expected = users_normmap.get(key, None)
+        ok = (expected is not None) and (str(expected).strip() == str(pin).strip())
+        if ok:
+            st.session_state["user"] = name  # keep original display name
             st.success(f"Welcome, {name}!")
-            st.experimental_set_query_params(_ts=datetime.now().timestamp())
-            st.stop()
-
+            st.rerun()
         else:
-            st.error("Invalid PIN"); st.stop()
+            st.error("Invalid PIN")
+            st.stop()
     return None
 
 user = _login()
@@ -233,6 +246,7 @@ def load_all_payroll_all_months() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["employee","month","amount","paid","components"])
     return pd.DataFrame(rows)
+
 # ===== Carry-forward helpers =====
 def previous_pending_amount(emp: str, current_month_key: str) -> int:
     cur = list(col_payroll.find(
@@ -435,18 +449,24 @@ def calc_driver_month(driver: str, start: date, end: date) -> dict:
     }
 
 # =============================
-# PDF Helpers (header + employee slip)
+# PDF Helpers (header + employee/driver slips)
 # =============================
 
-# ✅ Use Unicode-capable font if available
+# ✅ Use Unicode-capable font if available (drop DejaVuSans.ttf into .streamlit/)
 FONT_PATH = ".streamlit/DejaVuSans.ttf"
 
 def ensure_font(pdf: FPDF):
+    """
+    Try to register a Unicode font. If unavailable, use core font and enable ASCII fallback.
+    We store a flag on the pdf object: pdf._unicode_ok = True/False
+    """
+    pdf._unicode_ok = False
     if os.path.exists(FONT_PATH):
         try:
             pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
             pdf.add_font("DejaVu", "B", FONT_PATH, uni=True)
             pdf.set_font("DejaVu", "", 11)
+            pdf._unicode_ok = True
             return "DejaVu"
         except Exception:
             pass
@@ -454,18 +474,36 @@ def ensure_font(pdf: FPDF):
     pdf.set_font("Helvetica", "", 11)
     return "Helvetica"
 
-def inr_fmt(n) -> str:
-    try:
-        return f"₹ {int(round(float(n))):,}"
-    except Exception:
-        return str(n)
+def _ascii_fallback(text: str) -> str:
+    # Replace common non-ASCII symbols for safe output when Unicode font is not available
+    return (text or "").replace("₹", "Rs ").replace("®", "(R)")
 
-ORG = {
+def inr_fmt_val(n, unicode_ok: bool) -> str:
+    try:
+        s = f"{int(round(float(n))):,}"
+    except Exception:
+        s = str(n)
+    return (f"₹ {s}" if unicode_ok else f"Rs {s}")
+
+ORG_BASE = {
     "title": "TravelaajKal® – Achala Holidays Pvt. Ltd.",
     "line1": "Mangrola, Ujjain, Madhya Pradesh 456006, India",
     "line2": "Email: travelaajkal@gmail.com  |  Web: www.travelaajkal.com  |  Mob: +91-7509612798",
-    "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"
 }
+
+def _org_strings(unicode_ok: bool) -> Dict[str,str]:
+    if unicode_ok:
+        return {
+            **ORG_BASE,
+            "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"
+        }
+    # ascii-safe
+    return {
+        "title": _ascii_fallback(ORG_BASE["title"]),
+        "line1": ORG_BASE["line1"],
+        "line2": ORG_BASE["line2"],
+        "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"
+    }
 
 class InvoiceHeaderPDF(FPDF):
     def __init__(self):
@@ -474,6 +512,7 @@ class InvoiceHeaderPDF(FPDF):
         self.set_title("Salary Statement")
         self.set_author("Achala Holidays Pvt. Ltd.")
         self.fontname = ensure_font(self)
+        self._org = _org_strings(self._unicode_ok)
 
     def header(self):
         self.set_draw_color(150,150,150)
@@ -482,18 +521,17 @@ class InvoiceHeaderPDF(FPDF):
             try: self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception: pass
         self.set_xy(50, 12)
-        self.set_font(self.fontname, "B", 14); self.cell(0, 7, ORG["title"], align="C", ln=1)
+        self.set_font(self.fontname, "B", 14); self.cell(0, 7, self._org["title"], align="C", ln=1)
         self.set_font(self.fontname, "", 10)
-        self.cell(0, 6, ORG["line1"], align="C", ln=1)
-        self.cell(0, 6, ORG["line2"], align="C", ln=1)
+        self.cell(0, 6, self._org["line1"], align="C", ln=1)
+        self.cell(0, 6, self._org["line2"], align="C", ln=1)
         self.ln(2); self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y()); self.ln(4)
 
     def footer(self):
         self.set_y(-15)
         self.set_font(self.fontname, "", 8)
-        self.cell(0, 5, ORG["footer_rights"], ln=1, align="C")
-
+        self.cell(0, 5, self._org["footer_rights"], ln=1, align="C")
 
 def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: dict, carry_forward: int, total_due: int) -> bytes:
     pdf = InvoiceHeaderPDF()
@@ -503,11 +541,14 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
     th = 8
     col1_w, col2_w = 120, 66
 
+    def text_part(s: str) -> str:
+        return s if pdf._unicode_ok else _ascii_fallback(s)
+
     pdf.set_font(pdf.fontname, "", 11)
-    pdf.set_x(left); pdf.cell(0, 6, f"{month_label} (Salary Statement: {period_label})", ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, text_part(f"{month_label} (Salary Statement: {period_label})"), ln=1)
     pdf.ln(1)
     pdf.set_font(pdf.fontname, "B", 11)
-    pdf.set_x(left); pdf.cell(0, 6, f"EMP NAME:  {emp}", ln=1)
+    pdf.set_x(left); pdf.cell(0, 6, text_part(f"EMP NAME:  {emp}"), ln=1)
     pdf.ln(2)
 
     def header_row():
@@ -515,8 +556,8 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
         pdf.set_font(pdf.fontname, "B", 10)
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
-        pdf.text(left + 2, y + th - 2, "Particulars")
-        pdf.text(left + col1_w + 2, y + th - 2, "Amount")
+        pdf.text(left + 2, y + th - 2, text_part("Particulars"))
+        pdf.text(left + col1_w + 2, y + th - 2, text_part("Amount"))
         pdf.ln(th)
         pdf.set_font(pdf.fontname, "", 10)
 
@@ -524,8 +565,9 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
         y = pdf.get_y()
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
-        pdf.text(left + 2, y + th - 2, str(label))
-        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt(amount), align="R")
+        pdf.text(left + 2, y + th - 2, text_part(str(label)))
+        amt_str = inr_fmt_val(amount, pdf._unicode_ok)
+        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, amt_str, align="R")
         pdf.ln(th)
 
     header_row()
@@ -542,12 +584,12 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
     pdf.set_font(pdf.fontname, "B", 11)
     pdf.rect(left, y, col1_w, th)
     pdf.rect(left + col1_w, y, col2_w, th)
-    pdf.text(left + 2, y + th - 2, "Total Due")
-    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt(total_due), align="R")
+    pdf.text(left + 2, y + th - 2, text_part("Total Due"))
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt_val(total_due, pdf._unicode_ok), align="R")
     pdf.ln(th + 10)
 
     pdf.set_font(pdf.fontname, "", 9)
-    pdf.multi_cell(0, 5, "Note: This is a computer-generated statement.")
+    pdf.multi_cell(0, 5, text_part("Note: This is a computer-generated statement."))
 
     pdf.ln(6)
     sig_w = 50
@@ -558,11 +600,79 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
         except Exception: pass
     pdf.set_xy(sig_x, sig_y + 18)
     pdf.set_font(pdf.fontname, "", 10)
-    pdf.cell(sig_w, 6, "Authorised Signatory", ln=1, align="C")
+    pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
     out = pdf.output(dest="S")
     return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
+def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: dict) -> bytes:
+    pdf = InvoiceHeaderPDF()
+    pdf.add_page()
+
+    left = 16
+    th = 8
+    col1_w, col2_w = 120, 66
+
+    def text_part(s: str) -> str:
+        return s if pdf._unicode_ok else _ascii_fallback(s)
+
+    pdf.set_font(pdf.fontname, "", 11)
+    pdf.set_x(left); pdf.cell(0, 6, text_part(f"{month_label} (Driver Salary Statement: {period_label})"), ln=1)
+    pdf.ln(1)
+    pdf.set_font(pdf.fontname, "B", 11)
+    pdf.set_x(left); pdf.cell(0, 6, text_part(f"DRIVER NAME:  {driver}"), ln=1)
+    pdf.ln(2)
+
+    def header_row():
+        y = pdf.get_y()
+        pdf.set_font(pdf.fontname, "B", 10)
+        pdf.rect(left, y, col1_w, th)
+        pdf.rect(left + col1_w, y, col2_w, th)
+        pdf.text(left + 2, y + th - 2, text_part("Particulars"))
+        pdf.text(left + col1_w + 2, y + th - 2, text_part("Amount"))
+        pdf.ln(th)
+        pdf.set_font(pdf.fontname, "", 10)
+
+    def row(label: str, amount):
+        y = pdf.get_y()
+        pdf.rect(left, y, col1_w, th)
+        pdf.rect(left + col1_w, y, col2_w, th)
+        pdf.text(left + 2, y + th - 2, text_part(str(label)))
+        amt_str = inr_fmt_val(amount, pdf._unicode_ok)
+        pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, amt_str, align="R")
+        pdf.ln(th)
+
+    header_row()
+    row("Base", DRV_BASE)
+    row("Less: Leave deduction", -calc["leave_ded"])
+    row("Add: Overtime (units)", calc["overtime_amt"])
+    row("Less: Advances", -calc["advances"])
+
+    pdf.ln(2)
+    y = pdf.get_y()
+    pdf.set_font(pdf.fontname, "B", 11)
+    pdf.rect(left, y, col1_w, th)
+    pdf.rect(left + col1_w, y, col2_w, th)
+    pdf.text(left + 2, y + th - 2, text_part("Net Pay"))
+    pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt_val(calc["net_pay"], pdf._unicode_ok), align="R")
+    pdf.ln(th + 10)
+
+    pdf.set_font(pdf.fontname, "", 9)
+    pdf.multi_cell(0, 5, text_part("Note: This is a computer-generated statement."))
+
+    pdf.ln(6)
+    sig_w = 50
+    sig_x = pdf.w - 16 - sig_w
+    sig_y = pdf.get_y()
+    if ORG_SIGN and os.path.exists(ORG_SIGN):
+        try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
+        except Exception: pass
+    pdf.set_xy(sig_x, sig_y + 18)
+    pdf.set_font(pdf.fontname, "", 10)
+    pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
+
+    out = pdf.output(dest="S")
+    return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
 
 # =============================
 # UI: Month selection + modes
@@ -579,7 +689,6 @@ month_pick = st.date_input("Slip month", value=date.today())
 month_start, month_end = month_bounds(month_pick)
 month_key = _ym_key(month_start)
 st.caption(f"Period: **{month_start} → {month_end}**")
-
 
 # =============================
 # MODE: ALL EMPLOYEES
@@ -652,9 +761,7 @@ if mode == "All employees (overview)":
                 paid_flag=payload["paid"],
             )
         st.success("Saved all updates.")
-        st.experimental_set_query_params(_ts=datetime.now().timestamp()) 
-        st.stop()
-
+        st.rerun()
 
 # =============================
 # MODE: SINGLE EMPLOYEE
@@ -718,9 +825,7 @@ if mode == "Single employee" and view_emp:
                 paid_flag=paid_yes,
             )
             st.success("Saved payment.")
-            st.experimental_set_query_params(_ts=datetime.now().timestamp()) 
-            st.stop()
-
+            st.rerun()
 
 # =============================
 # DRIVER SECTION
@@ -732,9 +837,10 @@ drv_month = st.date_input("Driver month", value=date.today())
 drv_start, drv_end = month_bounds(drv_month)
 drv_calc = calc_driver_month(drv, drv_start, drv_end)
 
-st.metric("Net Pay", money(drv_calc["net_pay"]))
-st.metric("Leaves", drv_calc["leave_days"])
-st.metric("OT Units", drv_calc["ot_units"])
+c1, c2, c3 = st.columns(3)
+c1.metric("Net Pay", money(drv_calc["net_pay"]))
+c2.metric("Leaves", drv_calc["leave_days"])
+c3.metric("OT Units", drv_calc["ot_units"])
 
 if st.button("📄 Driver PDF"):
     pdf_b = build_driver_pdf(driver=drv,
@@ -747,7 +853,6 @@ if st.button("📄 Driver PDF"):
         file_name=f"Driver_{drv}_{drv_start.strftime('%Y_%m')}.pdf",
         mime="application/pdf"
     )
-
 
 # =============================
 # ADMIN: ALL PAYMENTS TABLE
