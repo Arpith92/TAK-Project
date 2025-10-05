@@ -757,6 +757,9 @@ st.caption(f"Period: **{month_start} → {month_end}**")
 # =============================
 # MODE: ALL EMPLOYEES
 # =============================
+# =============================
+# MODE: ALL EMPLOYEES
+# =============================
 if mode == "All employees (overview)":
     st.subheader(f"👥 Team overview — {month_start.strftime('%B %Y')}")
     pending_total = 0
@@ -768,9 +771,13 @@ if mode == "All employees (overview)":
         cf = previous_pending_amount(emp, month_key)
         total_due = comp["net_pay"] + cf
 
-        payments = payrec.get("payments", [])
-        if not payments:
-            payments = [{"date": date.today(), "amount": 0, "utr": ""}]
+        # Initialize session-based payment list
+        session_key = f"payments_{emp}_{month_key}"
+        if session_key not in st.session_state:
+            st.session_state[session_key] = payrec.get("payments", []) or [
+                {"date": date.today(), "amount": 0, "utr": ""}
+            ]
+        payments_list = st.session_state[session_key]
 
         with st.container(border=True):
             # Summary metrics header
@@ -784,248 +791,66 @@ if mode == "All employees (overview)":
             c7.metric("Net Pay", money(comp["net_pay"]))
             c8.metric("Carry Fwd", money(cf))
 
-            st.write("#### Payment entries")
-            new_payments: List[dict] = []
-            # Render existing rows
-            for i, p in enumerate(payments):
+            st.write("#### Payment Entries")
+
+            # --- Display existing rows ---
+            to_delete = []
+            for i, p in enumerate(payments_list):
                 d1, d2, d3, d4 = st.columns([1,1,1,0.3])
-                pay_date = d1.date_input("Paid on", value=pd.to_datetime(p.get("date") or date.today()).date(), key=f"date_{emp}_{i}")
-                pay_amt  = d2.number_input("Amt Paid", min_value=0, step=500, value=_to_int(p.get("amount", 0)), key=f"amt_{emp}_{i}")
-                utr_val  = d3.text_input("UTR", value=p.get("utr",""), key=f"utr_{emp}_{i}")
-                del_row  = d4.button("❌", key=f"del_{emp}_{i}")
-                if not del_row:
-                    new_payments.append({"date": pay_date, "amount": pay_amt, "utr": utr_val})
+                pay_date = d1.date_input(
+                    "Paid on",
+                    value=pd.to_datetime(p.get("date", date.today())).date(),
+                    key=f"date_{emp}_{i}",
+                )
+                pay_amt = d2.number_input(
+                    "Amt Paid",
+                    min_value=0,
+                    step=500,
+                    value=_to_int(p.get("amount", 0)),
+                    key=f"amt_{emp}_{i}",
+                )
+                utr_val = d3.text_input(
+                    "UTR",
+                    value=p.get("utr", ""),
+                    key=f"utr_{emp}_{i}",
+                )
+                if d4.button("❌", key=f"del_{emp}_{i}"):
+                    to_delete.append(i)
 
-            # Add row button
-with st.container(border=True):
-    st.write("#### Payment Entries")
+                payments_list[i] = {"date": pay_date, "amount": pay_amt, "utr": utr_val}
 
-    # Initialize session state key for payments
-    session_key = f"payments_{emp}_{month_key}"
-    if session_key not in st.session_state:
-        st.session_state[session_key] = payrec.get("payments", []) or [{"date": date.today(), "amount": 0, "utr": ""}]
+            # Remove deleted rows
+            for i in sorted(to_delete, reverse=True):
+                del payments_list[i]
+            st.session_state[session_key] = payments_list
 
-    payments_list = st.session_state[session_key]
+            # Add new row
+            if st.button(f"➕ Add payment row {emp}", key=f"add_{emp}"):
+                payments_list.append({"date": date.today(), "amount": 0, "utr": ""})
+                st.session_state[session_key] = payments_list
+                st.rerun()
 
-    # --- Display payment rows dynamically ---
-    to_delete = []
-    for i, p in enumerate(payments_list):
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 0.3])
-        pay_date = c1.date_input("Paid on", value=pd.to_datetime(p.get("date", date.today())).date(),
-                                 key=f"date_{emp}_{i}")
-        pay_amt = c2.number_input("Amt Paid", min_value=0, step=500,
-                                  value=_to_int(p.get("amount", 0)), key=f"amt_{emp}_{i}")
-        utr_val = c3.text_input("UTR", value=p.get("utr", ""), key=f"utr_{emp}_{i}")
-
-        if c4.button("❌", key=f"del_{emp}_{i}"):
-            to_delete.append(i)
-
-        payments_list[i] = {"date": pay_date, "amount": pay_amt, "utr": utr_val}
-
-    # Remove any deleted rows
-    for i in sorted(to_delete, reverse=True):
-        del payments_list[i]
-    st.session_state[session_key] = payments_list
-
-    # --- Add a new row ---
-    if st.button(f"➕ Add payment row {emp}", key=f"add_{emp}"):
-        payments_list.append({"date": date.today(), "amount": 0, "utr": ""})
-        st.session_state[session_key] = payments_list
-        st.rerun()
-
-    # --- Totals ---
-    total_paid = sum(_to_int(p.get("amount", 0)) for p in payments_list)
-    balance = total_due - total_paid
-    st.caption(f"Total Paid: {money(total_paid)} | Balance after payment: {money(balance)}")
-
-    # --- Save updates ---
-    if st.button(f"💾 Save {emp}", key=f"save_{emp}"):
-        save_or_update_pay_multi(
-            emp=emp,
-            month_key=month_key,
-            payments=payments_list,
-            notes=f"Salary {month_key}",
-            components=comp,
-            paid_flag=True,
-        )
-        st.success(f"Saved {emp} payments.")
-        st.rerun()
-
-
-            total_paid = sum(_to_int(p.get("amount", 0)) for p in new_payments)
+            # Totals
+            total_paid = sum(_to_int(p.get("amount", 0)) for p in payments_list)
             balance = total_due - total_paid
             pending_total += max(balance, 0)
-            st.caption(f"Total Paid: {money(total_paid)}  |  Balance after payment: {money(balance)}")
+            st.caption(
+                f"Total Paid: {money(total_paid)} | Balance after payment: {money(balance)}"
+            )
 
-            # Save button (allocates prior dues first; remaining applied to this month)
-            if st.button(f"💾 Save payments — {emp}"):
+            # Save
+            if st.button(f"💾 Save {emp}", key=f"save_{emp}"):
                 used_prev = allocate_payment_to_previous(emp, month_key, total_paid)
                 save_or_update_pay_multi(
                     emp=emp,
                     month_key=month_key,
-                    payments=new_payments,
+                    payments=payments_list,
                     notes=f"Salary {month_key}",
                     components=comp,
                     paid_flag=(total_paid > 0),
-                    allocated_to_previous=used_prev
+                    allocated_to_previous=used_prev,
                 )
                 st.success(f"Saved {emp} payments.")
                 st.rerun()
 
     st.info(f"**Total pending balance (after entered payments):** {money(int(pending_total))}")
-
-# =============================
-# MODE: SINGLE EMPLOYEE
-# =============================
-if mode == "Single employee" and view_emp:
-    comp = calc_components(view_emp, month_start, month_end)
-    cf_prev = previous_pending_amount(view_emp, month_key)
-    total_due = comp["net_pay"] + cf_prev
-
-    st.subheader(f"Salary Slip — {view_emp} ({month_start.strftime('%B %Y')})")
-    st.metric("Total due", money(total_due))
-
-    k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
-    k1.metric("Base", money(comp["base_salary"]))
-    k2.metric("Fuel", money(comp["fuel_allow"]))
-    k3.metric("Incentives", money(comp["incentives"]))
-    k4.metric("Reimb", money(comp["reimb_total"]))
-    k5.metric("Settled", money(comp["settled_this_month"]))
-    k6.metric("Cash recv", money(comp["cash_received"]))
-    k7.metric("Carry fwd", money(cf_prev))
-
-    # Editable multi-payment block (admin only)
-    existing = load_payroll_record(view_emp, month_key)
-    payments = existing.get("payments", [])
-    if not payments:
-        payments = [{"date": date.today(), "amount": 0, "utr": ""}]
-
-    if is_admin:
-        st.write("#### Payment entries")
-        new_payments: List[dict] = []
-        for i, p in enumerate(payments):
-            d1, d2, d3, d4 = st.columns([1,1,1,0.3])
-            pay_date = d1.date_input("Paid on", value=pd.to_datetime(p.get("date") or date.today()).date(), key=f"single_date_{i}")
-            pay_amt  = d2.number_input("Amt Paid", min_value=0, step=500, value=_to_int(p.get("amount", 0)), key=f"single_amt_{i}")
-            utr_val  = d3.text_input("UTR", value=p.get("utr",""), key=f"single_utr_{i}")
-            del_row  = d4.button("❌", key=f"single_del_{i}")
-            if not del_row:
-                new_payments.append({"date": pay_date, "amount": pay_amt, "utr": utr_val})
-
-        if st.button("➕ Add payment row"):
-            new_payments.append({"date": date.today(), "amount": 0, "utr": ""})
-
-        total_paid = sum(_to_int(p.get("amount", 0)) for p in new_payments)
-        balance = total_due - total_paid
-        st.caption(f"Total Paid: {money(total_paid)}  |  Balance after payment: {money(balance)}")
-
-        if st.button("💾 Save payment(s)"):
-            used_prev = allocate_payment_to_previous(view_emp, month_key, total_paid)
-            save_or_update_pay_multi(
-                emp=view_emp,
-                month_key=month_key,
-                payments=new_payments,
-                notes=existing.get("notes",""),
-                components=comp,
-                paid_flag=(total_paid > 0),
-                allocated_to_previous=used_prev
-            )
-            st.success("Saved payments.")
-            st.rerun()
-
-    # PDF download
-    if st.button("📄 Generate Salary PDF"):
-        # reload (after any edits) to ensure we pass current payments to the PDF
-        cur = load_payroll_record(view_emp, month_key)
-        pdf_bytes = build_employee_pdf(
-            emp=view_emp,
-            month_label=month_start.strftime("%B-%Y"),
-            period_label=f"{month_start} → {month_end}",
-            comp=comp,
-            carry_forward=cf_prev,
-            total_due=total_due,
-            payments=cur.get("payments", [])
-        )
-        st.download_button(
-            "⬇️ Download PDF",
-            data=pdf_bytes,
-            file_name=f"Salary_{view_emp}_{month_key}.pdf",
-            mime="application/pdf"
-        )
-
-# =============================
-# DRIVER SECTION
-# =============================
-st.divider()
-st.subheader("🚖 Driver Salary")
-drv = st.selectbox("Driver", DRIVERS, index=0)
-drv_month = st.date_input("Driver month", value=date.today())
-drv_start, drv_end = month_bounds(drv_month)
-drv_calc = calc_driver_month(drv, drv_start, drv_end)
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Net Pay", money(drv_calc["net_pay"]))
-c2.metric("Leaves", drv_calc["leave_days"])
-c3.metric("OT Units", drv_calc["ot_units"])
-
-if st.button("📄 Driver PDF"):
-    pdf_b = build_driver_pdf(driver=drv,
-                             month_label=drv_start.strftime("%B-%Y"),
-                             period_label=f"{drv_start} → {drv_end}",
-                             calc=drv_calc)
-    st.download_button(
-        "⬇️ Download Driver PDF",
-        data=pdf_b,
-        file_name=f"Driver_{drv}_{drv_start.strftime('%Y_%m')}.pdf",
-        mime="application/pdf"
-    )
-
-# =============================
-# =============================
-# ADMIN: ALL PAYMENTS TABLE
-# =============================
-if is_admin:
-    st.divider()
-    st.subheader(f"📋 All payment records for {month_start.strftime('%B %Y')}")
-
-    dfp = pd.DataFrame(load_all_payroll_for_month(month_key))
-    if not dfp.empty:
-        # Expand payments into a readable summary column
-        def summarize_payments(row):
-            ps = row.get("payments", []) or []
-            parts = []
-            for p in ps:
-                d = p.get("date")
-                try:
-                    if isinstance(d, str):
-                        d = pd.to_datetime(d, errors="coerce")
-                    if isinstance(d, (pd.Timestamp, datetime)):
-                        d = d.date()
-                except Exception:
-                    pass
-                d_str = d.strftime("%d-%b") if isinstance(d, date) else ""
-                parts.append(f"{d_str}:{_to_int(p.get('amount',0)):,} ({p.get('utr','')})")
-            return " | ".join(parts)
-
-        dfp["Payments"] = dfp.apply(summarize_payments, axis=1)
-        dfp["Paid?"] = dfp["paid"].map({True: "Yes", False: "No"})
-        dfp["Paid on"] = pd.to_datetime(dfp.get("paid_on"), errors="coerce").dt.date
-
-        # Fill missing optional fields so KeyError never occurs
-        for col in ["amount", "allocated_to_previous", "total_paid_raw", "notes", "updated_by"]:
-            if col not in dfp.columns:
-                dfp[col] = None
-
-        shown = dfp[[
-            "employee", "Paid?", "Paid on",
-            "amount", "allocated_to_previous", "total_paid_raw",
-            "Payments", "notes", "updated_by"
-        ]].rename(columns={
-            "amount": "Amount (this month)",
-            "allocated_to_previous": "Allocated to previous",
-            "total_paid_raw": "Total paid (all rows)"
-        })
-
-        st.dataframe(shown, use_container_width=True, hide_index=True)
-    else:
-        st.info("No records yet for this month.")
