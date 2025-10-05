@@ -797,8 +797,60 @@ if mode == "All employees (overview)":
                     new_payments.append({"date": pay_date, "amount": pay_amt, "utr": utr_val})
 
             # Add row button
-            if st.button(f"➕ Add payment row — {emp}"):
-                new_payments.append({"date": date.today(), "amount": 0, "utr": ""})
+with st.container(border=True):
+    st.write("#### Payment Entries")
+
+    # Initialize session state key for payments
+    session_key = f"payments_{emp}_{month_key}"
+    if session_key not in st.session_state:
+        st.session_state[session_key] = payrec.get("payments", []) or [{"date": date.today(), "amount": 0, "utr": ""}]
+
+    payments_list = st.session_state[session_key]
+
+    # --- Display payment rows dynamically ---
+    to_delete = []
+    for i, p in enumerate(payments_list):
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 0.3])
+        pay_date = c1.date_input("Paid on", value=pd.to_datetime(p.get("date", date.today())).date(),
+                                 key=f"date_{emp}_{i}")
+        pay_amt = c2.number_input("Amt Paid", min_value=0, step=500,
+                                  value=_to_int(p.get("amount", 0)), key=f"amt_{emp}_{i}")
+        utr_val = c3.text_input("UTR", value=p.get("utr", ""), key=f"utr_{emp}_{i}")
+
+        if c4.button("❌", key=f"del_{emp}_{i}"):
+            to_delete.append(i)
+
+        payments_list[i] = {"date": pay_date, "amount": pay_amt, "utr": utr_val}
+
+    # Remove any deleted rows
+    for i in sorted(to_delete, reverse=True):
+        del payments_list[i]
+    st.session_state[session_key] = payments_list
+
+    # --- Add a new row ---
+    if st.button(f"➕ Add payment row {emp}", key=f"add_{emp}"):
+        payments_list.append({"date": date.today(), "amount": 0, "utr": ""})
+        st.session_state[session_key] = payments_list
+        st.rerun()
+
+    # --- Totals ---
+    total_paid = sum(_to_int(p.get("amount", 0)) for p in payments_list)
+    balance = total_due - total_paid
+    st.caption(f"Total Paid: {money(total_paid)} | Balance after payment: {money(balance)}")
+
+    # --- Save updates ---
+    if st.button(f"💾 Save {emp}", key=f"save_{emp}"):
+        save_or_update_pay_multi(
+            emp=emp,
+            month_key=month_key,
+            payments=payments_list,
+            notes=f"Salary {month_key}",
+            components=comp,
+            paid_flag=True,
+        )
+        st.success(f"Saved {emp} payments.")
+        st.rerun()
+
 
             total_paid = sum(_to_int(p.get("amount", 0)) for p in new_payments)
             balance = total_due - total_paid
