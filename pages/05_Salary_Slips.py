@@ -134,7 +134,7 @@ def _login() -> Optional[str]:
         if st.session_state.get("user"):
             st.markdown(f"**Signed in as:** {st.session_state['user']}")
             if st.button("Log out"):
-                # Clear and rerun safely (no deprecated experimental_set_query_params)
+                # Clear and rerun safely
                 for k in ["user", "login_user", "login_pin"]:
                     if k in st.session_state:
                         del st.session_state[k]
@@ -283,6 +283,10 @@ def load_all_payroll_all_months() -> pd.DataFrame:
 
 # ===== Carry-forward helpers =====
 def previous_pending_amount(emp: str, current_month_key: str) -> int:
+    """
+    Sum of (net_pay - amount_applied_to_that_month) for all months < current_month_key.
+    'amount' field in older records contains portion applied to that month.
+    """
     cur = list(col_payroll.find(
         {"employee": emp, "month": {"$lt": current_month_key}},
         {"_id":0, "amount":1, "components":1}
@@ -292,6 +296,10 @@ def previous_pending_amount(emp: str, current_month_key: str) -> int:
     return max(total_due - total_paid, 0)
 
 def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) -> int:
+    """
+    Allocate an entered payment amount to oldest pending months first.
+    Returns the portion that was allocated to previous months.
+    """
     amt = int(amount or 0)
     if amt <= 0:
         return 0
@@ -573,7 +581,9 @@ class InvoiceHeaderPDF(FPDF):
         self.set_font(self.fontname, "", 8)
         self.cell(0, 5, self._org["footer_rights"], ln=1, align="C")
 
-def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: dict, carry_forward: int, total_due: int, payments: List[dict]) -> bytes:
+def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
+                       comp: dict, carry_forward: int, carry_forward_label: str,
+                       total_due: int, payments: List[dict]) -> bytes:
     pdf = InvoiceHeaderPDF()
     pdf.add_page()
 
@@ -617,7 +627,7 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str, comp: d
     row("Reimbursable expenses", comp["reimb_total"])
     row("Less: Settlements (this month)", -comp["settled_this_month"])
     row("Cash received (deduction)", -comp["cash_received"])
-    row("Carry forward (previous pending)", carry_forward)
+    row(f"Carry forward ({carry_forward_label})", carry_forward)
 
     pdf.ln(2)
     y = pdf.get_y()
@@ -752,11 +762,9 @@ else:
 month_pick = st.date_input("Slip month", value=date.today())
 month_start, month_end = month_bounds(month_pick)
 month_key = _ym_key(month_start)
+prev_month_label = (month_start - timedelta(days=1)).strftime("%B %Y")
 st.caption(f"Period: **{month_start} → {month_end}**")
 
-# =============================
-# MODE: ALL EMPLOYEES
-# =============================
 # =============================
 # MODE: ALL EMPLOYEES
 # =============================
@@ -768,7 +776,7 @@ if mode == "All employees (overview)":
         comp = calc_components(emp, month_start, month_end)
         payrec = load_payroll_record(emp, month_key)
 
-        cf = previous_pending_amount(emp, month_key)
+        cf = previous_pending_amount(emp, month_key)  # auto carry-forward from older months
         total_due = comp["net_pay"] + cf
 
         # Initialize session-based payment list
@@ -789,7 +797,7 @@ if mode == "All employees (overview)":
             c5.metric("Reimb", money(comp["net_reimb"]))
             c6.metric("Cash recv", money(comp["cash_received"]))
             c7.metric("Net Pay", money(comp["net_pay"]))
-            c8.metric("Carry Fwd", money(cf))
+            c8.metric(f"Carry Fwd ({prev_month_label})", money(cf))
 
             st.write("#### Payment Entries")
 
@@ -854,3 +862,180 @@ if mode == "All employees (overview)":
                 st.rerun()
 
     st.info(f"**Total pending balance (after entered payments):** {money(int(pending_total))}")
+
+# =============================
+# MODE: SINGLE EMPLOYEE
+# =============================
+if mode == "Single employee" and view_emp:
+    comp = calc_components(view_emp, month_start, month_end)
+    cf_prev = previous_pending_amount(view_emp, month_key)
+    total_due = comp["net_pay"] + cf_prev
+
+    st.subheader(f"Salary Slip — {view_emp} ({month_start.strftime('%B %Y')})")
+    st.metric("Total due", money(total_due))
+
+    k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
+    k1.metric("Base", money(comp["base_salary"]))
+    k2.metric("Fuel", money(comp["fuel_allow"]))
+    k3.metric("Incentives", money(comp["incentives"]))
+    k4.metric("Reimb", money(comp["reimb_total"]))
+    k5.metric("Settled", money(comp["settled_this_month"]))
+    k6.metric("Cash recv", money(comp["cash_received"]))
+    k7.metric(f"Carry fwd ({prev_month_label})", money(cf_prev))
+
+    # Editable multi-payment block (admin only)
+    existing = load_payroll_record(view_emp, month_key)
+
+    if is_admin:
+        st.write("#### Payment Entries")
+
+        session_key_single = f"payments_single_{view_emp}_{month_key}"
+        if session_key_single not in st.session_state:
+            st.session_state[session_key_single] = existing.get("payments", []) or [
+                {"date": date.today(), "amount": 0, "utr": ""}
+            ]
+        payments_single = st.session_state[session_key_single]
+
+        # Render rows
+        to_delete = []
+        for i, p in enumerate(payments_single):
+            d1, d2, d3, d4 = st.columns([1,1,1,0.3])
+            pay_date = d1.date_input(
+                "Paid on",
+                value=pd.to_datetime(p.get("date", date.today())).date(),
+                key=f"single_date_{i}"
+            )
+            pay_amt  = d2.number_input(
+                "Amt Paid",
+                min_value=0, step=500,
+                value=_to_int(p.get("amount", 0)),
+                key=f"single_amt_{i}"
+            )
+            utr_val  = d3.text_input("UTR", value=p.get("utr",""), key=f"single_utr_{i}")
+            if d4.button("❌", key=f"single_del_{i}"):
+                to_delete.append(i)
+            payments_single[i] = {"date": pay_date, "amount": pay_amt, "utr": utr_val}
+
+        for i in sorted(to_delete, reverse=True):
+            del payments_single[i]
+        st.session_state[session_key_single] = payments_single
+
+        if st.button("➕ Add payment row", key="single_add_row"):
+            payments_single.append({"date": date.today(), "amount": 0, "utr": ""})
+            st.session_state[session_key_single] = payments_single
+            st.rerun()
+
+        total_paid_single = sum(_to_int(p.get("amount", 0)) for p in payments_single)
+        balance_single = total_due - total_paid_single
+        st.caption(f"Total Paid: {money(total_paid_single)}  |  Balance after payment: {money(balance_single)}")
+
+        if st.button("💾 Save payment(s)", key="single_save"):
+            used_prev = allocate_payment_to_previous(view_emp, month_key, total_paid_single)
+            save_or_update_pay_multi(
+                emp=view_emp,
+                month_key=month_key,
+                payments=payments_single,
+                notes=existing.get("notes","") or f"Salary {month_key}",
+                components=comp,
+                paid_flag=(total_paid_single > 0),
+                allocated_to_previous=used_prev
+            )
+            st.success("Saved payments.")
+            st.rerun()
+
+    # PDF download
+    if st.button("📄 Generate Salary PDF"):
+        # reload (after any edits) to ensure we pass current payments to the PDF
+        cur = load_payroll_record(view_emp, month_key)
+        pdf_bytes = build_employee_pdf(
+            emp=view_emp,
+            month_label=month_start.strftime("%B-%Y"),
+            period_label=f"{month_start} → {month_end}",
+            comp=comp,
+            carry_forward=cf_prev,
+            carry_forward_label=prev_month_label,
+            total_due=total_due,
+            payments=cur.get("payments", [])
+        )
+        st.download_button(
+            "⬇️ Download PDF",
+            data=pdf_bytes,
+            file_name=f"Salary_{view_emp}_{month_key}.pdf",
+            mime="application/pdf"
+        )
+
+# =============================
+# DRIVER SECTION
+# =============================
+st.divider()
+st.subheader("🚖 Driver Salary")
+drv = st.selectbox("Driver", DRIVERS, index=0)
+drv_month = st.date_input("Driver month", value=date.today())
+drv_start, drv_end = month_bounds(drv_month)
+drv_calc = calc_driver_month(drv, drv_start, drv_end)
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Net Pay", money(drv_calc["net_pay"]))
+c2.metric("Leaves", drv_calc["leave_days"])
+c3.metric("OT Units", drv_calc["ot_units"])
+
+if st.button("📄 Driver PDF"):
+    pdf_b = build_driver_pdf(driver=drv,
+                             month_label=drv_start.strftime("%B-%Y"),
+                             period_label=f"{drv_start} → {drv_end}",
+                             calc=drv_calc)
+    st.download_button(
+        "⬇️ Download Driver PDF",
+        data=pdf_b,
+        file_name=f"Driver_{drv}_{drv_start.strftime('%Y_%m')}.pdf",
+        mime="application/pdf"
+    )
+
+# =============================
+# ADMIN: ALL PAYMENTS TABLE
+# =============================
+if is_admin:
+    st.divider()
+    st.subheader(f"📋 All payment records for {month_start.strftime('%B %Y')}")
+
+    dfp = pd.DataFrame(load_all_payroll_for_month(month_key))
+    if not dfp.empty:
+        # Expand payments into a readable summary column
+        def summarize_payments(row):
+            ps = row.get("payments", []) or []
+            parts = []
+            for p in ps:
+                d = p.get("date")
+                try:
+                    if isinstance(d, str):
+                        d = pd.to_datetime(d, errors="coerce")
+                    if isinstance(d, (pd.Timestamp, datetime)):
+                        d = d.date()
+                except Exception:
+                    pass
+                d_str = d.strftime("%d-%b") if isinstance(d, date) else ""
+                parts.append(f"{d_str}:{_to_int(p.get('amount',0)):,} ({p.get('utr','')})")
+            return " | ".join(parts)
+
+        dfp["Payments"] = dfp.apply(summarize_payments, axis=1)
+        dfp["Paid?"] = dfp["paid"].map({True: "Yes", False: "No"})
+        dfp["Paid on"] = pd.to_datetime(dfp.get("paid_on"), errors="coerce").dt.date
+
+        # Fill missing optional fields so KeyError never occurs
+        for col in ["amount", "allocated_to_previous", "total_paid_raw", "notes", "updated_by"]:
+            if col not in dfp.columns:
+                dfp[col] = None
+
+        shown = dfp[[
+            "employee", "Paid?", "Paid on",
+            "amount", "allocated_to_previous", "total_paid_raw",
+            "Payments", "notes", "updated_by"
+        ]].rename(columns={
+            "amount": "Amount (this month)",
+            "allocated_to_previous": "Allocated to previous",
+            "total_paid_raw": "Total paid (all rows)"
+        })
+
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+    else:
+        st.info("No records yet for this month.")
