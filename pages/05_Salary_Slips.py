@@ -929,11 +929,13 @@ if st.button("📄 Driver PDF"):
     )
 
 # =============================
+# =============================
 # ADMIN: ALL PAYMENTS TABLE
 # =============================
 if is_admin:
     st.divider()
     st.subheader(f"📋 All payment records for {month_start.strftime('%B %Y')}")
+
     dfp = pd.DataFrame(load_all_payroll_for_month(month_key))
     if not dfp.empty:
         # Expand payments into a readable summary column
@@ -942,28 +944,36 @@ if is_admin:
             parts = []
             for p in ps:
                 d = p.get("date")
-                if isinstance(d, str):
-                    try: d = pd.to_datetime(d)
-                    except Exception: pass
-                if isinstance(d, pd.Timestamp):
-                    d = d.date()
-                if isinstance(d, datetime):
-                    d = d.date()
+                try:
+                    if isinstance(d, str):
+                        d = pd.to_datetime(d, errors="coerce")
+                    if isinstance(d, (pd.Timestamp, datetime)):
+                        d = d.date()
+                except Exception:
+                    pass
                 d_str = d.strftime("%d-%b") if isinstance(d, date) else ""
                 parts.append(f"{d_str}:{_to_int(p.get('amount',0)):,} ({p.get('utr','')})")
             return " | ".join(parts)
 
         dfp["Payments"] = dfp.apply(summarize_payments, axis=1)
-        dfp["Paid?"] = dfp["paid"].map({True:"Yes",False:"No"})
-        # compatibility 'Paid on' (last payment date)
-        dfp["Paid on"] = pd.to_datetime(dfp.get("paid_on")).dt.date
+        dfp["Paid?"] = dfp["paid"].map({True: "Yes", False: "No"})
+        dfp["Paid on"] = pd.to_datetime(dfp.get("paid_on"), errors="coerce").dt.date
 
-        shown = dfp[["employee","Paid?","Paid on","amount","allocated_to_previous","total_paid_raw","Payments","notes","updated_by"]]
-        shown = shown.rename(columns={
+        # Fill missing optional fields so KeyError never occurs
+        for col in ["amount", "allocated_to_previous", "total_paid_raw", "notes", "updated_by"]:
+            if col not in dfp.columns:
+                dfp[col] = None
+
+        shown = dfp[[
+            "employee", "Paid?", "Paid on",
+            "amount", "allocated_to_previous", "total_paid_raw",
+            "Payments", "notes", "updated_by"
+        ]].rename(columns={
             "amount": "Amount (this month)",
             "allocated_to_previous": "Allocated to previous",
             "total_paid_raw": "Total paid (all rows)"
         })
+
         st.dataframe(shown, use_container_width=True, hide_index=True)
     else:
         st.info("No records yet for this month.")
