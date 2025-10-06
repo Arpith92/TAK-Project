@@ -624,7 +624,7 @@ if mode == "Create new itinerary":
     preview_after_ref = int(round(preview_package * 0.9)) if has_ref else preview_package
 
     badge_color = "#16a34a" if preview_profit >= 4000 else "#dc2626"
-    hint = ""if preview_profit >= 4000 else " • Keep profit margin ≥ ₹4,000"
+    # hint = ""if preview_profit >= 4000 else " • Keep profit margin ≥ ₹4,000"
 
     ref_html = (
         f'<div style="padding:8px 12px; border-radius:8px; background:#7c3aed; color:white;">'
