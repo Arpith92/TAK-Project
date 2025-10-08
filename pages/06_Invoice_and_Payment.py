@@ -34,28 +34,32 @@ def require_admin():
     # --- allowed users and passwords ---
     USERS = {
         "Admin": str(st.secrets.get("admin_pass", "Arpith&92")),
-        "Kuldeep": str(st.secrets.get("kuldeep_pass", "Kuldeep@92")),  # add Kuldeep password here
+        "Kuldeep": str(st.secrets.get("kuldeep_pass", "Kuldeep@92")),
     }
 
+    if "is_admin" in st.session_state and st.session_state["is_admin"]:
+        return  # already authenticated, skip login box
+
     with st.sidebar:
-        st.markdown("### Access Portal")
-        username = st.selectbox("Select user", list(USERS.keys()))
-        password = st.text_input("Enter password", type="password", placeholder="enter password")
+        st.markdown("### 🔐 Access Portal")
+        username = st.selectbox("Select user", list(USERS.keys()), key="login_user")
+        password = st.text_input("Enter password", type="password", key="login_pass")
 
-    # --- authentication check ---
-    if (password or "").strip() != USERS.get(username, "").strip():
-        st.warning("Invalid credentials. Access restricted.")
+        login_btn = st.button("Login")
+
+    if login_btn:
+        if (password or "").strip() == USERS.get(username, "").strip():
+            st.session_state["user"] = username
+            st.session_state["is_admin"] = username in ["Admin", "Kuldeep"]
+            st.success(f"Welcome {username}! Access granted.")
+            st.rerun()  # ✅ refresh to load page content
+        else:
+            st.error("Invalid credentials. Access restricted.")
+            st.stop()
+
+    if "is_admin" not in st.session_state or not st.session_state["is_admin"]:
+        st.warning("Please log in to continue.")
         st.stop()
-
-    # --- success: mark session ---
-    st.session_state["user"] = username
-    st.session_state["is_admin"] = username in ["Admin", "Kuldeep"]
-    st.success(f"Welcome {username}! Access granted.")
-
-
-
-
-require_admin()
 
 # ================= Mongo =======================
 CAND_KEYS = ["mongo_uri", "MONGO_URI", "mongodb_uri", "MONGODB_URI"]
