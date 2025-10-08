@@ -19,16 +19,41 @@ st.title("🧾 Invoice & Payment Slip (Confirmed packages only)")
 TTL = 90  # small cache, keeps the page snappy
 
 # ================= Admin gate ==================
+#def require_admin():
+#    ADMIN_PASS_DEFAULT = "Arpith&92"
+#    ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
+#    with st.sidebar:
+#        st.markdown("### Admin access")
+ #       p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
+  #  if (p or "").strip() != ADMIN_PASS.strip():
+   #     st.stop()
+    #st.session_state["user"] = "Admin"
+    #st.session_state["is_admin"] = True
+
 def require_admin():
-    ADMIN_PASS_DEFAULT = "Arpith&92"
-    ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
+    # --- allowed users and passwords ---
+    USERS = {
+        "Admin": str(st.secrets.get("admin_pass", "Arpith&92")),
+        "Kuldeep": str(st.secrets.get("kuldeep_pass", "Kuldeep@92")),  # add Kuldeep password here
+    }
+
     with st.sidebar:
-        st.markdown("### Admin access")
-        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
-    if (p or "").strip() != ADMIN_PASS.strip():
+        st.markdown("### Access Portal")
+        username = st.selectbox("Select user", list(USERS.keys()))
+        password = st.text_input("Enter password", type="password", placeholder="enter password")
+
+    # --- authentication check ---
+    if (password or "").strip() != USERS.get(username, "").strip():
+        st.warning("Invalid credentials. Access restricted.")
         st.stop()
-    st.session_state["user"] = "Admin"
-    st.session_state["is_admin"] = True
+
+    # --- success: mark session ---
+    st.session_state["user"] = username
+    st.session_state["is_admin"] = username in ["Admin", "Kuldeep"]
+    st.success(f"Welcome {username}! Access granted.")
+
+
+
 
 require_admin()
 
