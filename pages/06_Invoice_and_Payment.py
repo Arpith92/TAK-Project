@@ -30,7 +30,7 @@ TTL = 90  # small cache, keeps the page snappy
     #st.session_state["user"] = "Admin"
     #st.session_state["is_admin"] = True
 
-#def require_admin():
+def require_admin():
     # --- allowed users and passwords ---
     USERS = {
         "Admin": str(st.secrets.get("admin_pass", "Arpith&92")),
