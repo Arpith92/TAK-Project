@@ -284,7 +284,7 @@ if recent_docs:
                     if bdel:
                         st.success(f"Deleted booking {vid}. Linked settlements removed: {sdel}.")
                         st.session_state["refresh_now"] = True
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.warning("Nothing deleted (booking not found).")
 
@@ -360,7 +360,7 @@ if sel_month:
                     if bdel:
                         st.success(f"Deleted booking {bid}. Linked settlements removed: {sdel}.")
                         st.session_state["refresh_now"] = True
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.warning("Nothing deleted (booking not found).")
     else:
