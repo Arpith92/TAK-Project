@@ -732,23 +732,19 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
     pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
+    # >>> return BYTES (not bytearray/str)
     out = pdf.output(dest="S")
-
-# Normalize to pure bytes (Streamlit's download_button needs bytes or str)
-if isinstance(out, str):
-    out_bytes = out.encode("latin-1", errors="ignore")
-elif isinstance(out, bytearray):
-    out_bytes = bytes(out)
-elif isinstance(out, bytes):
-    out_bytes = out
-else:
-    # Last resort: try bytes() constructor
-    out_bytes = bytes(out)
-
+    if isinstance(out, str):
+        out_bytes = out.encode("latin-1", errors="ignore")
+    elif isinstance(out, bytearray):
+        out_bytes = bytes(out)
+    elif isinstance(out, bytes):
+        out_bytes = out
+    else:
+        out_bytes = bytes(out)
     return out_bytes
 
-
-    def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: dict) -> bytes:
+def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: dict) -> bytes:
     pdf = InvoiceHeaderPDF()
     pdf.add_page()
 
@@ -757,7 +753,7 @@ else:
     col1_w, col2_w = 120, 66
 
     def text_part(s: str) -> str:
-    return s if pdf._unicode_ok else _ascii_fallback(s)
+        return s if pdf._unicode_ok else _ascii_fallback(s)
 
     pdf._set_font(bold=False, size=11)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"{month_label} (Driver Salary Statement: {period_label})"), ln=1)
@@ -814,21 +810,17 @@ else:
     pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
+    # >>> return BYTES (not bytearray/str)
     out = pdf.output(dest="S")
-
-# Normalize to pure bytes (Streamlit's download_button needs bytes or str)
-if isinstance(out, str):
-    out_bytes = out.encode("latin-1", errors="ignore")
-elif isinstance(out, bytearray):
-    out_bytes = bytes(out)
-elif isinstance(out, bytes):
-    out_bytes = out
-else:
-    # Last resort: try bytes() constructor
-    out_bytes = bytes(out)
-
-return out_bytes
-
+    if isinstance(out, str):
+        out_bytes = out.encode("latin-1", errors="ignore")
+    elif isinstance(out, bytearray):
+        out_bytes = bytes(out)
+    elif isinstance(out, bytes):
+        out_bytes = out
+    else:
+        out_bytes = bytes(out)
+    return out_bytes
 
 # =============================
 # UI: Month selection + modes
