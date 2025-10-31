@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
+from bson import ObjectId  # 👈 for deletes
 
 # -------------------------------------------------
 # Page
@@ -35,6 +36,12 @@ def to_display_date(x) -> str:
     if isinstance(x, date):
         return x.strftime("%Y-%m-%d")
     return str(x or "")
+
+def _as_oid(s: str) -> Optional[ObjectId]:
+    try:
+        return ObjectId(s)
+    except Exception:
+        return None
 
 # -------------------------------------------------
 # Mongo Connection
@@ -193,7 +200,8 @@ if submitted:
             "created_by": str(user),
             "created_at": datetime.utcnow(),
         }
-        col_cars.insert_one(safe_doc)
+        ins = col_cars.insert_one(safe_doc)
+        booking_id = ins.inserted_id  # 👈 for linking settlements
 
         # If money received in personal account, log settlements that reduce outstanding
         if recv_in == "Personal Account" and emp_list:
@@ -208,10 +216,36 @@ if submitted:
                     "amount": int(per_emp_amt),
                     "ref": f"Direct Car ({car_type})",
                     "notes": f"Direct booking for {client_name or 'N/A'}",
+                    "dc_booking_id": str(booking_id),  # 👈 link to allow safe deletion
                 })
 
         st.success("✅ Booking saved successfully")
         # Do not rerun automatically; keep page stable
+
+# -------------------------------------------------
+# Delete utilities
+# -------------------------------------------------
+def delete_booking_and_linked_settlements(booking_id_str: str) -> tuple[int, int]:
+    """
+    Deletes the booking and any settlements created from it.
+    Returns: (bookings_deleted, settlements_deleted)
+    """
+    oid = _as_oid(booking_id_str)
+    if not oid:
+        return (0, 0)
+
+    # fetch booking (for UI/reporting or fallback heuristics if needed)
+    booking = col_cars.find_one({"_id": oid})
+    if not booking:
+        return (0, 0)
+
+    # delete linked settlements via dc_booking_id
+    res_set = col_split.delete_many({"kind": "settlement", "dc_booking_id": str(oid)})
+
+    # delete the booking itself
+    res_book = col_cars.delete_one({"_id": oid})
+
+    return (res_book.deleted_count or 0, res_set.deleted_count or 0)
 
 # -------------------------------------------------
 # Recent Bookings (load only when asked OR after a save)
@@ -224,6 +258,37 @@ else:
     recent_docs = list(col_cars.find().sort("date", -1).limit(20))
 
 if recent_docs:
+    # ---- Manage/Delete card list (with confirm) ----
+    st.markdown("#### 🗑️ Delete / Undo (Recent)")
+    for d in recent_docs:
+        vid = str(d.get("_id", ""))
+        vdate = to_display_date(d.get("date"))
+        vclient = d.get("client_name", "") or "—"
+        vamt = int(d.get("amount", 0) or 0)
+        vrcv = d.get("received_in", "")
+        vemp = ", ".join(d.get("employees", []) or [])
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([1.2, 1.4, 1.2, 1.2])
+            c1.write(f"**Date:** {vdate}")
+            c2.write(f"**Client:** {vclient}")
+            c3.write(f"**Amount:** ₹{vamt:,}")
+            c4.write(f"**Received In:** {vrcv}")
+            st.caption(f"Employees: {vemp or '—'}  |  _id: {vid}")
+
+            cc1, cc2 = st.columns([0.35, 0.65])
+            with cc1:
+                confirm = st.checkbox("Confirm", key=f"del_confirm_{vid}")
+            with cc2:
+                if st.button("🗑️ Delete this booking", key=f"del_btn_{vid}", use_container_width=True, disabled=not confirm):
+                    bdel, sdel = delete_booking_and_linked_settlements(vid)
+                    if bdel:
+                        st.success(f"Deleted booking {vid}. Linked settlements removed: {sdel}.")
+                        st.session_state["refresh_now"] = True
+                        st.experimental_rerun()
+                    else:
+                        st.warning("Nothing deleted (booking not found).")
+
+    # ---- Simple table view below ----
     for d in recent_docs:
         d["_id"] = str(d.get("_id", ""))
         d["date"] = to_display_date(d.get("date"))
@@ -259,24 +324,44 @@ if sel_month:
         dfm.index = dfm.index + 1
         dfm.rename_axis("Sr No", inplace=True)
 
-        # Table columns (as requested): SrNo (index), Car Type, Client Name, Package Cost (=amount)
-        # plus some useful context columns
         show_cols = ["date", "car_type", "client_name", "trip_plan", "amount", "received_in", "employees", "notes"]
         for c in show_cols:
             if c not in dfm:
                 dfm[c] = ""
+
+        st.dataframe(dfm[show_cols], use_container_width=True)
 
         # Totals
         total_all = int(pd.to_numeric(dfm["amount"], errors="coerce").fillna(0).sum())
         total_bank = int(pd.to_numeric(dfm.loc[dfm["received_in"] == "Company Account", "amount"], errors="coerce").fillna(0).sum())
         total_personal = int(pd.to_numeric(dfm.loc[dfm["received_in"] == "Personal Account", "amount"], errors="coerce").fillna(0).sum())
 
-        st.dataframe(dfm[show_cols], use_container_width=True)
-
         st.markdown(
             f"**Total this month (Package Cost): ₹{total_all:,}**  \n"
             f"🏦 Cash received in **Bank/Company**: ₹{total_bank:,}  \n"
             f"👤 Cash received in **Personal**: ₹{total_personal:,}"
         )
+
+        # --- Quick delete (picker) ---
+        st.markdown("#### 🗑️ Quick delete (this month)")
+        del_options = [
+            f"{row['_id']} — {row['date']} | {row.get('client_name','')} | ₹{int(row.get('amount',0)):,} | {row.get('received_in','')}"
+            for _, row in dfm.iterrows()
+        ]
+        pick = st.selectbox("Pick a booking to delete", del_options, index=0) if del_options else None
+        if pick:
+            bid = pick.split(" — ")[0]
+            c1, c2 = st.columns([0.3, 0.7])
+            with c1:
+                confirm_mon = st.checkbox("Confirm", key=f"mon_del_confirm_{bid}")
+            with c2:
+                if st.button("🗑️ Delete selected booking", disabled=not confirm_mon, key=f"mon_del_btn_{bid}"):
+                    bdel, sdel = delete_booking_and_linked_settlements(bid)
+                    if bdel:
+                        st.success(f"Deleted booking {bid}. Linked settlements removed: {sdel}.")
+                        st.session_state["refresh_now"] = True
+                        st.experimental_rerun()
+                    else:
+                        st.warning("Nothing deleted (booking not found).")
     else:
         st.info("No bookings for this month.")
