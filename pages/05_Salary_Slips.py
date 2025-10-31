@@ -328,43 +328,66 @@ def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) 
 # =============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
+    """
+    Match Follow-up Tracker logic:
+    - Only confirmed packages
+    - booking_date within [start, end] AND on/after INCENTIVE_START_DATE
+    - Sum the 'incentive' field (already policy-computed)
+    - De-duplicate by (client_mobile, client_name, Travel date) keeping last revision
+    """
+    # enforce policy start window like tracker
+    eff_start = max(start, INCENTIVE_START_DATE)
+
     q = {
         "status": "confirmed",
         "rep_name": emp,
         "booking_date": {
-            "$gte": datetime.combine(start, datetime.min.time()),
-            "$lte": datetime.combine(end,   datetime.max.time()),
-        }
+            "$gte": datetime.combine(eff_start, datetime.min.time()),
+            "$lte": datetime.combine(end,       datetime.max.time()),
+        },
+        # optional guard: only rows that actually carry incentive (>0)
+        "incentive": {"$gt": 0}
     }
+
     rows = list(col_updates.find(q, {
         "client_mobile": 1,
         "client_name": 1,
-        "final_route": 1,
         "start_date": 1,
         "booking_date": 1,
         "incentive": 1,
         "revision": 1,
         "rep_name": 1,
     }))
+
     if not rows:
         return 0
 
     df = pd.DataFrame(rows)
-    for col in ["client_mobile","client_name","final_route","start_date","booking_date","incentive","revision"]:
-        if col not in df.columns:
-            df[col] = None
 
+    # Ensure columns exist
+    for c in ["client_mobile","client_name","start_date","booking_date","incentive","revision"]:
+        if c not in df.columns:
+            df[c] = None
+
+    # Travel date used for uniqueness (same as tracker)
     df["Travel date"] = pd.to_datetime(
-        df["start_date"].fillna(df["booking_date"]), errors="coerce"
+        df["start_date"], errors="coerce"
     ).dt.date
-    df["_key"] = df[["client_mobile","Travel date","final_route"]].astype(str).agg("-".join, axis=1)
 
-    if "revision" in df.columns:
-        df = df.sort_values(["_key","revision"], ascending=[True, False]).groupby("_key", as_index=False).first()
-    else:
-        df = df.groupby("_key", as_index=False).first()
+    # Build unique key like tracker: (Mobile, Client, Travel date)
+    df["_key"] = df[["client_mobile","client_name","Travel date"]].astype(str).agg("||".join, axis=1)
 
-    return int(df["incentive"].sum())
+    # Keep the last revision; if 'revision' missing, treat as 1
+    df["revision"] = pd.to_numeric(df["revision"], errors="coerce").fillna(1).astype(int)
+
+    # As a stable tiebreaker, keep the latest booking_date as well
+    df["_bk"] = pd.to_datetime(df["booking_date"], errors="coerce")
+
+    df = df.sort_values(["_key", "revision", "_bk"], ascending=[True, False, False]) \
+           .groupby("_key", as_index=False).first()
+
+    return int(pd.to_numeric(df["incentive"], errors="coerce").fillna(0).sum())
+
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def splitwise_expenses(emp: str, start: date, end: date) -> pd.DataFrame:
