@@ -388,13 +388,21 @@ def splitwise_expenses(emp: str, start: date, end: date) -> pd.DataFrame:
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def settlements_paid(emp: str, start: date, end: date) -> int:
+    """
+    Sum only *manual* settlements for this employee in the period.
+    Excludes settlements auto-created from Direct Car Personal Account receipts.
+    """
     q = {
         "kind": "settlement",
         "employee": emp,
         "date": {"$gte": datetime.combine(start, datetime.min.time()),
-                 "$lte": datetime.combine(end,   datetime.max.time())}
+                 "$lte": datetime.combine(end,   datetime.max.time())},
+        # Exclude Direct Car-linked settlements
+        "dc_booking_id": {"$exists": False}
     }
-    return sum(_to_int(r.get("amount",0)) for r in col_split.find(q, {"amount":1}))
+    total = sum(_to_int(r.get("amount", 0)) for r in col_split.find(q, {"amount": 1}))
+    return total
+
 
 # =============================
 # Direct Car Cash Received
