@@ -391,17 +391,28 @@ def settlements_paid(emp: str, start: date, end: date) -> int:
     """
     Sum only *manual* settlements for this employee in the period.
     Excludes settlements auto-created from Direct Car Personal Account receipts.
+    Works both with and without dc_booking_id (legacy rows).
     """
     q = {
         "kind": "settlement",
         "employee": emp,
         "date": {"$gte": datetime.combine(start, datetime.min.time()),
-                 "$lte": datetime.combine(end,   datetime.max.time())},
-        # Exclude Direct Car-linked settlements
-        "dc_booking_id": {"$exists": False}
+                 "$lte": datetime.combine(end,   datetime.max.time())}
     }
-    total = sum(_to_int(r.get("amount", 0)) for r in col_split.find(q, {"amount": 1}))
+    rows = list(col_split.find(q, {"amount": 1, "dc_booking_id": 1, "ref": 1, "notes": 1}))
+    total = 0
+    for r in rows:
+        # Exclude if linked via dc_booking_id
+        if r.get("dc_booking_id"):
+            continue
+        # Exclude legacy rows identified by text
+        ref   = (r.get("ref")   or "").lower()
+        notes = (r.get("notes") or "").lower()
+        if ("direct car" in ref) or ("direct booking" in ref) or ("direct car" in notes):
+            continue
+        total += _to_int(r.get("amount", 0))
     return total
+
 
 
 # =============================
@@ -409,17 +420,27 @@ def settlements_paid(emp: str, start: date, end: date) -> int:
 # =============================
 @st.cache_data(ttl=TTL, show_spinner=False)
 def cash_received(emp: str, start: date, end: date) -> int:
+    """
+    Sum the employee's share of Direct Car bookings marked as 'Personal Account'.
+    If multiple employees are listed on a booking, split the amount equally.
+    """
     q = {
         "date": {"$gte": datetime.combine(start, datetime.min.time()),
                  "$lte": datetime.combine(end,   datetime.max.time())}
     }
-    rows = list(col_cars.find(q, {"employees":1,"received_in":1,"amount":1}))
+    rows = list(col_cars.find(q, {"employees": 1, "received_in": 1, "amount": 1}))
     total = 0
     for r in rows:
-        if emp in (r.get("employees") or []):
-            if r.get("received_in") == "Personal Account":
-                total += _to_int(r.get("amount", 0))
+        if r.get("received_in") != "Personal Account":
+            continue
+        emps = r.get("employees") or []
+        if emp not in emps:
+            continue
+        amt = _to_int(r.get("amount", 0))
+        share = int(round(amt / max(len(emps), 1)))
+        total += share
     return total
+
 
 def calc_components(emp: str, start: date, end: date) -> dict:
     base_salary = _to_int(SALARY_MAP.get(emp, 0))
