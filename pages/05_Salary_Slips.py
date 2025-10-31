@@ -732,8 +732,21 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
     pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
-    out = pdf.output(dest="S")
-    return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
+out = pdf.output(dest="S")
+
+# Normalize to pure bytes (Streamlit's download_button needs bytes or str)
+if isinstance(out, str):
+    out_bytes = out.encode("latin-1", errors="ignore")
+elif isinstance(out, bytearray):
+    out_bytes = bytes(out)
+elif isinstance(out, bytes):
+    out_bytes = out
+else:
+    # Last resort: try bytes() constructor
+    out_bytes = bytes(out)
+
+return out_bytes
+
 
 def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: dict) -> bytes:
     pdf = InvoiceHeaderPDF()
@@ -801,8 +814,21 @@ def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: 
     pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
-    out = pdf.output(dest="S")
-    return out if isinstance(out, (bytes, bytearray)) else str(out).encode("latin-1", errors="ignore")
+out = pdf.output(dest="S")
+
+# Normalize to pure bytes (Streamlit's download_button needs bytes or str)
+if isinstance(out, str):
+    out_bytes = out.encode("latin-1", errors="ignore")
+elif isinstance(out, bytearray):
+    out_bytes = bytes(out)
+elif isinstance(out, bytes):
+    out_bytes = out
+else:
+    # Last resort: try bytes() constructor
+    out_bytes = bytes(out)
+
+return out_bytes
+
 
 # =============================
 # UI: Month selection + modes
