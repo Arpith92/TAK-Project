@@ -494,37 +494,40 @@ def calc_driver_month(driver: str, start: date, end: date) -> dict:
 # PDF Helpers (header + employee/driver slips)
 # =============================
 
-# ✅ Use Unicode-capable font if available (drop DejaVuSans.ttf into .streamlit/)
-FONT_PATH = ".streamlit/DejaVuSans.ttf"
-
-def ensure_font(pdf: FPDF):
-    """
-    Try to register a Unicode font. If unavailable, use core font and enable ASCII fallback.
-    We store a flag on the pdf object: pdf._unicode_ok = True/False
-    """
-    pdf._unicode_ok = False
-    if os.path.exists(FONT_PATH):
-        try:
-            pdf.add_font("DejaVu", "", FONT_PATH, uni=True)
-        except Exception:
-            pass
-        try:
-            pdf.add_font("DejaVu", "B", FONT_PATH, uni=True)
-        except Exception:
-            pass
-        try:
-            pdf.set_font("DejaVu", "", 11)
-            pdf._unicode_ok = True
-            return "DejaVu"
-        except Exception:
-            pass
-    # fallback
-    pdf.set_font("Helvetica", "", 11)
-    return "Helvetica"
+# ✅ Unicode-capable fonts (drop these under .streamlit/)
+FONT_REG = ".streamlit/DejaVuSans.ttf"
+FONT_BOLD = ".streamlit/DejaVuSans-Bold.ttf"  # optional but recommended
 
 def _ascii_fallback(text: str) -> str:
-    # Replace common non-ASCII symbols for safe output when Unicode font is not available
-    return (text or "").replace("₹", "Rs ").replace("®", "(R)")
+    """
+    Replace common non-ASCII symbols for safe output when Unicode font is not available.
+    """
+    s = (text or "")
+    repl = {
+        "₹": "Rs ",
+        "®": "(R)",
+        "™": "(TM)",
+        "©": "(C)",
+        "–": "-",   # en dash
+        "—": "-",   # em dash
+        "…": "...",
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "•": "*",
+        "°": " deg ",
+        "→": "->",
+        "\u00a0": " ",  # non-breaking space
+    }
+    for k, v in repl.items():
+        s = s.replace(k, v)
+    # Strip any other stray non-ASCII by encoding-latin1 ignore
+    try:
+        s.encode("latin-1")
+        return s
+    except Exception:
+        return s.encode("latin-1", errors="ignore").decode("latin-1", errors="ignore")
 
 def inr_fmt_val(n, unicode_ok: bool) -> str:
     try:
@@ -545,22 +548,74 @@ def _org_strings(unicode_ok: bool) -> Dict[str,str]:
             **ORG_BASE,
             "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"
         }
-    # ascii-safe
+    # ascii-safe for all lines
     return {
         "title": _ascii_fallback(ORG_BASE["title"]),
-        "line1": ORG_BASE["line1"],
-        "line2": ORG_BASE["line2"],
-        "footer_rights": f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"
+        "line1": _ascii_fallback(ORG_BASE["line1"]),
+        "line2": _ascii_fallback(ORG_BASE["line2"]),
+        "footer_rights": _ascii_fallback(f"All rights reserved by TravelaajKal {datetime.now().year}-{str(datetime.now().year+1)[-2:]}"),
     }
+
+def ensure_font(pdf: FPDF):
+    """
+    Try to register Unicode fonts. If unavailable, use core Helvetica and enable ASCII fallback.
+    Stores:
+      pdf._unicode_ok: bool
+      pdf._font_regular: str
+      pdf._font_bold: Optional[str]  (None if not available)
+    """
+    pdf._unicode_ok = False
+    pdf._font_regular = "Helvetica"
+    pdf._font_bold = None
+
+    reg_ok = os.path.exists(FONT_REG)
+    bold_ok = os.path.exists(FONT_BOLD)
+
+    if reg_ok:
+        try:
+            pdf.add_font("DejaVu", "", FONT_REG, uni=True)
+            if bold_ok:
+                pdf.add_font("DejaVu", "B", FONT_BOLD, uni=True)
+            # try setting to ensure usable
+            pdf.set_font("DejaVu", "", 11)
+            pdf._unicode_ok = True
+            pdf._font_regular = "DejaVu"
+            pdf._font_bold = "DejaVu" if bold_ok else None
+            return
+        except Exception:
+            # fall through to Helvetica
+            pass
+
+    # Fallback core font (ASCII only)
+    pdf.set_font("Helvetica", "", 11)
+    pdf._unicode_ok = False
+    pdf._font_regular = "Helvetica"
+    pdf._font_bold = None
 
 class InvoiceHeaderPDF(FPDF):
     def __init__(self):
         super().__init__(format="A4")
         self.set_auto_page_break(auto=True, margin=18)
-        self.set_title("Salary Statement")
-        self.set_author("Achala Holidays Pvt. Ltd.")
-        self.fontname = ensure_font(self)
+        # Use ASCII-safe title if unicode font isn't loaded yet
+        # (we'll set final fonts right after)
+        self.set_title(_ascii_fallback("Salary Statement"))
+        self.set_author(_ascii_fallback("Achala Holidays Pvt. Ltd."))
+        ensure_font(self)
         self._org = _org_strings(self._unicode_ok)
+
+    def _set_font(self, bold=False, size=11):
+        if self._unicode_ok:
+            if bold and self._font_bold:
+                self.set_font(self._font_bold, "B", size)
+            else:
+                # If bold requested but no bold TTF, use regular to avoid raising
+                self.set_font(self._font_regular, "", size)
+        else:
+            # Core Helvetica supports "B"
+            self.set_font(self._font_regular, "B" if bold else "", size)
+
+    def _safe_text(self, s: str) -> str:
+        return s if self._unicode_ok else _ascii_fallback(s)
 
     def header(self):
         self.set_draw_color(150,150,150)
@@ -569,17 +624,18 @@ class InvoiceHeaderPDF(FPDF):
             try: self.image(ORG_LOGO, x=14, y=12, w=28)
             except Exception: pass
         self.set_xy(50, 12)
-        self.set_font(self.fontname, "B", 14); self.cell(0, 7, self._org["title"], align="C", ln=1)
-        self.set_font(self.fontname, "", 10)
-        self.cell(0, 6, self._org["line1"], align="C", ln=1)
-        self.cell(0, 6, self._org["line2"], align="C", ln=1)
+        self._set_font(bold=True, size=14)
+        self.cell(0, 7, self._safe_text(self._org["title"]), align="C", ln=1)
+        self._set_font(bold=False, size=10)
+        self.cell(0, 6, self._safe_text(self._org["line1"]), align="C", ln=1)
+        self.cell(0, 6, self._safe_text(self._org["line2"]), align="C", ln=1)
         self.ln(2); self.set_draw_color(0,0,0)
         self.line(12, self.get_y(), 198, self.get_y()); self.ln(4)
 
     def footer(self):
         self.set_y(-15)
-        self.set_font(self.fontname, "", 8)
-        self.cell(0, 5, self._org["footer_rights"], ln=1, align="C")
+        self._set_font(bold=False, size=8)
+        self.cell(0, 5, self._safe_text(self._org["footer_rights"]), ln=1, align="C")
 
 def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
                        comp: dict, carry_forward: int, carry_forward_label: str,
@@ -594,22 +650,22 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
     def text_part(s: str) -> str:
         return s if pdf._unicode_ok else _ascii_fallback(s)
 
-    pdf.set_font(pdf.fontname, "", 11)
+    pdf._set_font(bold=False, size=11)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"{month_label} (Salary Statement: {period_label})"), ln=1)
     pdf.ln(1)
-    pdf.set_font(pdf.fontname, "B", 11)
+    pdf._set_font(bold=True, size=11)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"EMP NAME:  {emp}"), ln=1)
     pdf.ln(2)
 
     def header_row():
         y = pdf.get_y()
-        pdf.set_font(pdf.fontname, "B", 10)
+        pdf._set_font(bold=True, size=10)
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
         pdf.text(left + 2, y + th - 2, text_part("Particulars"))
         pdf.text(left + col1_w + 2, y + th - 2, text_part("Amount"))
         pdf.ln(th)
-        pdf.set_font(pdf.fontname, "", 10)
+        pdf._set_font(bold=False, size=10)
 
     def row(label: str, amount):
         y = pdf.get_y()
@@ -631,7 +687,7 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
 
     pdf.ln(2)
     y = pdf.get_y()
-    pdf.set_font(pdf.fontname, "B", 11)
+    pdf._set_font(bold=True, size=11)
     pdf.rect(left, y, col1_w, th)
     pdf.rect(left + col1_w, y, col2_w, th)
     pdf.text(left + 2, y + th - 2, text_part("Total Due"))
@@ -639,9 +695,9 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
     pdf.ln(th + 6)
 
     # ---- Payments section
-    pdf.set_font(pdf.fontname, "B", 10)
+    pdf._set_font(bold=True, size=10)
     pdf.set_x(left); pdf.cell(0, 6, text_part("Payments made"), ln=1)
-    pdf.set_font(pdf.fontname, "", 9)
+    pdf._set_font(bold=False, size=9)
     total_paid = 0
     if not payments:
         pdf.set_x(left); pdf.cell(0, 5, text_part("No payments recorded."), ln=1)
@@ -657,12 +713,12 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
 
     balance = total_due - total_paid
     pdf.ln(1)
-    pdf.set_font(pdf.fontname, "B", 10)
+    pdf._set_font(bold=True, size=10)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"Total Paid: {inr_fmt_val(total_paid, pdf._unicode_ok)}"), ln=1)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"Pending Balance: {inr_fmt_val(balance, pdf._unicode_ok)}"), ln=1)
 
     pdf.ln(6)
-    pdf.set_font(pdf.fontname, "", 9)
+    pdf._set_font(bold=False, size=9)
     pdf.multi_cell(0, 5, text_part("Note: This is a computer-generated statement."))
 
     pdf.ln(6)
@@ -673,7 +729,7 @@ def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
         try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
         except Exception: pass
     pdf.set_xy(sig_x, sig_y + 18)
-    pdf.set_font(pdf.fontname, "", 10)
+    pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
     out = pdf.output(dest="S")
@@ -690,22 +746,22 @@ def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: 
     def text_part(s: str) -> str:
         return s if pdf._unicode_ok else _ascii_fallback(s)
 
-    pdf.set_font(pdf.fontname, "", 11)
+    pdf._set_font(bold=False, size=11)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"{month_label} (Driver Salary Statement: {period_label})"), ln=1)
     pdf.ln(1)
-    pdf.set_font(pdf.fontname, "B", 11)
+    pdf._set_font(bold=True, size=11)
     pdf.set_x(left); pdf.cell(0, 6, text_part(f"DRIVER NAME:  {driver}"), ln=1)
     pdf.ln(2)
 
     def header_row():
         y = pdf.get_y()
-        pdf.set_font(pdf.fontname, "B", 10)
+        pdf._set_font(bold=True, size=10)
         pdf.rect(left, y, col1_w, th)
         pdf.rect(left + col1_w, y, col2_w, th)
         pdf.text(left + 2, y + th - 2, text_part("Particulars"))
         pdf.text(left + col1_w + 2, y + th - 2, text_part("Amount"))
         pdf.ln(th)
-        pdf.set_font(pdf.fontname, "", 10)
+        pdf._set_font(bold=False, size=10)
 
     def row(label: str, amount):
         y = pdf.get_y()
@@ -724,14 +780,14 @@ def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: 
 
     pdf.ln(2)
     y = pdf.get_y()
-    pdf.set_font(pdf.fontname, "B", 11)
+    pdf._set_font(bold=True, size=11)
     pdf.rect(left, y, col1_w, th)
     pdf.rect(left + col1_w, y, col2_w, th)
     pdf.text(left + 2, y + th - 2, text_part("Net Pay"))
     pdf.set_xy(left + col1_w, y); pdf.cell(col2_w - 2, th, inr_fmt_val(calc["net_pay"], pdf._unicode_ok), align="R")
     pdf.ln(th + 10)
 
-    pdf.set_font(pdf.fontname, "", 9)
+    pdf._set_font(bold=False, size=9)
     pdf.multi_cell(0, 5, text_part("Note: This is a computer-generated statement."))
 
     pdf.ln(6)
@@ -742,7 +798,7 @@ def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: 
         try: pdf.image(ORG_SIGN, x=sig_x, y=sig_y, w=sig_w)
         except Exception: pass
     pdf.set_xy(sig_x, sig_y + 18)
-    pdf.set_font(pdf.fontname, "", 10)
+    pdf._set_font(bold=False, size=10)
     pdf.cell(sig_w, 6, text_part("Authorised Signatory"), ln=1, align="C")
 
     out = pdf.output(dest="S")
@@ -751,7 +807,11 @@ def build_driver_pdf(*, driver: str, month_label: str, period_label: str, calc: 
 # =============================
 # UI: Month selection + modes
 # =============================
-emp_opts = all_employees()
+@st.cache_data(ttl=TTL, show_spinner=False)
+def _employees_cached() -> List[str]:
+    return all_employees()
+
+emp_opts = _employees_cached()
 if is_admin:
     mode = st.radio("View mode", ["Single employee", "All employees (overview)"], horizontal=True)
     view_emp = st.selectbox("View employee", emp_opts, index=(emp_opts.index(user) if user in emp_opts else 0)) if mode == "Single employee" else None
