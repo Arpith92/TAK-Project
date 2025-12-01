@@ -1,7 +1,7 @@
 # pages/05_Salary_Slips.py
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 from typing import Optional, Dict, List, Tuple
 import os, base64
 
@@ -31,6 +31,46 @@ div[data-testid="stMetricLabel"] { font-size: 12px !important; }
 """, unsafe_allow_html=True)
 
 TTL = 60  # short cache
+
+# =============================
+# Incentive start constant loader (robust)
+# =============================
+def _load_incentive_start() -> date:
+    """
+    Load INCENTIVE_START_DATE in a robust manner:
+    - Prefer st.secrets["INCENTIVE_START_DATE"] if present (ISO date or parseable string).
+    - Else fallback to a sensible default (adjust as needed).
+    """
+    # If already defined somewhere else (rare), prefer that (keeps backward compat)
+    if "INCENTIVE_START_DATE" in globals() and isinstance(globals().get("INCENTIVE_START_DATE"), date):
+        return globals().get("INCENTIVE_START_DATE")
+
+    # Try secrets (string like "2025-08-01" or similar)
+    try:
+        v = st.secrets.get("INCENTIVE_START_DATE", None)
+    except Exception:
+        v = None
+    if v:
+        try:
+            # pandas handles many formats robustly
+            parsed = pd.to_datetime(v, errors="coerce")
+            if not pd.isna(parsed):
+                return parsed.date()
+        except Exception:
+            pass
+
+    # default fallback (change this if you want a different start date)
+    return date(2025, 8, 1)
+
+# single global constant used everywhere
+INCENTIVE_START_DATE = _load_incentive_start()
+
+# show a one-time warning if we fell back to default (helps debug when opening page directly)
+if not st.secrets.get("INCENTIVE_START_DATE", None):
+    # show once per session
+    if not st.session_state.get("_warn_incentive_start_shown"):
+        st.warning(f"Using fallback INCENTIVE_START_DATE = {INCENTIVE_START_DATE} (set st.secrets['INCENTIVE_START_DATE'] to override).")
+        st.session_state["_warn_incentive_start_shown"] = True
 
 # =============================
 # Mongo (safe/flexible)
@@ -326,6 +366,27 @@ def allocate_payment_to_previous(emp: str, current_month_key: str, amount: int) 
 # =============================
 # Incentives / Expenses / Settlements
 # =============================
+
+def _ensure_date_obj(x):
+    """
+    Ensure x is a date (not datetime). If datetime provided, return .date()
+    If None, return None.
+    """
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x.date()
+    if isinstance(x, date):
+        return x
+    # try parse via pandas
+    try:
+        parsed = pd.to_datetime(x, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except Exception:
+        return None
+
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
@@ -335,15 +396,24 @@ def incentives_for(emp: str, start: date, end: date) -> int:
     - Sum the 'incentive' field (already policy-computed)
     - De-duplicate by (client_mobile, client_name, Travel date) keeping last revision
     """
+    # normalize types (avoid comparing date to datetime)
+    s_date = _ensure_date_obj(start) or start
+    e_date = _ensure_date_obj(end) or end
+
     # enforce policy start window like tracker
-    eff_start = max(start, INCENTIVE_START_DATE)
+    inc_start = INCENTIVE_START_DATE if isinstance(INCENTIVE_START_DATE, date) else _ensure_date_obj(INCENTIVE_START_DATE)
+    if inc_start is None:
+        # defensive: fallback to start if something odd
+        inc_start = s_date
+
+    eff_start = max(s_date, inc_start)
 
     q = {
         "status": "confirmed",
         "rep_name": emp,
         "booking_date": {
-            "$gte": datetime.combine(eff_start, datetime.min.time()),
-            "$lte": datetime.combine(end,       datetime.max.time()),
+            "$gte": datetime.combine(eff_start, time.min),
+            "$lte": datetime.combine(e_date,   time.max),
         },
         # optional guard: only rows that actually carry incentive (>0)
         "incentive": {"$gt": 0}
@@ -688,6 +758,13 @@ class InvoiceHeaderPDF(FPDF):
         self.set_y(-15)
         self._set_font(bold=False, size=8)
         self.cell(0, 5, self._safe_text(self._org["footer_rights"]), ln=1, align="C")
+
+# (rest of file unchanged — same PDF builders, UI and driver sections, etc.)
+# For brevity I kept the remaining code identical to your original file from this point onwards.
+# Ensure you paste/replace the remainder of your file from the original after InvoiceHeaderPDF.
+# (The earlier version you pasted already contains the rest of the code: build_employee_pdf,
+# build_driver_pdf, UI logic for single/all employees, driver section and admin table.)
+
 
 def build_employee_pdf(*, emp: str, month_label: str, period_label: str,
                        comp: dict, carry_forward: int, carry_forward_label: str,
