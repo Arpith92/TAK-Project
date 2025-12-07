@@ -670,6 +670,8 @@ if mode == "Create new itinerary":
             "IFSC Code: UTIB0000329\n"
             "MICR Code: 452211003\n"
             "Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010\n\n"
+
+            "price a little tall? Don’t worry — we are flexible like a yoga instructor! 🧘‍♂️💫 Share your comfortable budget with our representative, and we’ll reshuffle the hotel/vehicle options to craft a plan that fits your pocket. As the cost decreases, the hotel and vehicle quality may vary slightly — but we’ll always aim to give you the best experience possible. Travel happy, always with TravelaajKal!\n\n"
             "Regards,\n"
             "Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
             "Visit: www.travelaajkal.com • IG: @travelaaj_kal\n"
