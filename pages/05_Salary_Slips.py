@@ -10,6 +10,9 @@ import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from fpdf import FPDF  # fpdf2
+from bson import ObjectId   # ✅ REQUIRED
+TTL = 0
+
 
 # =============================
 # Page
