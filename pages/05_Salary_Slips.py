@@ -390,59 +390,64 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    Match Follow-up Tracker logic:
-    - Only confirmed packages
-    - booking_date within [start, end] AND on/after INCENTIVE_START_DATE
-    - Sum the 'incentive' field (already policy-computed)
-    - De-duplicate by (client_mobile, client_name, Travel date) keeping last revision
+    EXACT MATCH with Follow-up Tracker
     """
-    # normalize types (avoid comparing date to datetime)
-    s_date = _ensure_date_obj(start) or start
-    e_date = _ensure_date_obj(end) or end
 
-    # enforce policy start window like tracker
-    inc_start = INCENTIVE_START_DATE if isinstance(INCENTIVE_START_DATE, date) else _ensure_date_obj(INCENTIVE_START_DATE)
-    if inc_start is None:
-        # defensive: fallback to start if something odd
-        inc_start = s_date
+    start_d = max(start, INCENTIVE_START_DATE)
 
-    eff_start = max(s_date, inc_start)
-
-    q = {
-        "status": "confirmed",
-        "rep_name": emp,
-        "booking_date": {
-            "$gte": datetime.combine(eff_start, time.min),
-            "$lte": datetime.combine(e_date,   time.max),
+    upd_rows = list(col_updates.find(
+        {
+            "status": "confirmed",
+            "rep_name": emp,
+            "booking_date": {
+                "$gte": datetime.combine(start_d, time.min),
+                "$lte": datetime.combine(end, time.max),
+            },
+            "incentive": {"$gt": 0}
         },
-        # optional guard: only rows that actually carry incentive (>0)
-        "incentive": {"$gt": 0}
-    }
+        {"itinerary_id": 1, "booking_date": 1, "incentive": 1}
+    ))
 
-    rows = list(col_updates.find(q, {
-        "client_mobile": 1,
-        "client_name": 1,
-        "start_date": 1,
-        "booking_date": 1,
-        "incentive": 1,
-        "revision": 1,
-        "rep_name": 1,
-    }))
-
-    if not rows:
+    if not upd_rows:
         return 0
 
-    df = pd.DataFrame(rows)
+    df_u = pd.DataFrame(upd_rows)
+    df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
 
-    # Ensure columns exist
-    for c in ["client_mobile","client_name","start_date","booking_date","incentive","revision"]:
-        if c not in df.columns:
-            df[c] = None
+    its = list(col_itineraries.find(
+        {
+            "_id": {
+                "$in": [
+                    ObjectId(x) for x in df_u["itinerary_id"].unique()
+                    if ObjectId.is_valid(x)
+                ]
+            }
+        },
+        {"client_name": 1, "client_mobile": 1, "start_date": 1, "revision_num": 1}
+    ))
 
-    # Travel date used for uniqueness (same as tracker)
-    df["Travel date"] = pd.to_datetime(
-        df["start_date"], errors="coerce"
-    ).dt.date
+    df_i = pd.DataFrame([{
+        "itinerary_id": str(i["_id"]),
+        "Client": i.get("client_name"),
+        "Mobile": i.get("client_mobile"),
+        "Travel date": pd.to_datetime(i.get("start_date")).date() if i.get("start_date") else None,
+        "revision": int(i.get("revision_num", 1))
+    } for i in its])
+
+    df = df_u.merge(df_i, on="itinerary_id", how="left")
+    if df.empty:
+        return 0
+
+    df["_key"] = df[["Mobile", "Client", "Travel date"]].astype(str).agg("||".join, axis=1)
+    df["booking_date"] = pd.to_datetime(df["booking_date"])
+
+    df = (
+        df.sort_values(["_key", "revision", "booking_date"], ascending=[True, False, False])
+          .groupby("_key", as_index=False)
+          .first()
+    )
+
+    return int(df["incentive"].sum())
 
     # Build unique key like tracker: (Mobile, Client, Travel date)
     df["_key"] = df[["client_mobile","client_name","Travel date"]].astype(str).agg("||".join, axis=1)
