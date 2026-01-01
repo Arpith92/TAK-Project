@@ -285,6 +285,10 @@ def save_or_update_pay_multi(
     - 'amount' field stores only the portion counted against THIS month (i.e., total - allocated_to_previous).
     - 'total_paid_raw' keeps the sum of all entered payments for traceability.
     """
+    components = {k: _to_int(v) if isinstance(v, (int, float)) else v
+              for k, v in components.items()
+              if k != "df_exp"}
+
     total_amt = sum(_to_int(p.get("amount", 0)) for p in payments)
     amount_current = max(total_amt - _to_int(allocated_to_previous, 0), 0)
 
@@ -566,7 +570,7 @@ def calc_components(emp: str, start: date, end: date) -> dict:
         "cash_received": cash_recv,
         "net_reimb": net_reimb,
         "net_pay": net_pay,
-        "df_exp": df_exp,
+        ##"df_exp": df_exp,
     }
 
 # =============================
