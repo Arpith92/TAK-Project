@@ -393,14 +393,15 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    FINAL – MUST MATCH Follow-up Tracker EXACTLY
-    Unique client + latest revision + booking-date based
+    FINAL — Employee-wise incentives
+    MUST match Follow-up Tracker:
+    rep_name + unique client + latest revision + booking-date based
     """
 
-    # 1️⃣ Load confirmed incentives for the month
     rows = list(col_updates.find(
         {
             "status": "confirmed",
+            "rep_name": emp,                 # ✅ FINAL & CORRECT
             "incentive": {"$gt": 0},
             "booking_date": {"$ne": None},
         },
@@ -418,20 +419,19 @@ def incentives_for(emp: str, start: date, end: date) -> int:
     df_u = pd.DataFrame(rows)
     df_u["booking_date"] = pd.to_datetime(df_u["booking_date"], errors="coerce")
     df_u = df_u[df_u["booking_date"].notna()]
-
-    # 2️⃣ Policy start date
     df_u = df_u[df_u["booking_date"].dt.date >= INCENTIVE_START_DATE]
 
-    # 3️⃣ Month filter (IDENTICAL)
     target_month = start.strftime("%Y-%m")
     df_u["Month"] = df_u["booking_date"].dt.strftime("%Y-%m")
     df_u = df_u[df_u["Month"] == target_month]
-
     if df_u.empty:
         return 0
 
-    # 4️⃣ Join itinerary details (for UNIQUE logic)
-    it_ids = [ObjectId(x) for x in df_u["itinerary_id"].unique() if ObjectId.is_valid(x)]
+    it_ids = [
+        ObjectId(x) for x in df_u["itinerary_id"].unique()
+        if ObjectId.is_valid(x)
+    ]
+
     its = list(db["itineraries"].find(
         {"_id": {"$in": it_ids}},
         {
@@ -456,13 +456,13 @@ def incentives_for(emp: str, start: date, end: date) -> int:
 
     df = df_u.merge(df_i, on="itinerary_id", how="left")
 
-    # 5️⃣ UNIQUE key – EXACT SAME AS FOLLOW-UP TRACKER
     df["_key"] = df[["Mobile","Client","Travel date"]].astype(object).agg(tuple, axis=1)
-
-    df = df.sort_values(
-        ["_key", "_rev", "booking_date"],
-        ascending=[True, False, False]
-    ).groupby("_key", as_index=False).first()
+    df = (
+        df.sort_values(["_key","_rev","booking_date"],
+                       ascending=[True, False, False])
+          .groupby("_key", as_index=False)
+          .first()
+    )
 
     return int(df["incentive"].apply(_to_int).sum())
 
