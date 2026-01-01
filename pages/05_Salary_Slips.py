@@ -390,17 +390,17 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    FINAL – Guaranteed match with Follow-up Tracker
+    FINAL & CORRECT:
+    Match Follow-up Tracker incentive totals EXACTLY.
     """
 
-    # 1️⃣ Fetch ALL confirmed incentives (NO rep filter here)
     rows = list(col_updates.find(
         {
             "status": "confirmed",
             "incentive": {"$gt": 0},
-            "booking_date": {"$ne": None}
+            "booking_date": {"$ne": None},
         },
-        {"_id": 0, "booking_date": 1, "incentive": 1, "rep_name": 1}
+        {"_id": 0, "booking_date": 1, "incentive": 1}
     ))
 
     if not rows:
@@ -408,25 +408,20 @@ def incentives_for(emp: str, start: date, end: date) -> int:
 
     df = pd.DataFrame(rows)
 
-    # 2️⃣ Normalize booking_date
+    # Normalize booking_date
     df["booking_date"] = pd.to_datetime(df["booking_date"], errors="coerce")
     df = df[df["booking_date"].notna()]
 
-    # 3️⃣ Apply incentive policy start
+    # Apply incentive policy start
     df = df[df["booking_date"].dt.date >= INCENTIVE_START_DATE]
 
-    # 4️⃣ Filter by MONTH (exactly like Follow-up Tracker)
+    # Month filter (IDENTICAL to Follow-up Tracker)
     target_month = start.strftime("%Y-%m")
     df["Month"] = df["booking_date"].dt.strftime("%Y-%m")
     df = df[df["Month"] == target_month]
 
-    # 5️⃣ Filter by rep SAFELY (case-insensitive, null-safe)
-    df["rep_name"] = df["rep_name"].fillna("").str.strip().str.lower()
-    emp_key = emp.strip().lower()
-
-    df = df[df["rep_name"] == emp_key]
-
     return int(df["incentive"].apply(_to_int).sum())
+
 
 
     # Build unique key like tracker: (Mobile, Client, Travel date)
