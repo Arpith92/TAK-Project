@@ -390,12 +390,12 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    EXACT MATCH with Follow-up Tracker
+    EXACT mirror of Follow-up Tracker incentive logic
     """
 
     start_d = max(start, INCENTIVE_START_DATE)
 
-    upd_rows = list(col_updates.find(
+    rows = list(col_updates.find(
         {
             "status": "confirmed",
             "rep_name": emp,
@@ -405,42 +405,37 @@ def incentives_for(emp: str, start: date, end: date) -> int:
             },
             "incentive": {"$gt": 0}
         },
-        {"itinerary_id": 1, "booking_date": 1, "incentive": 1}
-    ))
-
-    if not upd_rows:
-        return 0
-
-    df_u = pd.DataFrame(upd_rows)
-    df_u["itinerary_id"] = df_u["itinerary_id"].astype(str)
-
-    its = list(col_itineraries.find(
         {
-            "_id": {
-                "$in": [
-                    ObjectId(x) for x in df_u["itinerary_id"].unique()
-                    if ObjectId.is_valid(x)
-                ]
-            }
-        },
-        {"client_name": 1, "client_mobile": 1, "start_date": 1, "revision_num": 1}
+            "_id": 0,
+            "client_mobile": 1,
+            "client_name": 1,
+            "start_date": 1,
+            "booking_date": 1,
+            "incentive": 1,
+            "revision": 1
+        }
     ))
 
-    df_i = pd.DataFrame([{
-        "itinerary_id": str(i["_id"]),
-        "Client": i.get("client_name"),
-        "Mobile": i.get("client_mobile"),
-        "Travel date": pd.to_datetime(i.get("start_date")).date() if i.get("start_date") else None,
-        "revision": int(i.get("revision_num", 1))
-    } for i in its])
-
-    df = df_u.merge(df_i, on="itinerary_id", how="left")
-    if df.empty:
+    if not rows:
         return 0
 
-    df["_key"] = df[["Mobile", "Client", "Travel date"]].astype(str).agg("||".join, axis=1)
-    df["booking_date"] = pd.to_datetime(df["booking_date"])
+    df = pd.DataFrame(rows)
 
+    # Normalize
+    df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+    df["revision"] = pd.to_numeric(df.get("revision", 1), errors="coerce").fillna(1).astype(int)
+    df["booking_date"] = pd.to_datetime(df["booking_date"], errors="coerce")
+
+    # Same UNIQUE KEY as Follow-up Tracker
+    df["_key"] = (
+        df["client_mobile"].astype(str)
+        + "||"
+        + df["client_name"].astype(str)
+        + "||"
+        + df["Travel date"].astype(str)
+    )
+
+    # Pick latest revision, then latest booking_date
     df = (
         df.sort_values(["_key", "revision", "booking_date"], ascending=[True, False, False])
           .groupby("_key", as_index=False)
@@ -448,6 +443,7 @@ def incentives_for(emp: str, start: date, end: date) -> int:
     )
 
     return int(df["incentive"].sum())
+
 
     # Build unique key like tracker: (Mobile, Client, Travel date)
     df["_key"] = df[["client_mobile","client_name","Travel date"]].astype(str).agg("||".join, axis=1)
