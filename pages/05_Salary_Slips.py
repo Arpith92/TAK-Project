@@ -390,7 +390,10 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    EXACT mirror of Follow-up Tracker incentive logic
+    Salary Slip incentive logic (SOURCE OF TRUTH):
+    - Sum ALL confirmed incentives for the employee
+    - Filter by booking_date month
+    - Do NOT deduplicate (tracker already finalized incentives)
     """
 
     start_d = max(start, INCENTIVE_START_DATE)
@@ -405,45 +408,13 @@ def incentives_for(emp: str, start: date, end: date) -> int:
             },
             "incentive": {"$gt": 0}
         },
-        {
-            "_id": 0,
-            "client_mobile": 1,
-            "client_name": 1,
-            "start_date": 1,
-            "booking_date": 1,
-            "incentive": 1,
-            "revision": 1
-        }
+        {"_id": 0, "incentive": 1}
     ))
 
     if not rows:
         return 0
 
-    df = pd.DataFrame(rows)
-
-    # Normalize
-    df["Travel date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
-    df["revision"] = pd.to_numeric(df.get("revision", 1), errors="coerce").fillna(1).astype(int)
-    df["booking_date"] = pd.to_datetime(df["booking_date"], errors="coerce")
-
-    # Same UNIQUE KEY as Follow-up Tracker
-    df["_key"] = (
-        df["client_mobile"].astype(str)
-        + "||"
-        + df["client_name"].astype(str)
-        + "||"
-        + df["Travel date"].astype(str)
-    )
-
-    # Pick latest revision, then latest booking_date
-    df = (
-        df.sort_values(["_key", "revision", "booking_date"], ascending=[True, False, False])
-          .groupby("_key", as_index=False)
-          .first()
-    )
-
-    return int(df["incentive"].sum())
-
+    return int(sum(_to_int(r.get("incentive", 0)) for r in rows))
 
     # Build unique key like tracker: (Mobile, Client, Travel date)
     df["_key"] = df[["client_mobile","client_name","Travel date"]].astype(str).agg("||".join, axis=1)
