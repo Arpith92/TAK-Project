@@ -390,53 +390,79 @@ def _ensure_date_obj(x):
 @st.cache_data(ttl=TTL, show_spinner=False)
 def incentives_for(emp: str, start: date, end: date) -> int:
     """
-    FINAL & CORRECT:
-    Match Follow-up Tracker incentive totals EXACTLY.
+    FINAL – MUST MATCH Follow-up Tracker EXACTLY
+    Unique client + latest revision + booking-date based
     """
 
+    # 1️⃣ Load confirmed incentives for the month
     rows = list(col_updates.find(
         {
             "status": "confirmed",
             "incentive": {"$gt": 0},
             "booking_date": {"$ne": None},
         },
-        {"_id": 0, "booking_date": 1, "incentive": 1}
+        {
+            "_id": 0,
+            "itinerary_id": 1,
+            "booking_date": 1,
+            "incentive": 1,
+        }
     ))
 
     if not rows:
         return 0
 
-    df = pd.DataFrame(rows)
+    df_u = pd.DataFrame(rows)
+    df_u["booking_date"] = pd.to_datetime(df_u["booking_date"], errors="coerce")
+    df_u = df_u[df_u["booking_date"].notna()]
 
-    # Normalize booking_date
-    df["booking_date"] = pd.to_datetime(df["booking_date"], errors="coerce")
-    df = df[df["booking_date"].notna()]
+    # 2️⃣ Policy start date
+    df_u = df_u[df_u["booking_date"].dt.date >= INCENTIVE_START_DATE]
 
-    # Apply incentive policy start
-    df = df[df["booking_date"].dt.date >= INCENTIVE_START_DATE]
-
-    # Month filter (IDENTICAL to Follow-up Tracker)
+    # 3️⃣ Month filter (IDENTICAL)
     target_month = start.strftime("%Y-%m")
-    df["Month"] = df["booking_date"].dt.strftime("%Y-%m")
-    df = df[df["Month"] == target_month]
+    df_u["Month"] = df_u["booking_date"].dt.strftime("%Y-%m")
+    df_u = df_u[df_u["Month"] == target_month]
+
+    if df_u.empty:
+        return 0
+
+    # 4️⃣ Join itinerary details (for UNIQUE logic)
+    it_ids = [ObjectId(x) for x in df_u["itinerary_id"].unique() if ObjectId.is_valid(x)]
+    its = list(db["itineraries"].find(
+        {"_id": {"$in": it_ids}},
+        {
+            "_id": 1,
+            "client_name": 1,
+            "client_mobile": 1,
+            "start_date": 1,
+            "revision_num": 1,
+        }
+    ))
+
+    df_i = pd.DataFrame([{
+        "itinerary_id": str(i["_id"]),
+        "Client": i.get("client_name",""),
+        "Mobile": i.get("client_mobile",""),
+        "Travel date": (
+            pd.to_datetime(i.get("start_date")).date()
+            if i.get("start_date") else None
+        ),
+        "_rev": int(i.get("revision_num", 1) or 1),
+    } for i in its])
+
+    df = df_u.merge(df_i, on="itinerary_id", how="left")
+
+    # 5️⃣ UNIQUE key – EXACT SAME AS FOLLOW-UP TRACKER
+    df["_key"] = df[["Mobile","Client","Travel date"]].astype(object).agg(tuple, axis=1)
+
+    df = df.sort_values(
+        ["_key", "_rev", "booking_date"],
+        ascending=[True, False, False]
+    ).groupby("_key", as_index=False).first()
 
     return int(df["incentive"].apply(_to_int).sum())
 
-
-
-    # Build unique key like tracker: (Mobile, Client, Travel date)
-    df["_key"] = df[["client_mobile","client_name","Travel date"]].astype(str).agg("||".join, axis=1)
-
-    # Keep the last revision; if 'revision' missing, treat as 1
-    df["revision"] = pd.to_numeric(df["revision"], errors="coerce").fillna(1).astype(int)
-
-    # As a stable tiebreaker, keep the latest booking_date as well
-    df["_bk"] = pd.to_datetime(df["booking_date"], errors="coerce")
-
-    df = df.sort_values(["_key", "revision", "_bk"], ascending=[True, False, False]) \
-           .groupby("_key", as_index=False).first()
-
-    return int(pd.to_numeric(df["incentive"], errors="coerce").fillna(0).sum())
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
