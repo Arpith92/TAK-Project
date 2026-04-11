@@ -996,6 +996,9 @@ elif mode == "Search itinerary":
                 "3. Bhasm-Aarti: we provide tickets; arrival/seating beyond our control; cost at actuals; subject to availability & cancellations by temple.",
                 "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
                 "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
+                "6. Bhasm-Aarti tickets are beyond company control. In case of non-availability, tickets will be attempted for the next day on a best-efforts basis. If still unavailable, the Bhasm-Aarti ticket amount will be refunded."
+                
+                
             ])
             cxl = (
                 "*Cancellation Policy:-*\n"
