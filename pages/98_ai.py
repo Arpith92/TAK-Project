@@ -1,4 +1,4 @@
-import streamlit as st
+, when i input import streamlit as st
 from openai import OpenAI
 import json
 from datetime import datetime, timedelta
@@ -210,7 +210,10 @@ if st.button("Generate Final Itinerary"):
 
     text = f"Greetings from TravelAajKal,\n\n"
     text += f"*Client Name: {client_name}*\n\n"
-    text += f"*Plan:-{days} Days {days-1} Nights {start_city}-{destinations} for {pax} Persons*\n\n"
+    # -------- PLAN LINE FORMAT --------
+    person_text = "Person" if pax == 1 else "Persons"
+    plan_destinations = destinations  # already formatted like Ujjain-Omkareshwar-Indore
+    text += f"*Plan:- {days} Days {days-1} Nights {plan_destinations} for {pax} {person_text}*\n\n"
     text += "*Itinerary:*\n"
 
     current_date = datetime.strptime(str(start_date), "%Y-%m-%d")
