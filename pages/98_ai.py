@@ -212,12 +212,11 @@ if st.button("Generate Final Itinerary"):
     text += f"*Client Name: {client_name}*\n\n"
    # -------- PLAN LINE FORMAT --------
 person_text = "Person" if pax == 1 else "Persons"
+    # Clean + dynamic destination formatting
+    dest_list = [x.strip().title() for x in destinations.split("-") if x.strip()]
+    plan_destinations = "-".join(dict.fromkeys(dest_list))  # removes duplicates also
 
-# Clean + dynamic destination formatting
-dest_list = [x.strip().title() for x in destinations.split("-") if x.strip()]
-plan_destinations = "-".join(dict.fromkeys(dest_list))  # removes duplicates also
-
-text += f"*Plan:- {days} Days {days-1} Nights {plan_destinations} for {pax} {person_text}*\n\n"
+    text += f"*Plan:- {days} Days {days-1} Nights {plan_destinations} for {pax} {person_text}*\n\n"
     text += "*Itinerary:*\n"
 
     current_date = datetime.strptime(str(start_date), "%Y-%m-%d")
