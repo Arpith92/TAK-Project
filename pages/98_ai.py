@@ -9,19 +9,26 @@ import re
 
 # ------------------ SAFE CONFIG ------------------
 
-if "OPENAI_API_KEY" not in st.secrets:
-    st.error("❌ OPENAI_API_KEY missing in Streamlit secrets")
+api_key = st.secrets.get("OPENAI_API_KEY", None)
+mongo_uri = st.secrets.get("mongo_uri", None)
+
+if not api_key:
+    st.warning("⚠️ OPENAI_API_KEY not found in secrets, trying fallback...")
+    api_key = st.text_input("Enter OpenAI API Key (temporary)", type="password")
+
+if not api_key:
+    st.error("❌ OpenAI API key missing")
     st.stop()
 
-if "mongo_uri" not in st.secrets:
-    st.error("❌ mongo_uri missing in Streamlit secrets")
+client_ai = OpenAI(api_key=api_key)
+
+if not mongo_uri:
+    st.error("❌ mongo_uri missing in secrets")
     st.stop()
 
-client_ai = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-mongo_client = MongoClient(st.secrets["mongo_uri"])
+mongo_client = MongoClient(mongo_uri)
 db = mongo_client["travelaajkal"]
 ai_collection = db["ai_itineraries"]
-
 # ------------------ HELPERS ------------------
 
 def format_places(text):
