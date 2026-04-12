@@ -37,19 +37,6 @@ def format_travel_line(text):
 
 def generate_daywise_ai(destinations, days, start_city, hotel_type):
 
-    Create a travel itinerary for India.
-
-    Destinations: {destinations}
-    Days: {days}
-    Start City: {start_city}
-
-    Rules:
-    - Medium detailed professional text
-    - Logical routing
-    - Mention travel routes
-    - Include time flow
-    - Keep attractive but concise
-
     prompt = f"""
 Create a travel itinerary for India.
 
@@ -69,10 +56,9 @@ Rules:
 Hotel Suggestion Rules:
 - Suggest hotels ONLY matching selected category
 - If Homestay - suggest homestays / guest houses
-- If Non-AC → avoid luxury hotels
-- If 3 Star → suggest mid-range hotels
-- If 5 Star → suggest premium hotels
-- Maintain good rating (preferably 4.0+ or best available in that category)
+- If Non-AC - avoid luxury hotels
+- If 3 Star - suggest mid-range hotels
+- If 5 Star - suggest premium hotels
 
 Output JSON:
 {{
@@ -89,11 +75,11 @@ Output JSON:
     "other": "₹xxxx"
   }},
   "hotel_suggestions":[
-    "Hotel Name - category appropriate",
-    "Hotel Name - category appropriate"
+    "Hotel Name",
+    "Hotel Name"
   ]
 }}
-    """
+"""
 
     response = client_ai.chat.completions.create(
         model="gpt-5.4-mini",
@@ -194,7 +180,6 @@ if st.button("Generate Final Itinerary"):
 
         ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
-    ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
     text = f"Greetings from TravelAajKal,\n\n"
     text += f"*Client Name: {client_name}*\n\n"
@@ -206,7 +191,7 @@ if st.button("Generate Final Itinerary"):
     for i, d in enumerate(ai_data["days"]):
         date_str = (current_date + timedelta(days=i)).strftime("%d-%b-%Y")
 
-        plan_text = format_travel_line(d["plan"])
+        
 
         text += f"\n*Day-{i+1}: {date_str}:*\n"
         plan_text = format_travel_line(d["plan"])
