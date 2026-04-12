@@ -321,5 +321,5 @@ Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
     st.write(ai_data.get("costing", {}))
 
     st.subheader("🏨 Hotel Suggestions")
-    for h in ai_data.get("hotel_suggestions", []):
+for h in ai_data.get("hotel_suggestions", []):
     st.write(f"- {h}")
