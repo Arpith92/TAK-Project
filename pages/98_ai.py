@@ -3,6 +3,7 @@ from openai import OpenAI
 import json
 from datetime import datetime, timedelta
 from pymongo import MongoClient
+import re
 
 # ------------------ CONFIG ------------------
 
@@ -16,6 +17,12 @@ ai_collection = db["ai_itineraries"]
 def format_places(text):
     return "-".join([x.strip().title() for x in text.split("-")])
 
+def format_travel_line(text):
+    pattern = r"([A-Za-z ]+) to ([A-Za-z ]+)"
+    def repl(match):
+        return f"{match.group(1)} to {match.group(2)} (Approx. 200 km | 4–5 hrs)"
+    return re.sub(pattern, repl, text)
+
 # ------------------ AI FUNCTION ------------------
 
 def generate_daywise_ai(destinations, days, start_city):
@@ -28,19 +35,29 @@ def generate_daywise_ai(destinations, days, start_city):
     Start City: {start_city}
 
     Rules:
-    - Medium detail (professional)
+    - Medium detailed professional text
     - Logical routing
-    - Mention time & flow
-    - Paragraph format (not bullet)
+    - Mention travel routes
+    - Include time flow
+    - Keep attractive but concise
 
     Output JSON:
     {{
       "days":[
         {{
           "day":"Day 1",
-          "plan":"paragraph description",
+          "plan":"paragraph",
           "stay":"city"
         }}
+      ],
+      "costing": {{
+        "car": "₹xxxx",
+        "hotel": "₹xxxx",
+        "other": "₹xxxx"
+      }},
+      "hotel_suggestions":[
+        "Hotel XYZ - 4.5⭐",
+        "Hotel ABC - 4.6⭐"
       ]
     }}
     """
@@ -106,14 +123,9 @@ if hotel:
     ])
 
     rooms = st.selectbox("Total Rooms", list(range(1, 31)))
-
     room_type = st.selectbox("Room Type", [
-        "Single Occupancy",
-        "Double Occupancy",
-        "Triple Occupancy",
-        "Quad Occupancy",
-        "5 Sharing",
-        "Custom"
+        "Single Occupancy", "Double Occupancy", "Triple Occupancy",
+        "Quad Occupancy", "5 Sharing", "Custom"
     ])
 
     food_plan = st.multiselect("Food Plan", ["Breakfast", "Lunch", "Dinner"])
@@ -141,11 +153,12 @@ if st.button("Generate Final Itinerary"):
     current_date = datetime.strptime(str(start_date), "%Y-%m-%d")
 
     for i, d in enumerate(ai_data["days"]):
-
         date_str = (current_date + timedelta(days=i)).strftime("%d-%b-%Y")
 
+        plan_text = format_travel_line(d["plan"])
+
         text += f"\n*Day-{i+1}: {date_str}:*\n"
-        text += f"{d['plan']}\n"
+        text += f"{plan_text}\n"
 
         stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
 
@@ -161,12 +174,9 @@ if st.button("Generate Final Itinerary"):
     text += f"*Package cost: ₹{cost}/Per Person*\n"
 
     details = []
-    if car:
-        details.append(car_type)
-    if hotel:
-        details.append(hotel_type)
-    if bhasma:
-        details.append("Bhasmarathi")
+    if car: details.append(car_type)
+    if hotel: details.append(hotel_type)
+    if bhasma: details.append("Bhasmarathi")
 
     if details:
         text += "(" + ", ".join(details) + ")\n\n"
@@ -183,9 +193,7 @@ if st.button("Generate Final Itinerary"):
         ]
 
     if hotel:
-        inc.append(
-            f"{days-1} Nights stay in hotels on {rooms} {room_type} basis with {food_text}."
-        )
+        inc.append(f"{days-1} Nights stay in hotels on {rooms} {room_type} basis with {food_text}.")
 
     if bhasma:
         inc += [
@@ -198,45 +206,63 @@ if st.button("Generate Final Itinerary"):
     # ---------------- EXCLUSIONS ----------------
 
     exclusions = "*Exclusions:-*\n" + "\n".join([
-        "1. Any meals/beverages not specified.",
-        "2. Entry fees for attractions/temples.",
+        "1. Any meals/beverages not specified – (breakfast/lunch/dinner/snacks/personal drinks).",
+        "2. Entry fees for attractions/temples unless included.",
         "3. Travel insurance.",
         "4. Personal shopping/tips.",
-        "5. Early check-in/late check-out.",
-        "6. Natural events/roadblocks.",
-        "7. Extra sightseeing."
+        "5. Early check-in/late check-out if rooms unavailable.",
+        "6. Natural events/roadblocks/personal itinerary changes.",
+        "7. Extra sightseeing not listed."
     ])
 
     # ---------------- NOTES ----------------
 
     notes = "\n*Important Notes:-*\n" + "\n".join([
         "1. Any attractions not in itinerary will be chargeable.",
-        "2. Visits subject to traffic/temple rules.",
-        "3. Bhasm-Aarti subject to availability.",
-        "4. Valid ID required for hotel check-in.",
-        "5. Extra bed chargeable."
+        "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
+        "3. Bhasm-Aarti: we provide tickets; arrival/seating beyond our control; subject to availability.",
+        "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
+        "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable.",
+        "6. Bhasm-Aarti tickets beyond company control; if unavailable amount refunded."
     ])
 
-    # ---------------- FOOTER ----------------
+    # ---------------- CANCELLATION ----------------
+
+    cxl = """*Cancellation Policy:-*
+1. 30+ days → 20% of advance deducted.
+2. 15–29 days → 50% of advance deducted.
+3. <15 days → No refund.
+4. No refund for no-shows.
+5. One-time reschedule allowed ≥15 days prior.
+"""
+
+    # ---------------- PAYMENT ----------------
+
+    pay = f"*Payment Terms:-*\n50% advance and remaining 50% after arrival at {start_city}.\n"
+
+    # ---------------- ACCOUNT ----------------
+
+    acct = """For booking confirmation, please make the advance payment to the company's current account provided below.
+
+*Company Account details:-*
+Account Name: ACHALA HOLIDAYS PVT LTD
+Bank: Axis Bank
+Account No:
+IFSC Code: UTIB0000329
+MICR Code: 452211003
+Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
+"""
+
+    # ---------------- FINAL MERGE ----------------
 
     text += "\n" + inclusions_block
     text += "\n\n" + exclusions
     text += notes
+    text += "\n" + cxl
+    text += "\n" + pay
+    text += acct
 
-    text += """
-*Cancellation Policy:-*
-1. 30+ days → 20% deduction.
-2. 15–29 days → 50% deduction.
-3. <15 days → No refund.
-"""
-
-    text += f"\n*Payment Terms:-*\n50% advance and rest after arrival at {start_city}.\n"
-
-    text += f"""
-Regards,
-{rep_name}
-Team TravelAajKal™️
-"""
+    text += f"\nRegards,\n{rep_name}\nTeam TravelAajKal™️\n"
 
     # ---------------- SAVE ----------------
 
@@ -251,3 +277,12 @@ Team TravelAajKal™️
 
     st.success("✅ Itinerary Generated & Saved")
     st.text_area("Final Itinerary", text, height=500)
+
+    # -------- INTERNAL AI DATA --------
+
+    st.subheader("💰 AI Costing (Internal Only)")
+    st.write(ai_data.get("costing", {}))
+
+    st.subheader("🏨 Hotel Suggestions (4.5⭐+)")
+    for h in ai_data.get("hotel_suggestions", []):
+        st.write(f"- {h}")
