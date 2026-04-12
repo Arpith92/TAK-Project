@@ -253,97 +253,86 @@ if st.button("Generate Final Itinerary"):
 
     # ---------------- INCLUSIONS ----------------
 
-inc = []
+    inc = []
 
-# -------- CAR --------
-if car:
-    inc += [
-        f"Entire travel as per itinerary by {car_type}.",
-        "Toll, parking, and driver bata are included.",
-        "Airport/Railway station pickup and drop."
-    ]
+    if car:
+        inc += [
+            f"Entire travel as per itinerary by {car_type}.",
+            "Toll, parking, and driver bata are included.",
+            "Airport/Railway station pickup and drop."
+        ]
 
-# -------- HOTEL --------
-if hotel:
-    from collections import Counter
+    if hotel:
+        from collections import Counter
 
-    stay_list = []
+        stay_list = []
 
-    for i, d in enumerate(ai_data["days"]):
-        if i < days-1:
-            stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
-            stay_list.append(stay_city.title())
+        for i, d in enumerate(ai_data["days"]):
+            if i < days-1:
+                stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
+                stay_list.append(stay_city.title())
 
-    stay_count = Counter(stay_list)
+        stay_count = Counter(stay_list)
 
-    for city, nights in stay_count.items():
-        inc.append(
-            f"{nights} Night stay in {city} in {hotel_type} on {rooms} {room_type} basis with {food_text}."
-        )
+        for city, nights in stay_count.items():
+            inc.append(
+                f"{nights} Night stay in {city} in {hotel_type} on {rooms} {room_type} basis with {food_text}."
+            )
 
-    inc += [
-        "Standard check-in at 12:00 PM and check-out at 10:00 AM.",
-        "Early check-in and late check-out are subject to room availability."
-    ]
+        inc += [
+            "Standard check-in at 12:00 PM and check-out at 10:00 AM.",
+            "Early check-in and late check-out are subject to room availability."
+        ]
 
-# -------- BHASMARATHI --------
-if bhasma:
-    inc += [
-        f"Pandit Ji Ganesh Mantap Bhasmarathi for {pax} Persons.",
-        "Bhasm-Aarti pickup and drop."
-    ]
+    if bhasma:
+        inc += [
+            f"Pandit Ji Ganesh Mantap Bhasmarathi for {pax} Persons.",
+            "Bhasm-Aarti pickup and drop."
+        ]
 
-# -------- FINAL BLOCK --------
-inclusions_block = "*Inclusions:-*\n" + "\n".join(
-    [f"{i+1}. {x}" for i, x in enumerate(inc)]
-) if inc else "*Inclusions:-*\n1. As per itinerary."
+    inclusions_block = "*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)])
 
     # ---------------- EXCLUSIONS ----------------
 
-exc = []
+    exc = []
 
-# -------- HOTEL BASED --------
-if hotel:
+    if hotel:
+        exc += [
+            "Any meals/beverages not specified – (breakfast/lunch/dinner/snacks/personal drinks).",
+            "Early check-in/late check-out if rooms unavailable."
+        ]
+
+    if car:
+        exc += [
+            "Entry fees for attractions/temples unless included.",
+            "Natural events/roadblocks/personal itinerary changes.",
+            "Extra sightseeing not listed.",
+            "Vehicle can be travelled wherever possible; drop till accessible points."
+        ]
+
     exc += [
-        "Any meals/beverages not specified – (breakfast/lunch/dinner/snacks/personal drinks).",
-        "Early check-in/late check-out if rooms unavailable."
+        "Travel insurance.",
+        "Personal shopping/tips."
     ]
 
-# -------- CAR BASED --------
-if car:
-    exc += [
-        "Entry fees for attractions/temples unless included.",
-        "Natural events/roadblocks/personal itinerary changes.",
-        "Extra sightseeing not listed.",
-        "Vehicle can be travelled wherever possible; in case of small roads/market areas, drop will be done till accessible points."
-    ]
-
-# -------- STATIC (ALWAYS) --------
-exc += [
-    "Travel insurance.",
-    "Personal shopping/tips."
-]
-
-# -------- FINAL BLOCK --------
-exclusions = "*Exclusions:-*\n" + "\n".join(
-    [f"{i+1}. {x}" for i, x in enumerate(exc)]
-)
+    exclusions = "*Exclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(exc)])
 
     # ---------------- NOTES ----------------
-notes_list = [
-    "1. Any attractions not in itinerary will be chargeable.",
-    "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
-    "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
-    "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
-]
 
-# Add Bhasmarathi related notes only if selected
-if bhasma:
-    notes_list.insert(2, "3. Bhasm-Aarti: we provide tickets; arrival/seating beyond our control; subject to availability.")
-    notes_list.append("6. Bhasm-Aarti tickets beyond company control; if unavailable amount refunded.")
+    notes_list = [
+        "1. Any attractions not in itinerary will be chargeable.",
+        "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
+        "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
+        "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable."
+    ]
 
-# Renumber properly
-notes = "\n*Important Notes:-*\n" + "\n".join([f"{i+1}. {note.split('. ',1)[1]}" for i, note in enumerate(notes_list)])
+    if bhasma:
+        notes_list.insert(2, "3. Bhasm-Aarti: we provide tickets; subject to availability.")
+        notes_list.append("6. Bhasm-Aarti tickets beyond company control; if unavailable amount refunded.")
+
+    notes = "\n*Important Notes:-*\n" + "\n".join(
+        [f"{i+1}. {note.split('. ',1)[1]}" for i, note in enumerate(notes_list)]
+    )
 
     # ---------------- CANCELLATION ----------------
 
@@ -361,15 +350,13 @@ notes = "\n*Important Notes:-*\n" + "\n".join([f"{i+1}. {note.split('. ',1)[1]}"
 
     # ---------------- ACCOUNT ----------------
 
-    acct = """For booking confirmation, please make the advance payment to the company's current account provided below.
+    acct = """For booking confirmation, please make the advance payment to the company's current account.
 
 *Company Account details:-*
 Account Name: ACHALA HOLIDAYS PVT LTD
 Bank: Axis Bank
 Account No: 923020071937652
 IFSC Code: UTIB0000329
-MICR Code: 452211003
-Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
 """
 
     # ---------------- FINAL MERGE ----------------
@@ -381,36 +368,30 @@ Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
     text += "\n" + pay
     text += acct
 
-text += (
-    f"\nRegards,\n"
-    f"{rep_name}\n"
-    "Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
-    "Visit: www.travelaajkal.com • IG: @travelaaj_kal\n"
-    "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
-)
+    text += (
+        f"\nRegards,\n"
+        f"{rep_name}\n"
+        "Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd\n"
+        "Visit: www.travelaajkal.com • IG: @travelaaj_kal\n"
+        "DPIIT-recognized Startup • TravelAajKal® is a registered trademark.\n"
+    )
 
     # ---------------- SAVE ----------------
 
     ai_collection.insert_one({
         "client_name": client_name,
-        "destinations": destinations,
         "itinerary": text,
         "created_at": datetime.now()
     })
 
     # ---------------- OUTPUT ----------------
 
-    # ---------------- OUTPUT ----------------
+    st.success("✅ Itinerary Generated & Saved")
+    st.text_area("Final Itinerary", text, height=500)
 
-st.success("✅ Itinerary Generated & Saved")
-st.text_area("Final Itinerary", text, height=500)
+    st.subheader("💰 AI Costing")
+    st.write(ai_data.get("costing", {}))
 
-# -------- INTERNAL AI DATA --------
-
-st.subheader("💰 AI Costing (Internal Only)")
-st.write(ai_data.get("costing", {}))
-
-st.subheader("🏨 Hotel Suggestions")
-
-for h in ai_data.get("hotel_suggestions", []):
-    st.write(f"- {h}")
+    st.subheader("🏨 Hotel Suggestions")
+    for h in ai_data.get("hotel_suggestions", []):
+        st.write(f"- {h}")
