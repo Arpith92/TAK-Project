@@ -11,6 +11,11 @@ mongo_client = MongoClient(st.secrets["mongo_uri"])
 db = mongo_client["travelaajkal"]
 ai_collection = db["ai_itineraries"]
 
+# ------------------ HELPERS ------------------
+
+def format_places(text):
+    return "-".join([x.strip().title() for x in text.split("-")])
+
 # ------------------ AI FUNCTION ------------------
 
 def generate_daywise_ai(destinations, days, start_city):
@@ -23,19 +28,18 @@ def generate_daywise_ai(destinations, days, start_city):
     Start City: {start_city}
 
     Rules:
-    - Optimize route logically
-    - Cover all destinations
-    - Assign correct stay city
-    - Max 4–5 activities per day
-    - Keep concise
+    - Medium detail (professional)
+    - Logical routing
+    - Mention time & flow
+    - Paragraph format (not bullet)
 
     Output JSON:
     {{
       "days":[
         {{
           "day":"Day 1",
-          "plan":"...",
-          "stay":"city name"
+          "plan":"paragraph description",
+          "stay":"city"
         }}
       ]
     }}
@@ -44,36 +48,82 @@ def generate_daywise_ai(destinations, days, start_city):
     response = client_ai.chat.completions.create(
         model="gpt-5.4-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.4
+        temperature=0.5
     )
 
     return json.loads(response.choices[0].message.content)
 
 # ------------------ UI ------------------
 
-st.title("🤖 AI Itinerary Generator (TravelaajKal Advanced)")
+st.title("🤖 AI Itinerary Generator - TravelaajKal")
 
 client_name = st.text_input("Client Name")
-destinations = st.text_input("Destinations (e.g. Pune-Mumbai-Shirdi)")
-start_city = st.text_input("Start City")
+destinations = format_places(st.text_input("Destinations (Pune-Mumbai-Shirdi)"))
+start_city = st.text_input("Start City").title()
 days = st.number_input("Days", min_value=1)
 
 start_date = st.date_input("Travel Start Date")
 pax = st.number_input("Total Persons", min_value=1)
 
-# Options
-car = st.checkbox("Include Car")
-hotel = st.checkbox("Include Hotel")
-bhasma = st.checkbox("Include Bhasmarathi")
+# ------------------ STAY MODE ------------------
 
-car_type = ""
-hotel_type = ""
+stay_mode = st.radio("Night Stay Mode", ["AI Suggested", "Manual Selection"])
+
+manual_stays = []
+if stay_mode == "Manual Selection":
+    for i in range(days):
+        manual_stays.append(st.text_input(f"Day {i+1} Stay"))
+
+# ------------------ VEHICLE ------------------
+
+car = st.checkbox("Include Vehicle")
 
 if car:
-    car_type = st.selectbox("Car Type", ["Innova Crysta", "Ertiga", "Sedan"])
+    car_type = st.selectbox("Vehicle Type", [
+        "Sedan AC", "Sedan Non-AC",
+        "Ertiga AC", "Ertiga Non-AC",
+        "Innova AC", "Innova Crysta AC",
+        "Tempo Traveller AC (12 Seater)",
+        "Tempo Traveller Non-AC",
+        "Mini Bus AC (21 Seater)",
+        "Bus AC (40 Seater)",
+        "Bus Non-AC"
+    ])
+
+# ------------------ HOTEL ------------------
+
+hotel = st.checkbox("Include Hotel")
 
 if hotel:
-    hotel_type = st.selectbox("Hotel Category", ["3 Star", "4 Star", "5 Star"])
+    hotel_type = st.selectbox("Hotel Category", [
+        "Non-AC Homestay",
+        "AC Homestay",
+        "Standard Non-AC Hotel",
+        "Standard AC Hotel",
+        "3 Star AC Hotel",
+        "4 Star AC Hotel",
+        "5 Star Luxury Hotel"
+    ])
+
+    rooms = st.selectbox("Total Rooms", list(range(1, 31)))
+
+    room_type = st.selectbox("Room Type", [
+        "Single Occupancy",
+        "Double Occupancy",
+        "Triple Occupancy",
+        "Quad Occupancy",
+        "5 Sharing",
+        "Custom"
+    ])
+
+    food_plan = st.multiselect("Food Plan", ["Breakfast", "Lunch", "Dinner"])
+    food_text = "/".join(food_plan) if food_plan else "No Meals"
+
+# ------------------ OTHER ------------------
+
+bhasma = st.checkbox("Include Bhasmarathi")
+
+rep_name = st.selectbox("Sales Representative", ["Arpith", "Reena", "Teena", "Kuldeep"])
 
 cost = st.text_input("Package Cost per Person")
 
@@ -83,40 +133,43 @@ if st.button("Generate Final Itinerary"):
 
     ai_data = generate_daywise_ai(destinations, days, start_city)
 
-    itinerary_text = f"Greetings from TravelAajKal,\n\n"
-    itinerary_text += f"*Client Name: {client_name}*\n\n"
-    itinerary_text += f"*Plan:-{days} Days {days-1} Nights {start_city}-{destinations} for {pax} Persons*\n\n"
-    itinerary_text += "*Itinerary:*\n"
+    text = f"Greetings from TravelAajKal,\n\n"
+    text += f"*Client Name: {client_name}*\n\n"
+    text += f"*Plan:-{days} Days {days-1} Nights {start_city}-{destinations} for {pax} Persons*\n\n"
+    text += "*Itinerary:*\n"
 
     current_date = datetime.strptime(str(start_date), "%Y-%m-%d")
 
     for i, d in enumerate(ai_data["days"]):
+
         date_str = (current_date + timedelta(days=i)).strftime("%d-%b-%Y")
 
-        itinerary_text += f"\n*Day-{i+1}: {date_str}:*\n"
-        itinerary_text += f"{d['plan']}\n"
+        text += f"\n*Day-{i+1}: {date_str}:*\n"
+        text += f"{d['plan']}\n"
+
+        stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
 
         if i < days-1:
-            itinerary_text += f"*{d['stay']} Night stay*\n"
+            text += f"*{stay_city.title()} Night stay*\n"
 
     last_dest = destinations.split("-")[-1]
 
-    itinerary_text += f"\nDrop at {last_dest} Airport or Railway Station for onward journey with divine blessings.\n\n"
+    text += f"\nDrop at {last_dest} Airport or Railway Station for onward journey with divine blessings.\n\n"
 
-    # ---------------- PACKAGE COST ----------------
+    # ---------------- COST ----------------
 
-    itinerary_text += f"*Package cost: ₹{cost}/Per Person*\n"
+    text += f"*Package cost: ₹{cost}/Per Person*\n"
 
-    details_bits = []
+    details = []
     if car:
-        details_bits.append(car_type + " car")
+        details.append(car_type)
     if hotel:
-        details_bits.append(hotel_type + " Hotel with Breakfast and Dinner")
+        details.append(hotel_type)
     if bhasma:
-        details_bits.append("Pandit Ji Ganesh Mantap Bhasmarathi")
+        details.append("Bhasmarathi")
 
-    if details_bits:
-        itinerary_text += "(" + ", ".join(details_bits) + ")\n\n"
+    if details:
+        text += "(" + ", ".join(details) + ")\n\n"
 
     # ---------------- INCLUSIONS ----------------
 
@@ -124,16 +177,15 @@ if st.button("Generate Final Itinerary"):
 
     if car:
         inc += [
-            f"Entire travel by {car_type} car.",
+            f"Entire travel by {car_type}.",
             "Toll, parking, and driver bata included.",
             "Pickup and drop included."
         ]
 
     if hotel:
-        inc += [
-            "Hotel stay on double sharing basis with breakfast and dinner.",
-            "Standard check-in at 12 PM and check-out at 10 AM."
-        ]
+        inc.append(
+            f"{days-1} Nights stay in hotels on {rooms} {room_type} basis with {food_text}."
+        )
 
     if bhasma:
         inc += [
@@ -146,83 +198,56 @@ if st.button("Generate Final Itinerary"):
     # ---------------- EXCLUSIONS ----------------
 
     exclusions = "*Exclusions:-*\n" + "\n".join([
-        "1. Any meals/beverages not specified (breakfast/lunch/dinner/snacks/personal drinks).",
-        "2. Entry fees for attractions/temples unless included.",
+        "1. Any meals/beverages not specified.",
+        "2. Entry fees for attractions/temples.",
         "3. Travel insurance.",
         "4. Personal shopping/tips.",
-        "5. Early check-in/late check-out if rooms unavailable.",
-        "6. Natural events/roadblocks/personal itinerary changes.",
-        "7. Extra sightseeing not listed."
+        "5. Early check-in/late check-out.",
+        "6. Natural events/roadblocks.",
+        "7. Extra sightseeing."
     ])
 
     # ---------------- NOTES ----------------
 
     notes = "\n*Important Notes:-*\n" + "\n".join([
         "1. Any attractions not in itinerary will be chargeable.",
-        "2. Visits subject to traffic/temple rules; closures are beyond control & non-refundable.",
-        "3. Bhasm-Aarti: we provide tickets; arrival/seating beyond our control; cost at actuals.",
-        "4. Hotel entry as per rules; valid ID required; only married couples allowed.",
-        "5. >9 yrs considered adult; <9 yrs share bed; extra bed chargeable.",
-        "6. Bhasm-Aarti tickets are beyond company control. If unavailable, amount will be refunded."
+        "2. Visits subject to traffic/temple rules.",
+        "3. Bhasm-Aarti subject to availability.",
+        "4. Valid ID required for hotel check-in.",
+        "5. Extra bed chargeable."
     ])
 
-    # ---------------- CANCELLATION ----------------
+    # ---------------- FOOTER ----------------
 
-    cxl = """*Cancellation Policy:-*
-1. 30+ days → 20% of advance deducted.
-2. 15–29 days → 50% of advance deducted.
-3. <15 days → No refund on advance.
-4. No refund for no-shows/early departures.
-5. One-time reschedule allowed ≥15 days prior.
+    text += "\n" + inclusions_block
+    text += "\n\n" + exclusions
+    text += notes
+
+    text += """
+*Cancellation Policy:-*
+1. 30+ days → 20% deduction.
+2. 15–29 days → 50% deduction.
+3. <15 days → No refund.
 """
 
-    # ---------------- PAYMENT ----------------
+    text += f"\n*Payment Terms:-*\n50% advance and rest after arrival at {start_city}.\n"
 
-    pay = f"*Payment Terms:-*\n50% advance and remaining 50% after arrival at {start_city}.\n"
-
-    # ---------------- ACCOUNT ----------------
-
-    acct = """
-For booking confirmation, please make the advance payment to the company's current account provided below.
-
-*Company Account details:-*
-Account Name: ACHALA HOLIDAYS PVT LTD
-Bank: Axis Bank
-Account No:
-IFSC Code: UTIB0000329
-MICR Code: 452211003
-Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
-
-Found the price a little tall? Don’t worry — we are flexible like a yoga instructor!
-Share your comfortable budget with our representative, and we’ll adjust accordingly.
-
+    text += f"""
 Regards,
-Team TravelAajKal™️ • Reg. Achala Holidays Pvt Ltd
-Visit: www.travelaajkal.com • IG: @travelaaj_kal
-DPIIT-recognized Startup • TravelAajKal® is a registered trademark.
+{rep_name}
+Team TravelAajKal™️
 """
 
-    # ---------------- FINAL MERGE ----------------
-
-    itinerary_text += "\n" + inclusions_block
-    itinerary_text += "\n\n" + exclusions
-    itinerary_text += notes
-    itinerary_text += "\n" + cxl
-    itinerary_text += "\n" + pay
-    itinerary_text += acct
-
-    # ---------------- SAVE TO MONGO ----------------
+    # ---------------- SAVE ----------------
 
     ai_collection.insert_one({
         "client_name": client_name,
         "destinations": destinations,
-        "days": days,
-        "pax": pax,
-        "itinerary": itinerary_text,
+        "itinerary": text,
         "created_at": datetime.now()
     })
 
     # ---------------- OUTPUT ----------------
 
     st.success("✅ Itinerary Generated & Saved")
-    st.text_area("Final Itinerary", itinerary_text, height=500)
+    st.text_area("Final Itinerary", text, height=500)
