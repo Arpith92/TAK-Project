@@ -1,4 +1,4 @@
-, when i input import streamlit as st
+import streamlit as st
 from openai import OpenAI
 import json
 from datetime import datetime, timedelta
@@ -208,13 +208,15 @@ if st.button("Generate Final Itinerary"):
         ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
 
-    text = f"Greetings from TravelAajKal,\n\n"
+        text = f"Greetings from TravelAajKal,\n\n"
     text += f"*Client Name: {client_name}*\n\n"
-   # -------- PLAN LINE FORMAT --------
-person_text = "Person" if pax == 1 else "Persons"
+
+    # -------- PLAN LINE FORMAT --------
+    person_text = "Person" if pax == 1 else "Persons"
+
     # Clean + dynamic destination formatting
     dest_list = [x.strip().title() for x in destinations.split("-") if x.strip()]
-    plan_destinations = "-".join(dict.fromkeys(dest_list))  # removes duplicates also
+    plan_destinations = "-".join(dict.fromkeys(dest_list))
 
     text += f"*Plan:- {days} Days {days-1} Nights {plan_destinations} for {pax} {person_text}*\n\n"
     text += "*Itinerary:*\n"
@@ -235,7 +237,7 @@ person_text = "Person" if pax == 1 else "Persons"
         if i < days-1:
             text += f"*{stay_city.title()} Night stay*\n"
 
-    last_dest = destinations.split("-")[-1]
+    last_dest = dest_list[-1]
 
     drop_line = generate_drop_line_ai(destinations)
     text += f"\n{drop_line}\n\n"
