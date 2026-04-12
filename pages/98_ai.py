@@ -35,6 +35,31 @@ def format_travel_line(text):
 
 # ------------------ AI FUNCTION ------------------
 
+def generate_drop_line_ai(destinations):
+
+    prompt = f"""
+    Based on the travel destinations below, generate ONLY ONE final drop sentence.
+
+    Destinations: {destinations}
+
+    Rules:
+    - If international trip → mention ONLY Airport
+    - If Indian temple/spiritual trip → include "divine blessings"
+    - Otherwise → use a pleasant closing line like "wonderful travel memories"
+    - Do NOT mention specific logic explanation
+    - Keep sentence professional
+
+    Output ONLY sentence.
+    """
+
+    response = client_ai.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+
+    return response.choices[0].message.content.strip()
+
 def generate_daywise_ai(destinations, days, start_city, hotel_type):
 
     prompt = f"""
@@ -204,7 +229,8 @@ if st.button("Generate Final Itinerary"):
 
     last_dest = destinations.split("-")[-1]
 
-    text += f"\nDrop at {last_dest} Airport or Railway Station for onward journey with divine blessings.\n\n"
+    drop_line = generate_drop_line_ai(destinations)
+    text += f"\n{drop_line}\n\n"
 
     # ---------------- COST ----------------
 
