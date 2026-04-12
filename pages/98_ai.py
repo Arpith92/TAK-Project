@@ -7,6 +7,16 @@ import re
 
 # ------------------ CONFIG ------------------
 
+# ------------------ SAFE CONFIG ------------------
+
+if "OPENAI_API_KEY" not in st.secrets:
+    st.error("❌ OPENAI_API_KEY missing in Streamlit secrets")
+    st.stop()
+
+if "mongo_uri" not in st.secrets:
+    st.error("❌ mongo_uri missing in Streamlit secrets")
+    st.stop()
+
 client_ai = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 mongo_client = MongoClient(st.secrets["mongo_uri"])
 db = mongo_client["travelaajkal"]
