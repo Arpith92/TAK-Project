@@ -35,7 +35,7 @@ def format_travel_line(text):
 
 # ------------------ AI FUNCTION ------------------
 
-def generate_daywise_ai(destinations, days, start_city):
+def generate_daywise_ai(destinations, days, start_city, hotel_type):
 
     prompt = f"""
     Create a travel itinerary for India.
@@ -51,25 +51,49 @@ def generate_daywise_ai(destinations, days, start_city):
     - Include time flow
     - Keep attractive but concise
 
-    Output JSON:
+    prompt = f"""
+Create a travel itinerary for India.
+
+Destinations: {destinations}
+Days: {days}
+Start City: {start_city}
+
+Hotel Category Selected: {hotel_type}
+
+Rules:
+- Medium detailed professional text
+- Logical routing
+- Mention travel routes
+- Include time flow
+- Keep concise
+
+Hotel Suggestion Rules:
+- Suggest hotels ONLY matching selected category
+- If Homestay → suggest homestays / guest houses
+- If Non-AC → avoid luxury hotels
+- If 3 Star → suggest mid-range hotels
+- If 5 Star → suggest premium hotels
+- Maintain good rating (preferably 4.0+ or best available in that category)
+
+Output JSON:
+{{
+  "days":[
     {{
-      "days":[
-        {{
-          "day":"Day 1",
-          "plan":"paragraph",
-          "stay":"city"
-        }}
-      ],
-      "costing": {{
-        "car": "₹xxxx",
-        "hotel": "₹xxxx",
-        "other": "₹xxxx"
-      }},
-      "hotel_suggestions":[
-        "Hotel XYZ - 4.5⭐",
-        "Hotel ABC - 4.6⭐"
-      ]
+      "day":"Day 1",
+      "plan":"paragraph",
+      "stay":"city"
     }}
+  ],
+  "costing": {{
+    "car": "₹xxxx",
+    "hotel": "₹xxxx",
+    "other": "₹xxxx"
+  }},
+  "hotel_suggestions":[
+    "Hotel Name - category appropriate",
+    "Hotel Name - category appropriate"
+  ]
+}}
     """
 
     response = client_ai.chat.completions.create(
@@ -153,7 +177,26 @@ cost = st.text_input("Package Cost per Person")
 
 if st.button("Generate Final Itinerary"):
 
-    ai_data = generate_daywise_ai(destinations, days, start_city)
+    ai_data = generate_daywise_ai(destinations, days, start_city, hotel_type if hotel else "Standard")
+
+    ai_data = generate_daywise_ai(destinations, days, start_city, hotel_type if hotel else "Standard")
+
+# -------- HOTEL FILTER LOGIC --------
+
+if hotel:
+    filtered_hotels = []
+
+    for h in ai_data.get("hotel_suggestions", []):
+        if "Homestay" in hotel_type and ("Homestay" in h or "Guest House" in h):
+            filtered_hotels.append(h)
+        elif "Non-AC" in hotel_type:
+            filtered_hotels.append(h)
+        elif "3 Star" in hotel_type and ("3" in h or "Hotel" in h):
+            filtered_hotels.append(h)
+        elif "4 Star" in hotel_type or "5 Star" in hotel_type:
+            filtered_hotels.append(h)
+
+    ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
     text = f"Greetings from TravelAajKal,\n\n"
     text += f"*Client Name: {client_name}*\n\n"
