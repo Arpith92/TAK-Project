@@ -211,8 +211,9 @@ if st.button("Generate Final Itinerary"):
     text = f"Greetings from TravelAajKal,\n\n"
     text += f"*Client Name: {client_name}*\n\n"
     # -------- PLAN LINE FORMAT --------
-person_text = "Person" if pax == 1 else "Persons"
-plan_destinations = destinations  # already formatted like Ujjain-Omkareshwar-Indore
+    # -------- PLAN LINE FORMAT --------
+    person_text = "Person" if pax == 1 else "Persons"
+    plan_destinations = destinations  
     text += f"*Plan:- {days} Days {days-1} Nights {plan_destinations} for {pax} {person_text}*\n\n"
     text += "*Itinerary:*\n"
 
