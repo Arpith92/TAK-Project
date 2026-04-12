@@ -37,7 +37,6 @@ def format_travel_line(text):
 
 def generate_daywise_ai(destinations, days, start_city, hotel_type):
 
-    prompt = f"""
     Create a travel itinerary for India.
 
     Destinations: {destinations}
@@ -69,7 +68,7 @@ Rules:
 
 Hotel Suggestion Rules:
 - Suggest hotels ONLY matching selected category
-- If Homestay → suggest homestays / guest houses
+- If Homestay - suggest homestays / guest houses
 - If Non-AC → avoid luxury hotels
 - If 3 Star → suggest mid-range hotels
 - If 5 Star → suggest premium hotels
@@ -179,22 +178,21 @@ if st.button("Generate Final Itinerary"):
 
     ai_data = generate_daywise_ai(destinations, days, start_city, hotel_type if hotel else "Standard")
 
-    ai_data = generate_daywise_ai(destinations, days, start_city, hotel_type if hotel else "Standard")
+    # -------- HOTEL FILTER LOGIC --------
+    if hotel:
+        filtered_hotels = []
 
-# -------- HOTEL FILTER LOGIC --------
+        for h in ai_data.get("hotel_suggestions", []):
+            if "Homestay" in hotel_type and ("Homestay" in h or "Guest House" in h):
+                filtered_hotels.append(h)
+            elif "Non-AC" in hotel_type:
+                filtered_hotels.append(h)
+            elif "3 Star" in hotel_type:
+                filtered_hotels.append(h)
+            elif "4 Star" in hotel_type or "5 Star" in hotel_type:
+                filtered_hotels.append(h)
 
-if hotel:
-    filtered_hotels = []
-
-    for h in ai_data.get("hotel_suggestions", []):
-        if "Homestay" in hotel_type and ("Homestay" in h or "Guest House" in h):
-            filtered_hotels.append(h)
-        elif "Non-AC" in hotel_type:
-            filtered_hotels.append(h)
-        elif "3 Star" in hotel_type and ("3" in h or "Hotel" in h):
-            filtered_hotels.append(h)
-        elif "4 Star" in hotel_type or "5 Star" in hotel_type:
-            filtered_hotels.append(h)
+        ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
     ai_data["hotel_suggestions"] = filtered_hotels if filtered_hotels else ai_data["hotel_suggestions"]
 
@@ -211,6 +209,7 @@ if hotel:
         plan_text = format_travel_line(d["plan"])
 
         text += f"\n*Day-{i+1}: {date_str}:*\n"
+        plan_text = format_travel_line(d["plan"])
         text += f"{plan_text}\n"
 
         stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
@@ -336,6 +335,6 @@ Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
     st.subheader("💰 AI Costing (Internal Only)")
     st.write(ai_data.get("costing", {}))
 
-    st.subheader("🏨 Hotel Suggestions (4.5⭐+)")
+    st.subheader("🏨 Hotel Suggestions")
     for h in ai_data.get("hotel_suggestions", []):
-        st.write(f"- {h}")
+    st.write(f"- {h}")
