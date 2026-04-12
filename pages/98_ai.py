@@ -34,12 +34,6 @@ ai_collection = db["ai_itineraries"]
 def format_places(text):
     return "-".join([x.strip().title() for x in text.split("-")])
 
-def format_travel_line(text):
-    pattern = r"([A-Za-z ]+) to ([A-Za-z ]+)"
-    def repl(match):
-        return f"{match.group(1)} to {match.group(2)} (Approx. 200 km | 4–5 hrs)"
-    return re.sub(pattern, repl, text)
-
 # ------------------ AI FUNCTION ------------------
 
 def generate_drop_line_ai(destinations):
@@ -81,7 +75,8 @@ Hotel Category Selected: {hotel_type}
 Rules:
 - Medium detailed professional text
 - Logical routing
-- Mention travel routes
+- Mention travel routes WITH APPROX DISTANCE AND TIME
+- Example: "Mumbai to Pune (Approx. 150 km | 3-4 hrs)"
 - Include time flow
 - Keep concise
 
@@ -97,7 +92,7 @@ Output JSON:
   "days":[
     {{
       "day":"Day 1",
-      "plan":"paragraph",
+      "plan":"paragraph with distance included",
       "stay":"city"
     }}
   ],
@@ -226,7 +221,7 @@ if st.button("Generate Final Itinerary"):
         
 
         text += f"\n*Day-{i+1}: {date_str}:*\n"
-        plan_text = format_travel_line(d["plan"])
+        plan_text = d["plan"]
         text += f"{plan_text}\n"
 
         stay_city = d["stay"] if stay_mode == "AI Suggested" else manual_stays[i]
