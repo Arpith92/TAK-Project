@@ -338,14 +338,17 @@ Branch: Ground Floor, 77, Dewas Road, Ujjain, MP 456010
 
     # ---------------- OUTPUT ----------------
 
-    st.success("✅ Itinerary Generated & Saved")
-    st.text_area("Final Itinerary", text, height=500)
+    # ---------------- OUTPUT ----------------
 
-    # -------- INTERNAL AI DATA --------
+st.success("✅ Itinerary Generated & Saved")
+st.text_area("Final Itinerary", text, height=500)
 
-    st.subheader("💰 AI Costing (Internal Only)")
-    st.write(ai_data.get("costing", {}))
+# -------- INTERNAL AI DATA --------
 
-    st.subheader("🏨 Hotel Suggestions")
+st.subheader("💰 AI Costing (Internal Only)")
+st.write(ai_data.get("costing", {}))
+
+st.subheader("🏨 Hotel Suggestions")
+
 for h in ai_data.get("hotel_suggestions", []):
     st.write(f"- {h}")
