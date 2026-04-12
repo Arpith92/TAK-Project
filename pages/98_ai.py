@@ -285,7 +285,7 @@ if st.button("Generate Final Itinerary"):
             "Bhasm-Aarti pickup and drop."
         ]
 
-    inclusions_block = "*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)])"\n"
+    inclusions_block = "*Inclusions:-*\n" + "\n".join([f"{i+1}. {x}" for i, x in enumerate(inc)])+"\n"
 
     # ---------------- EXCLUSIONS ----------------
 
