@@ -12,10 +12,18 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
+if st.session_state.get("loading", False):
+    st.stop()
+
+st.session_state["loading"] = True
+
 st.set_page_config(page_title="Package Update", layout="wide")
+st.set_option('runner.fastReruns', False)
+
 # ✅ Session initialization safety (VERY IMPORTANT)
 if "initialized" not in st.session_state:
     st.session_state["initialized"] = True
+
 # ------------------------------------------------------------------
 # Access guard
 # ------------------------------------------------------------------
@@ -221,24 +229,25 @@ def _month_bounds(d: date) -> Tuple[date, date]:
 # ------------------------------------------------------------------
 # Cached loaders (projections only)
 # ------------------------------------------------------------------
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_itineraries_df() -> pd.DataFrame:
-    rows = list(col_itineraries.find(
+  rows = list(
+    col_itineraries.find(
         {},
         {
             "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
             "representative": 1, "final_route": 1, "total_pax": 1,
             "start_date": 1, "end_date": 1, "upload_date": 1,
-            # new app.py totals (for reference if needed)
             "package_total": 1, "package_after_referral": 1,
             "actual_total": 1, "profit_total": 1,
-            # legacy names used in older pages
             "package_cost": 1, "discount": 1,
             "itinerary_text": 1,
-            # revisions
             "revision_num": 1
         }
-    ))
+    )
+    .sort("_id", -1)   # 🔥 newest first
+    .limit(500)       # 🔥 IMPORTANT (prevents crash)
+)
     if not rows:
         return pd.DataFrame()
     out = []
@@ -263,7 +272,7 @@ def fetch_itineraries_df() -> pd.DataFrame:
     df = pd.DataFrame(out)
     return _ensure_cols(df, ["ach_id","representative","itinerary_text"], "")
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_updates_df() -> pd.DataFrame:
     rows = list(col_updates.find(
         {},
@@ -282,7 +291,7 @@ def fetch_updates_df() -> pd.DataFrame:
         r["rep_name"] = r.get("rep_name", "")
     return pd.DataFrame(rows)
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_expenses_df() -> pd.DataFrame:
     rows = list(col_expenses.find(
         {},
@@ -302,7 +311,7 @@ def fetch_expenses_df() -> pd.DataFrame:
             r[k] = _to_int(r.get(k, 0))
     return pd.DataFrame(rows)
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_vendorpay_df() -> pd.DataFrame:
     docs = list(col_vendorpay.find({}, {"_id":0}))
     rows = []
@@ -326,7 +335,7 @@ def fetch_vendorpay_df() -> pd.DataFrame:
             })
     return pd.DataFrame(rows)
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_vendor_master() -> pd.DataFrame:
     """Vendor master list from `vendors` collection."""
     docs = list(col_vendors.find({}, {"_id":0}))
@@ -510,10 +519,12 @@ def latest_confirmed_unique_by_mobile(df_now: pd.DataFrame) -> pd.DataFrame:
 # ------------------------------------------------------------------
 # Build page data (vectorized merges + final_cost)
 # ------------------------------------------------------------------
-df_it = fetch_itineraries_df()
-if df_it.empty:
-    st.info("No packages found yet. Create in the main app first.")
-    st.stop()
+# ✅ Step 5 – prevent reload on scroll
+if "df_it" not in st.session_state:
+    df_it = fetch_itineraries_df()
+    st.session_state["df_it"] = df_it
+else:
+    df_it = st.session_state["df_it"]
 
 df_up   = fetch_updates_df()
 df_exp  = fetch_expenses_df()
@@ -619,24 +630,31 @@ with st.expander("Show recently created (last 50)"):
     created_df["delete"] = False
     show_cols = ["delete","ach_id","client_name","client_mobile","representative","Created (IST)","Created (UTC)","itinerary_id"]
     created_view = created_df[show_cols].rename(columns={"itinerary_id":"_itinerary_id"})
-    edited = st.data_editor(
-        created_view,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "delete": st.column_config.CheckboxColumn("Select"),
-            "_itinerary_id": st.column_config.TextColumn("Itinerary ID", disabled=True),
-        },
-        key="created_timeline_editor",
-    )
 
+page_size = 20   # keep small → prevents crash
+page = st.number_input("Page", min_value=1, value=1, step=1)
+start = (page - 1) * page_size
+end = start + page_size
+
+created_view_page = created_view.iloc[start:end]
+    
+    edited = st.data_editor(
+    created_view_page,   # 👈 only change here
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "delete": st.column_config.CheckboxColumn("Select"),
+        "_itinerary_id": st.column_config.TextColumn("Itinerary ID", disabled=True),
+    },
+    key="created_timeline_editor",
+)
     if st.button("🗑️ Delete selected package(s)"):
         to_del = edited[edited["delete"] == True]
         if to_del.empty:
             st.warning("No rows selected for deletion.")
         else:
             st.session_state["_pending_delete_rows"] = to_del[["_itinerary_id","client_name"]].to_dict("records")
-            st.rerun()
+            st.toast("Updated successfully")
 
 if "_pending_delete_rows" in st.session_state and st.session_state["_pending_delete_rows"]:
     rows = st.session_state["_pending_delete_rows"]
@@ -662,12 +680,12 @@ if "_pending_delete_rows" in st.session_state and st.session_state["_pending_del
                 deleted += 1
             st.session_state["_pending_delete_rows"] = []
             st.success(f"Deleted {deleted} package(s).")
-            st.rerun()
+            st.toast("Updated successfully")
     with cdel2:
         if st.button("❌ Cancel"):
             st.session_state["_pending_delete_rows"] = []
             st.info("Deletion cancelled.")
-            st.rerun()
+            st.toast("Updated successfully")
 
 st.divider()
 
@@ -783,7 +801,7 @@ else:
                 if skipped:
                     st.warning(f"Skipped: {skipped}")
                 fetch_updates_df.clear()
-                st.rerun()
+                st.toast("Updated successfully")
 
     if st.button("💾 Save row-by-row edits"):
         saved, errors = 0, 0
@@ -821,7 +839,7 @@ else:
         if errors:
             st.warning(f"{errors} row(s) skipped (missing assignee for follow-up or booking date for confirmed).")
         fetch_updates_df.clear()
-        st.rerun()
+        st.toast("Updated successfully")
 
     # --------- Client-wise history with revisions ----------
     if view_mode == "Latest per client (by mobile)":
@@ -995,7 +1013,7 @@ else:
                 try:
                     push_back_status(chosen_id, revert_to)
                     st.success(f"Moved to **{revert_to}**. It will now show in Section 1 → Update Status.")
-                    st.rerun()
+                    st.toast("Updated successfully")
                 except Exception as e:
                     st.error(f"Could not push back: {e}")
 
@@ -1031,7 +1049,7 @@ else:
                 chosen_id, client_name, booking_date, base_amount, discount, notes
             )
             st.success(f"Saved. Final: ₹{final_cost:,} • Vendor: ₹{vtot:,} • Splitwise: ₹{swtot:,} • Driver: ₹{drtot:,} • Total: ₹{total_expenses:,} • Profit: ₹{profit:,}")
-            st.rerun()
+            st.toast("Updated successfully")
 
         # ---- Vendor Payments ----
         st.markdown("### Vendor Payments")
@@ -1055,7 +1073,7 @@ else:
                         )
                         fetch_vendor_master.clear()
                         st.success("Vendor added.")
-                        st.rerun()
+                        st.toast("Updated successfully")
                     except Exception as e:
                         st.error(f"Could not add vendor: {e}")
                 else:
@@ -1107,7 +1125,7 @@ else:
                 save_vendor_rows(chosen_id, edited_vendors, final_done_new)
                 br2 = profit_breakup(chosen_id)
                 st.success(f"Vendor payments saved. Vendor: ₹{br2['vendor_total']:,} • Splitwise: ₹{br2['splitwise_total']:,} • Driver: ₹{br2['driver_total']:,} • Total: ₹{br2['total_expenses']:,} • Profit: ₹{max(final_cost_for(chosen_id)-br2['total_expenses'],0):,}")
-                st.rerun()
+                st.toast("Updated successfully")
 
         # ---- Client & Vendor Payment Summaries ----
         st.markdown("### 📑 Payment Summaries")
@@ -1231,3 +1249,8 @@ else:
 
         st.markdown("**Itinerary text**")
         st.text_area("Shared with client", value=(it.get("itinerary_text","") or ""), height=260, disabled=True)
+
+if st.session_state.get("loading", False):
+    st.stop()
+
+st.session_state["loading"] = True
