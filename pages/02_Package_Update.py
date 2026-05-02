@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
-
+st.set_page_config(page_title="Package Update", layout="wide")
 # ------------------------------------------------------------------
 # Access guard
 # ------------------------------------------------------------------
@@ -22,7 +22,7 @@ if st.session_state.get("user") in ("Teena", "Kuldeep"):
 # ------------------------------------------------------------------
 # Page config
 # ------------------------------------------------------------------
-st.set_page_config(page_title="Package Update", layout="wide")
+
 st.title("📦 Package Update (Admin)")
 
 # Optional calendar
@@ -38,15 +38,21 @@ except Exception:
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
+
     with st.sidebar:
         st.markdown("### Admin access")
-        p = st.text_input("Enter admin password", type="password", placeholder="enter pass")
-    if (p or "").strip() != ADMIN_PASS.strip():
+        p = st.text_input("Enter admin password", type="password", key="admin_pass_input")
+
+    if not p:
+        st.warning("Please enter admin password")
         st.stop()
+
+    if p.strip() != ADMIN_PASS.strip():
+        st.error("Invalid password")
+        st.stop()
+
     st.session_state["user"] = "Admin"
     st.session_state["is_admin"] = True
-
-require_admin()
 
 # ------------------------------------------------------------------
 # MongoDB (fast + cached)
