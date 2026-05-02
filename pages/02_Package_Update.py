@@ -274,7 +274,7 @@ def fetch_itineraries_df() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_updates_df() -> pd.DataFrame:
-    rows = list(col_updates.find(
+      rows = list(col_updates.find(
         {},
         {"_id": 0, "itinerary_id": 1, "status": 1, "booking_date": 1,
          "advance_amount": 1, "assigned_to": 1, "incentive": 1, "rep_name": 1}
