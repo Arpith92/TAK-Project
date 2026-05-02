@@ -230,24 +230,26 @@ def _month_bounds(d: date) -> Tuple[date, date]:
 # Cached loaders (projections only)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_itineraries_df() -> pd.DataFrame:
-  rows = list(
-    col_itineraries.find(
-        {},
-        {
-            "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
-            "representative": 1, "final_route": 1, "total_pax": 1,
-            "start_date": 1, "end_date": 1, "upload_date": 1,
-            "package_total": 1, "package_after_referral": 1,
-            "actual_total": 1, "profit_total": 1,
-            "package_cost": 1, "discount": 1,
-            "itinerary_text": 1,
-            "revision_num": 1
-        }
+    rows = list(
+        col_itineraries.find(
+            {},
+            {
+                "_id": 1, "ach_id": 1, "client_name": 1, "client_mobile": 1,
+                "representative": 1, "final_route": 1, "total_pax": 1,
+                "start_date": 1, "end_date": 1, "upload_date": 1,
+                "package_total": 1, "package_after_referral": 1,
+                "actual_total": 1, "profit_total": 1,
+                "package_cost": 1, "discount": 1,
+                "itinerary_text": 1,
+                "revision_num": 1
+            }
+        )
+        .sort("_id", -1)
+        .limit(500)
     )
-    .sort("_id", -1)   # 🔥 newest first
-    .limit(500)       # 🔥 IMPORTANT (prevents crash)
-)
+
     if not rows:
         return pd.DataFrame()
     out = []
@@ -274,7 +276,7 @@ def fetch_itineraries_df() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_updates_df() -> pd.DataFrame:
-      rows = list(col_updates.find(
+    rows = list(col_updates.find(
         {},
         {"_id": 0, "itinerary_id": 1, "status": 1, "booking_date": 1,
          "advance_amount": 1, "assigned_to": 1, "incentive": 1, "rep_name": 1}
