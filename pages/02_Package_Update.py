@@ -11,14 +11,14 @@ import pandas as pd
 import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
+
 st.set_page_config(page_title="Package Update", layout="wide")
+# ✅ Session initialization safety (VERY IMPORTANT)
+if "initialized" not in st.session_state:
+    st.session_state["initialized"] = True
 # ------------------------------------------------------------------
 # Access guard
 # ------------------------------------------------------------------
-st.session_state.setdefault("user", "Unknown")
-if st.session_state.get("user") in ("Teena", "Kuldeep"):
-    st.stop()
-
 # ------------------------------------------------------------------
 # Page config
 # ------------------------------------------------------------------
@@ -32,28 +32,39 @@ try:
 except Exception:
     CALENDAR_AVAILABLE = False
 
-# ------------------------------------------------------------------
-# Admin-only gate
-# ------------------------------------------------------------------
 def require_admin():
     ADMIN_PASS_DEFAULT = "Arpith&92"
     ADMIN_PASS = str(st.secrets.get("admin_pass", ADMIN_PASS_DEFAULT))
 
     with st.sidebar:
-        st.markdown("### Admin access")
+        st.markdown("### 🔐 Admin access")
         p = st.text_input("Enter admin password", type="password", key="admin_pass_input")
 
+    # 🔹 First load → don't break session
+    if "auth_checked" not in st.session_state:
+        st.session_state["auth_checked"] = False
+
     if not p:
-        st.warning("Please enter admin password")
+        st.info("Please enter admin password")
         st.stop()
 
     if p.strip() != ADMIN_PASS.strip():
         st.error("Invalid password")
         st.stop()
 
+    # ✅ mark authenticated
     st.session_state["user"] = "Admin"
     st.session_state["is_admin"] = True
+    st.session_state["auth_checked"] = True
+require_admin()
 
+st.session_state.setdefault("user", "Unknown")
+if st.session_state.get("user") in ("Teena", "Kuldeep"):
+    st.stop()
+
+# 🛑 Stop execution until authenticated
+if not st.session_state.get("is_admin"):
+    st.stop()
 # ------------------------------------------------------------------
 # MongoDB (fast + cached)
 # ------------------------------------------------------------------
