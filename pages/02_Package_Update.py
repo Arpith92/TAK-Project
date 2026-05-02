@@ -41,31 +41,30 @@ def require_admin():
         st.markdown("### 🔐 Admin access")
         p = st.text_input("Enter admin password", type="password", key="admin_pass_input")
 
-    # 🔹 First load → don't break session
-    if "auth_checked" not in st.session_state:
-        st.session_state["auth_checked"] = False
+    # Initialize auth state
+    if "is_admin" not in st.session_state:
+        st.session_state["is_admin"] = False
 
-    if not p:
-        st.info("Please enter admin password")
-        st.stop()
+    # If already logged in → skip
+    if st.session_state["is_admin"]:
+        return
 
-    if p.strip() != ADMIN_PASS.strip():
-        st.error("Invalid password")
-        st.stop()
+    # Only validate when user actually types something
+    if p:
+        if p.strip() == ADMIN_PASS.strip():
+            st.session_state["is_admin"] = True
+            st.session_state["user"] = "Admin"
+            st.success("Login successful")
+            st.rerun()
+        else:
+            st.error("Invalid password")
 
-    # ✅ mark authenticated
-    st.session_state["user"] = "Admin"
-    st.session_state["is_admin"] = True
-    st.session_state["auth_checked"] = True
-require_admin()
-
-st.session_state.setdefault("user", "Unknown")
-if st.session_state.get("user") in ("Teena", "Kuldeep"):
+    # IMPORTANT: Only stop AFTER UI renders
     st.stop()
 
 # 🛑 Stop execution until authenticated
-if not st.session_state.get("is_admin"):
-    st.stop()
+#if not st.session_state.get("is_admin"):
+#    st.stop()
 # ------------------------------------------------------------------
 # MongoDB (fast + cached)
 # ------------------------------------------------------------------
@@ -669,7 +668,7 @@ if "_pending_delete_rows" in st.session_state and st.session_state["_pending_del
                 col_expenses.delete_many({"itinerary_id": iid})
                 col_vendorpay.delete_many({"itinerary_id": iid})
                 deleted += 1
-            st.session_state["_pending_delete_rows"] = []
+            rows = st.session_state.get("_pending_delete_rows", [])
             st.success(f"Deleted {deleted} package(s).")
             st.toast("Updated successfully")
     with cdel2:
