@@ -630,24 +630,21 @@ with st.expander("Show recently created (last 50)"):
     created_df["delete"] = False
     show_cols = ["delete","ach_id","client_name","client_mobile","representative","Created (IST)","Created (UTC)","itinerary_id"]
     created_view = created_df[show_cols].rename(columns={"itinerary_id":"_itinerary_id"})
-
-page_size = 20   # keep small → prevents crash
-page = st.number_input("Page", min_value=1, value=1, step=1)
-start = (page - 1) * page_size
-end = start + page_size
-
-created_view_page = created_view.iloc[start:end]
-    
+    page_size = 20   # keep small → prevents crash
+    page = st.number_input("Page", min_value=1, value=1, step=1)
+    start = (page - 1) * page_size
+    end = start + page_size
+    created_view_page = created_view.iloc[start:end]
     edited = st.data_editor(
-    created_view_page,   # 👈 only change here
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "delete": st.column_config.CheckboxColumn("Select"),
-        "_itinerary_id": st.column_config.TextColumn("Itinerary ID", disabled=True),
-    },
-    key="created_timeline_editor",
-)
+        created_view_page,   # 👈 only change here
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "delete": st.column_config.CheckboxColumn("Select"),
+            "_itinerary_id": st.column_config.TextColumn("Itinerary ID", disabled=True),
+        },
+        key="created_timeline_editor",
+    )
     if st.button("🗑️ Delete selected package(s)"):
         to_del = edited[edited["delete"] == True]
         if to_del.empty:
