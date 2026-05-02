@@ -41,27 +41,32 @@ def require_admin():
         st.markdown("### 🔐 Admin access")
         p = st.text_input("Enter admin password", type="password", key="admin_pass_input")
 
-    # Initialize auth state
+    # initialize once
     if "is_admin" not in st.session_state:
         st.session_state["is_admin"] = False
 
-    # If already logged in → skip
+    # already logged in → allow full page
     if st.session_state["is_admin"]:
-        return
+        return True
 
-    # Only validate when user actually types something
-    if p:
-        if p.strip() == ADMIN_PASS.strip():
-            st.session_state["is_admin"] = True
-            st.session_state["user"] = "Admin"
-            st.success("Login successful")
-            st.rerun()
-        else:
-            st.error("Invalid password")
+    # show UI but DO NOT stop session
+    if not p:
+        st.warning("Enter admin password to continue")
+        return False
 
-    # IMPORTANT: Only stop AFTER UI renders
+    if p.strip() == ADMIN_PASS.strip():
+        st.session_state["is_admin"] = True
+        st.session_state["user"] = "Admin"
+        st.success("Login successful")
+        st.experimental_rerun()
+    else:
+        st.error("Invalid password")
+        return False
+
+# Call admin check
+if not require_admin():
     st.stop()
-
+    
 # 🛑 Stop execution until authenticated
 #if not st.session_state.get("is_admin"):
 #    st.stop()
