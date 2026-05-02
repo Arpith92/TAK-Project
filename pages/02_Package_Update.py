@@ -12,10 +12,6 @@ import streamlit as st
 from bson import ObjectId
 from pymongo import MongoClient
 
-if st.session_state.get("loading", False):
-    st.stop()
-
-st.session_state["loading"] = True
 st.set_page_config(page_title="Package Update", layout="wide")
 # ✅ Session initialization safety (VERY IMPORTANT)
 if "initialized" not in st.session_state:
@@ -1245,7 +1241,3 @@ else:
         st.markdown("**Itinerary text**")
         st.text_area("Shared with client", value=(it.get("itinerary_text","") or ""), height=260, disabled=True)
 
-if st.session_state.get("loading", False):
-    st.stop()
-
-st.session_state["loading"] = True
