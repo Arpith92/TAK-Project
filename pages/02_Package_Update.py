@@ -16,10 +16,7 @@ if st.session_state.get("loading", False):
     st.stop()
 
 st.session_state["loading"] = True
-
 st.set_page_config(page_title="Package Update", layout="wide")
-st.set_option('runner.fastReruns', False)
-
 # ✅ Session initialization safety (VERY IMPORTANT)
 if "initialized" not in st.session_state:
     st.session_state["initialized"] = True
@@ -229,7 +226,6 @@ def _month_bounds(d: date) -> Tuple[date, date]:
 # ------------------------------------------------------------------
 # Cached loaders (projections only)
 # ------------------------------------------------------------------
-@st.cache_data(ttl=300, show_spinner=False)
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_itineraries_df() -> pd.DataFrame:
     rows = list(
